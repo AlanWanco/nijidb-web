@@ -133,7 +133,7 @@ onMounted(loadSettings);
             <div class="form-heading subsection-heading"><span class="form-number">02</span><div><p class="form-kicker">NOTIFICATION BRIDGE</p><h2>OneBot V11 HTTP</h2></div></div>
             <label>接口地址<input v-model="settings.onebot_url" placeholder="http://127.0.0.1:3000"></label>
             <label>Access Token<input v-model="settings.onebot_token" type="password"></label>
-            <label>接收目标<input v-model="settings.onebot_target" placeholder="private:QQ号 或群号"></label>
+            <label>接收目标<input v-model="settings.onebot_target" placeholder="private:QQ号 或 group:群号"><small>私聊填写 private:QQ号，群组填写 group:群号。</small></label>
             <label>身份备注<input v-model="settings.onebot_profile"></label>
             <div class="actions">
               <button :disabled="saving">{{ saving ? "保存中……" : "保存设置" }}</button>

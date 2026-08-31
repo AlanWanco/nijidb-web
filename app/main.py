@@ -353,6 +353,9 @@ async def send_onebot(message: str, config: dict[str, str]) -> None:
     if target.startswith("private:"):
         path, key = "/send_private_msg", "user_id"
         target = target.removeprefix("private:")
+    elif target.startswith("group:"):
+        path, key = "/send_group_msg", "group_id"
+        target = target.removeprefix("group:")
     else:
         path, key = "/send_group_msg", "group_id"
     headers = {"Content-Type": "application/json"}

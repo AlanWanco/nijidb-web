@@ -79,6 +79,16 @@ onBeforeUnmount(() => {
       </nav>
     </header>
     <RouterView />
-    <footer>数据源：<a href="https://www.lovelive-anime.jp/nijigasaki/cd.php" target="_blank" rel="noopener noreferrer">lovelive-anime.jp</a></footer>
+    <footer>
+      <span class="footer-source">数据源：<a href="https://www.lovelive-anime.jp/nijigasaki/cd.php" target="_blank" rel="noopener noreferrer">lovelive-anime.jp</a></span>
+      <span class="footer-divider" aria-hidden="true"></span>
+      <span class="footer-title">友链</span>
+      <span class="footer-links">
+        <a href="https://events.nijigaku.fans/" target="_blank" rel="noopener noreferrer">Nijigaku Events</a>
+        <a href="https://ll-fans.jp/" target="_blank" rel="noopener noreferrer">LL-Fans</a>
+        <a href="https://anilive.nekoss.cn/" target="_blank" rel="noopener noreferrer">AniLive</a>
+        <a href="https://anilive-library.nekoss.cn/" target="_blank" rel="noopener noreferrer">AniLive Library</a>
+      </span>
+    </footer>
   </div>
 </template>

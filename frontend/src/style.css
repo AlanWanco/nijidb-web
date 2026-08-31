@@ -1727,9 +1727,48 @@ button.secondary,
 }
 
 footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 9px 14px;
   margin-top: 20px;
   padding: 28px 24px;
   background: color-mix(in srgb, var(--surface) 52%, transparent);
+}
+
+.footer-source,
+.footer-title,
+.footer-links {
+  display: inline-flex;
+  align-items: center;
+}
+
+.footer-title {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.footer-divider {
+  width: 1px;
+  height: 13px;
+  background: var(--line);
+}
+
+.footer-links {
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px 14px;
+}
+
+.footer-links a {
+  font-size: 11px;
+  text-decoration: none;
+  transition: color 160ms ease, opacity 160ms ease;
+}
+
+.footer-links a:hover {
+  opacity: .72;
 }
 
 @media (max-width: 700px) {
@@ -1933,6 +1972,20 @@ footer {
   .login-card {
     margin-top: 14px;
     padding: 30px 22px;
+  }
+
+  footer {
+    flex-direction: column;
+    gap: 10px;
+    padding: 24px 16px;
+  }
+
+  .footer-divider {
+    display: none;
+  }
+
+  .footer-links {
+    gap: 6px 12px;
   }
 }
 

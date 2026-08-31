@@ -457,7 +457,20 @@ input:focus-visible {
 
 .release-switch > a:last-child,
 .release-switch > .switch-button:last-child {
+  grid-template-columns: 1fr auto;
   text-align: right;
+}
+
+.release-switch > a:last-child .switch-arrow,
+.release-switch > .switch-button:last-child .switch-arrow {
+  grid-column: 2;
+}
+
+.release-switch > a:last-child small,
+.release-switch > a:last-child strong,
+.release-switch > .switch-button:last-child small,
+.release-switch > .switch-button:last-child strong {
+  grid-column: 1;
 }
 
 .release-switch small {

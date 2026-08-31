@@ -657,6 +657,11 @@ async def api_manual_sync(request: Request) -> dict[str, Any]:
     return {"changed_count": changed, "error": error}
 
 
+@app.get("/rainbow.svg", include_in_schema=False)
+async def rainbow_favicon():
+    return FileResponse(FRONTEND_DIST / "rainbow.svg", media_type="image/svg+xml")
+
+
 @app.get("/{path:path}")
 async def frontend(path: str):
     index = FRONTEND_DIST / "index.html"

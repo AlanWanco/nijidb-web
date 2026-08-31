@@ -6,6 +6,7 @@ import hmac
 import json
 import re
 import os
+import secrets
 import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -24,6 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = Path(os.getenv("DATA_DIR", "/data")) / "nijidb.sqlite3"
 MEDIA_DIR = DB_PATH.parent / "images"
 FRONTEND_DIST = ROOT / "frontend" / "dist"
+PASSWORD_ITERATIONS = 310_000
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 stop_event = asyncio.Event()
 sync_lock = asyncio.Lock()
@@ -36,9 +38,30 @@ def db() -> sqlite3.Connection:
     return connection
 
 
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, PASSWORD_ITERATIONS)
+    return f"pbkdf2_sha256${PASSWORD_ITERATIONS}${salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, encoded: str) -> bool:
+    try:
+        algorithm, iterations, salt, expected = encoded.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), int(iterations))
+        return hmac.compare_digest(digest.hex(), expected)
+    except (TypeError, ValueError):
+        return False
+
+
 def init_db() -> None:
     if os.getenv("ADMIN_SECRET", "change-me") == "change-me":
         print("WARNING: ADMIN_SECRET is using the insecure default")
+    admin_password = os.getenv("ADMIN_PASSWORD")
+    if not admin_password:
+        admin_password = "admin"
+        print("WARNING: ADMIN_PASSWORD is using the insecure default", flush=True)
     with db() as conn:
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -70,6 +93,7 @@ def init_db() -> None:
             "onebot_token": os.getenv("ONEBOT_TOKEN", ""),
             "onebot_target": os.getenv("ONEBOT_TARGET", ""),
             "onebot_profile": os.getenv("ONEBOT_PROFILE", "bot"),
+            "admin_password_hash": hash_password(admin_password),
         }
         for key, value in defaults.items():
             conn.execute("INSERT OR IGNORE INTO settings VALUES (?, ?)", (key, value))
@@ -78,6 +102,17 @@ def init_db() -> None:
 def settings() -> dict[str, str]:
     with db() as conn:
         return {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM settings")}
+
+
+def public_settings() -> dict[str, str]:
+    values = settings()
+    values.pop("admin_password_hash", None)
+    return values
+
+
+def admin_cookie_value(password_hash: str) -> str:
+    secret = os.getenv("ADMIN_SECRET", "change-me")
+    return hmac.new(secret.encode(), f"admin:{password_hash}".encode(), hashlib.sha256).hexdigest()
 
 
 def decode_json(value: str | None, fallback: Any) -> Any:
@@ -107,8 +142,8 @@ def release_summary(row: sqlite3.Row) -> dict[str, Any]:
 
 def admin_cookie(request: Request) -> bool:
     raw = request.cookies.get("nijidb_admin", "")
-    secret = os.getenv("ADMIN_SECRET", "change-me")
-    return bool(raw and hmac.compare_digest(raw, hmac.new(secret.encode(), b"admin", hashlib.sha256).hexdigest()))
+    expected = admin_cookie_value(settings().get("admin_password_hash", ""))
+    return bool(raw and hmac.compare_digest(raw, expected))
 
 
 def require_api_admin(request: Request) -> None:
@@ -117,9 +152,7 @@ def require_api_admin(request: Request) -> None:
 
 
 def set_admin_cookie(response: JSONResponse) -> None:
-    secret = os.getenv("ADMIN_SECRET", "change-me")
-    value = hmac.new(secret.encode(), b"admin", hashlib.sha256).hexdigest()
-    response.set_cookie("nijidb_admin", value, httponly=True, samesite="strict")
+    response.set_cookie("nijidb_admin", admin_cookie_value(settings().get("admin_password_hash", "")), httponly=True, samesite="strict")
 
 
 def normalized_settings(values: dict[str, Any]) -> dict[str, str]:
@@ -530,7 +563,7 @@ async def api_login(request: Request) -> JSONResponse:
         raise HTTPException(400, "请求格式无效")
     username = str(payload.get("username", ""))
     password = str(payload.get("password", ""))
-    if hmac.compare_digest(username, os.getenv("ADMIN_USERNAME", "admin")) and hmac.compare_digest(password, os.getenv("ADMIN_PASSWORD", "admin")):
+    if hmac.compare_digest(username, os.getenv("ADMIN_USERNAME", "admin")) and verify_password(password, settings().get("admin_password_hash", "")):
         response = JSONResponse({"authenticated": True})
         set_admin_cookie(response)
         return response
@@ -547,7 +580,7 @@ async def api_logout() -> JSONResponse:
 @app.get("/api/admin/settings")
 async def api_get_settings(request: Request) -> dict[str, dict[str, str]]:
     require_api_admin(request)
-    return {"settings": settings()}
+    return {"settings": public_settings()}
 
 
 @app.patch("/api/admin/settings")
@@ -586,6 +619,32 @@ async def api_test_onebot(request: Request) -> dict[str, str]:
         print(f"[onebot] test failed: {type(exc).__name__}", flush=True)
         raise HTTPException(502, "OneBot 请求失败，请检查接口地址、Token 和接收目标") from exc
     return {"message": "测试消息已发送"}
+
+
+@app.patch("/api/admin/password")
+async def api_change_password(request: Request) -> dict[str, str]:
+    require_api_admin(request)
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "请求格式无效") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "请求格式无效")
+    current_password = payload.get("current_password")
+    new_password = payload.get("new_password")
+    confirm_password = payload.get("confirm_password")
+    if not all(isinstance(value, str) for value in (current_password, new_password, confirm_password)):
+        raise HTTPException(400, "密码格式无效")
+    if not verify_password(current_password, settings().get("admin_password_hash", "")):
+        raise HTTPException(400, "当前密码错误")
+    if len(new_password) < 8:
+        raise HTTPException(400, "新密码至少需要 8 位")
+    if len(new_password) > 256:
+        raise HTTPException(400, "新密码不能超过 256 位")
+    if new_password != confirm_password:
+        raise HTTPException(400, "两次输入的新密码不一致")
+    save_settings({"admin_password_hash": hash_password(new_password)})
+    return {"message": "管理员密码已更新"}
 
 
 @app.post("/api/admin/sync")

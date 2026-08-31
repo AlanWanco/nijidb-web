@@ -48,7 +48,10 @@ onBeforeUnmount(() => window.removeEventListener("keydown", handleKeydown));
 
 <template>
   <main class="page">
-    <RouterLink class="back" to="/">← 返回专辑目录</RouterLink>
+    <div class="detail-topline">
+      <RouterLink class="back" to="/"><span aria-hidden="true">←</span> 返回专辑目录</RouterLink>
+      <span class="keyboard-hint">← / → 浏览发行</span>
+    </div>
     <p v-if="loading" class="state">正在读取专辑……</p>
     <p v-else-if="error" class="state error">{{ error }}</p>
     <template v-else-if="release">
@@ -65,8 +68,11 @@ onBeforeUnmount(() => window.removeEventListener("keydown", handleKeydown));
 
       <article class="release">
         <div class="release-cover">
-          <img v-if="release.cover_url" :src="release.cover_url" :alt="release.title">
-          <div v-else class="missing">NO<br>COVER</div>
+          <div class="release-cover-art">
+            <img v-if="release.cover_url" :src="release.cover_url" :alt="release.title">
+            <div v-else class="missing">NO<br>COVER</div>
+          </div>
+          <div class="release-cover-meta"><span>NIJIGASAKI / RELEASE</span><strong>{{ release.id }}</strong></div>
         </div>
         <div class="release-info">
           <p class="eyebrow">ALBUM / {{ release.id }}</p>
@@ -85,7 +91,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", handleKeydown));
       </article>
 
       <section class="tracks">
-        <div class="section-heading"><p class="eyebrow">TRACKLIST</p><h2>收录内容</h2></div>
+        <div class="section-heading"><div><p class="eyebrow">TRACKLIST</p><h2>收录内容</h2></div><span class="section-count">{{ tracks.length }} TRACKS</span></div>
         <div v-for="track in tracks" :key="`${track.disc}-${track.number}-${track.title}`" class="track-row">
           <span class="track-no">{{ track.disc }}<br>{{ String(track.number).padStart(2, "0") }}</span>
           <div>
@@ -97,7 +103,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", handleKeydown));
       </section>
 
       <section v-if="extras.length" class="extras">
-        <div class="section-heading"><p class="eyebrow">BONUS / LINKS</p><h2>特典与相关链接</h2></div>
+        <div class="section-heading"><div><p class="eyebrow">BONUS / LINKS</p><h2>特典与相关链接</h2></div><span class="section-count">{{ extras.length }} ITEMS</span></div>
         <div class="extra-grid">
           <article v-for="(extra, index) in extras" :key="`${extra.title}-${index}`" class="extra-panel">
             <h3>{{ extra.title }}</h3>

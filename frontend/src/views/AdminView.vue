@@ -12,12 +12,16 @@ const settings = reactive({
   onebot_target: "",
   onebot_profile: "bot",
 });
+const passwordForm = reactive({ current_password: "", new_password: "", confirm_password: "" });
 const loading = ref(true);
 const saving = ref(false);
 const testing = ref(false);
 const syncing = ref(false);
+const changingPassword = ref(false);
 const message = ref("");
 const error = ref("");
+const passwordMessage = ref("");
+const passwordError = ref("");
 
 function showError(requestError) {
   if (requestError.status === 401) {
@@ -71,6 +75,22 @@ async function testOnebot() {
   }
 }
 
+async function changePassword() {
+  changingPassword.value = true;
+  passwordMessage.value = "";
+  passwordError.value = "";
+  try {
+    const data = await api("/api/admin/password", { method: "PATCH", body: { ...passwordForm } });
+    passwordMessage.value = data.message;
+    Object.assign(passwordForm, { current_password: "", new_password: "", confirm_password: "" });
+  } catch (requestError) {
+    if (requestError.status === 401) showError(requestError);
+    else passwordError.value = requestError.message || "密码修改失败";
+  } finally {
+    changingPassword.value = false;
+  }
+}
+
 async function syncNow() {
   syncing.value = true;
   message.value = "";
@@ -98,32 +118,44 @@ onMounted(loadSettings);
   <main class="page narrow-page">
     <section class="settings">
       <div class="settings-heading">
-        <div><p class="eyebrow">CONTROL ROOM</p><h1>运行设置</h1></div>
+        <div><p class="eyebrow">CONTROL ROOM / 01</p><h1>运行设置</h1><p class="settings-intro">调整同步节奏、通知出口与本地档案的维护方式。</p></div>
         <button class="secondary" type="button" @click="logout">退出登录</button>
       </div>
       <p v-if="loading" class="state">正在读取设置……</p>
       <template v-else>
         <p v-if="message" class="success">{{ message }}</p>
         <p v-if="error" class="state error">{{ error }}</p>
-        <form @submit.prevent="saveSettings">
-          <h2>抓取</h2>
-          <label>整页目录检查（分钟）<input v-model="settings.interval_minutes" type="number" min="5" max="60"><small>检查目录顺序、新专辑和封面，范围 5–60 分钟。</small></label>
-          <label>异步详情检查（分钟）<input v-model="settings.detail_interval_minutes" type="number" min="1" max="30"><small>检查 cd_detail.php 中的最新专辑详情，范围 1–30 分钟。</small></label>
-          <h2>OneBot V11 HTTP</h2>
-          <label>接口地址<input v-model="settings.onebot_url" placeholder="http://127.0.0.1:3000"></label>
-          <label>Access Token<input v-model="settings.onebot_token" type="password"></label>
-          <label>接收目标<input v-model="settings.onebot_target" placeholder="private:QQ号 或群号"></label>
-          <label>身份备注<input v-model="settings.onebot_profile"></label>
-          <div class="actions">
-            <button :disabled="saving">{{ saving ? "保存中……" : "保存设置" }}</button>
-            <button type="button" class="secondary" :disabled="testing" @click="testOnebot">{{ testing ? "发送中……" : "发送测试消息" }}</button>
-          </div>
-        </form>
-        <form class="sync" @submit.prevent="syncNow">
-          <h2>立即检查</h2>
-          <p>手动执行一次网页检查；首次初始化不会发送通知。</p>
-          <button class="secondary" :disabled="syncing">{{ syncing ? "同步中……" : "立即同步" }}</button>
-        </form>
+        <div class="settings-stack">
+          <form class="settings-card" @submit.prevent="saveSettings">
+            <div class="form-heading"><span class="form-number">01</span><div><p class="form-kicker">SYNC ENGINE</p><h2>抓取</h2></div></div>
+            <label>整页目录检查（分钟）<input v-model="settings.interval_minutes" type="number" min="5" max="60"><small>检查目录顺序、新专辑和封面，范围 5–60 分钟。</small></label>
+            <label>异步详情检查（分钟）<input v-model="settings.detail_interval_minutes" type="number" min="1" max="30"><small>检查 cd_detail.php 中的最新专辑详情，范围 1–30 分钟。</small></label>
+            <div class="form-heading subsection-heading"><span class="form-number">02</span><div><p class="form-kicker">NOTIFICATION BRIDGE</p><h2>OneBot V11 HTTP</h2></div></div>
+            <label>接口地址<input v-model="settings.onebot_url" placeholder="http://127.0.0.1:3000"></label>
+            <label>Access Token<input v-model="settings.onebot_token" type="password"></label>
+            <label>接收目标<input v-model="settings.onebot_target" placeholder="private:QQ号 或群号"></label>
+            <label>身份备注<input v-model="settings.onebot_profile"></label>
+            <div class="actions">
+              <button :disabled="saving">{{ saving ? "保存中……" : "保存设置" }}</button>
+              <button type="button" class="secondary" :disabled="testing" @click="testOnebot">{{ testing ? "发送中……" : "发送测试消息" }}</button>
+            </div>
+          </form>
+          <form class="settings-card password-form" @submit.prevent="changePassword">
+            <div class="form-heading"><span class="form-number">03</span><div><p class="form-kicker">ACCESS CONTROL</p><h2>修改管理员密码</h2></div></div>
+            <p class="muted">新密码至少 8 位，修改后会持久化到数据卷。</p>
+            <p v-if="passwordMessage" class="success">{{ passwordMessage }}</p>
+            <p v-if="passwordError" class="state error">{{ passwordError }}</p>
+            <label>当前密码<input v-model="passwordForm.current_password" type="password" autocomplete="current-password" required></label>
+            <label>新密码<input v-model="passwordForm.new_password" type="password" autocomplete="new-password" minlength="8" required></label>
+            <label>确认新密码<input v-model="passwordForm.confirm_password" type="password" autocomplete="new-password" minlength="8" required></label>
+            <button :disabled="changingPassword">{{ changingPassword ? "修改中……" : "修改密码" }}</button>
+          </form>
+          <form class="settings-card sync" @submit.prevent="syncNow">
+            <div class="form-heading"><span class="form-number">04</span><div><p class="form-kicker">MANUAL RUN</p><h2>立即检查</h2></div></div>
+            <p>手动执行一次网页检查；首次初始化不会发送通知。</p>
+            <button class="secondary" :disabled="syncing">{{ syncing ? "同步中……" : "立即同步" }}</button>
+          </form>
+        </div>
       </template>
     </section>
   </main>

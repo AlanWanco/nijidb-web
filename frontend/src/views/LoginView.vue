@@ -26,15 +26,18 @@ async function login() {
 
 <template>
   <main class="page narrow-page">
-    <section class="login">
-      <p class="eyebrow">PRIVATE AREA</p>
+    <section class="login login-card">
+      <div class="login-emblem" aria-hidden="true">虹</div>
+      <p class="eyebrow">PRIVATE AREA / 01</p>
       <h1>管理员登录</h1>
+      <p class="login-intro">进入控制室，管理资料同步、通知和本地档案。</p>
       <p v-if="error" class="state error">{{ error }}</p>
       <form @submit.prevent="login">
         <label>账号<input v-model="username" autocomplete="username" required></label>
         <label>密码<input v-model="password" type="password" autocomplete="current-password" required></label>
-        <button :disabled="loading">{{ loading ? "登录中……" : "进入设置" }}</button>
+        <button :disabled="loading"><span>{{ loading ? "登录中……" : "进入设置" }}</span><span aria-hidden="true">↗</span></button>
       </form>
+      <p class="login-footnote">AUTHORIZED PERSONNEL ONLY · NIJIGASAKI DB</p>
     </section>
   </main>
 </template>

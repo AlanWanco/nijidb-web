@@ -66,10 +66,14 @@ onBeforeUnmount(() => {
 <template>
   <div class="app-shell">
     <header class="site-header">
-      <RouterLink class="brand" to="/"><span>虹</span> NIJIGASAKI DB</RouterLink>
-      <nav>
+      <RouterLink class="brand" to="/">
+        <span class="brand-mark" aria-hidden="true"><b>虹</b><i></i></span>
+        <span class="brand-copy"><strong>NIJIGASAKI DB</strong><small>OFFICIAL MUSIC INDEX</small></span>
+      </RouterLink>
+      <nav class="site-nav">
         <RouterLink to="/">目录</RouterLink>
         <RouterLink to="/admin">设置</RouterLink>
+        <span class="nav-divider" aria-hidden="true"></span>
         <button type="button" class="icon-button" :title="themeTitle" aria-label="切换主题" @click="cycleTheme" v-html="themeIcon"></button>
         <PalettePicker :flavor="flavor" :selected="palette" @select="setPalette" />
       </nav>

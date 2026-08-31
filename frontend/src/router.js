@@ -5,16 +5,22 @@ import ReleaseView from "./views/ReleaseView.vue";
 import LoginView from "./views/LoginView.vue";
 import AdminView from "./views/AdminView.vue";
 
+const appTitle = "Nijigasaki DB";
+
 const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: "/", component: HomeView },
-    { path: "/release/:releaseId", component: ReleaseView },
-    { path: "/admin/login", component: LoginView },
-    { path: "/admin", component: AdminView, meta: { requiresAuth: true } },
+    { path: "/", component: HomeView, meta: { title: "虹咲音乐档案" } },
+    { path: "/release/:releaseId", component: ReleaseView, meta: { title: "发行详情" } },
+    { path: "/admin/login", component: LoginView, meta: { title: "管理员登录" } },
+    { path: "/admin", component: AdminView, meta: { requiresAuth: true, title: "设置" } },
     { path: "/:pathMatch(.*)*", redirect: "/" },
   ],
   scrollBehavior: () => ({ top: 0 }),
+});
+
+router.afterEach(to => {
+  document.title = to.meta.title ? `${to.meta.title} · ${appTitle}` : appTitle;
 });
 
 router.beforeEach(async (to) => {

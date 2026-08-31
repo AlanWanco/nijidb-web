@@ -88,6 +88,7 @@ onBeforeUnmount(() => {
         <a href="https://ll-fans.jp/" target="_blank" rel="noopener noreferrer">LL-Fans</a>
         <a href="https://anilive.nekoss.cn/" target="_blank" rel="noopener noreferrer">AniLive</a>
         <a href="https://anilive-library.nekoss.cn/" target="_blank" rel="noopener noreferrer">AniLive Library</a>
+        <a href="https://github.com/AlanWanco/nijidb-web" target="_blank" rel="noopener noreferrer">github.com/AlanWanco/nijidb-web</a>
       </span>
     </footer>
   </div>

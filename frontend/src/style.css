@@ -140,6 +140,46 @@ input:focus-visible {
   white-space: nowrap;
 }
 
+.brand-area {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: clamp(18px, 3vw, 42px);
+}
+
+.section-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.section-nav a,
+.section-nav span {
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: var(--muted);
+  font-size: 13px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.section-nav a:hover,
+.section-nav a.router-link-active {
+  border-color: color-mix(in srgb, var(--accent) 22%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.section-nav .music-link {
+  color: var(--accent);
+}
+
+.section-nav .planned {
+  cursor: default;
+  opacity: .42;
+}
+
 .brand-mark {
   display: inline-grid;
   width: 34px;
@@ -737,6 +777,22 @@ footer a {
 
   .brand {
     font-size: 12px;
+  }
+
+  .brand-area {
+    flex-wrap: wrap;
+    gap: 6px 10px;
+  }
+
+  .section-nav {
+    flex-wrap: wrap;
+    gap: 2px;
+  }
+
+  .section-nav a,
+  .section-nav span {
+    padding: 5px 6px;
+    font-size: 10px;
   }
 
   nav {

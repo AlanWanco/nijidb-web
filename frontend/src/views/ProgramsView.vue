@@ -590,7 +590,7 @@ onUnmounted(() => document.removeEventListener("click", closeCastFilter));
         </div>
         <h2>{{ selectedProgram.title }}</h2>
         <div class="program-occurrence-card" :class="{ cancelled: selectedEvent.occurrenceStatus === 'cancelled' }">
-            <span>{{ eventEpisodeLabel({ extendedProps: selectedEvent }) }} · {{ occurrenceAirStatus(selectedEvent) }}</span>
+             <span>{{ eventEpisodeLabel({ extendedProps: selectedEvent }) }} · {{ selectedEvent.delivery === "live" ? "直播" : "录播" }} · {{ occurrenceAirStatus(selectedEvent) }}</span>
           <strong>{{ fullDateLabel(selectedEvent.date) }}</strong>
           <b v-if="selectedEvent.time">{{ selectedEvent.time }}</b>
            <small>显示时区：{{ deviceTimeZone }}；排期时区：{{ timezoneLabel(selectedEvent.timezone) }}</small>

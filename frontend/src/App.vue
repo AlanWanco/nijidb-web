@@ -85,7 +85,7 @@ onBeforeUnmount(() => {
         </RouterLink>
         <span class="nav-divider" aria-hidden="true"></span>
         <div class="theme-switch" role="group" aria-label="显示模式">
-          <button v-for="option in themeOptions" :key="option.value" type="button" :class="{ selected: theme === option.value }" :aria-pressed="theme === option.value" :title="option.description" @click="setTheme(option.value)">
+          <button v-for="option in themeOptions" :key="option.value" type="button" :class="{ selected: theme === option.value }" :aria-pressed="theme === option.value" :aria-label="option.label" :title="option.description" @click="setTheme(option.value)">
             <svg v-if="option.value === 'system'" class="theme-switch-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"></rect><path d="M8 21h8m-4-4v4"></path></svg>
             <svg v-else-if="option.value === 'latte'" class="theme-switch-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.5"></circle><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4m11.4-11.4 1.4-1.4"></path></svg>
             <svg v-else class="theme-switch-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.8A8.5 8.5 0 1 1 9.2 3.5a6.8 6.8 0 0 0 11.3 11.3Z"></path></svg>

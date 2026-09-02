@@ -352,7 +352,7 @@ onUnmounted(() => document.removeEventListener("click", closeCastFilter));
             <article v-for="row in visibleOccurrences" :key="`${row.id || 'generated'}-${row.original_date}`" class="program-readonly-episode" :class="{ cancelled: row.status === 'cancelled' }">
                <div class="program-readonly-episode-heading"><strong>{{ episodeLabel(row) }}</strong><span class="program-status" :class="occurrenceStateClass(row)">{{ occurrenceStatus(row) }}</span></div>
                <time>{{ dateLabel(row.date) }}{{ row.time ? ` · ${row.time}` : " · 全天" }}</time>
-               <small>{{ occurrenceSourceLabel(row) }}{{ row.guests?.length ? ` · 嘉宾 ${row.guests.length} 人` : "" }}</small>
+                <small>{{ occurrenceSourceLabel(row) }} · {{ row.delivery === "live" ? "直播" : "录播" }}{{ row.guests?.length ? ` · 嘉宾 ${row.guests.length} 人` : "" }}</small>
                <div v-if="occurrenceLinkItems(row).length" class="program-episode-links">
                  <template v-for="link in occurrenceLinkItems(row)" :key="link.key">
                    <a v-if="link.href" class="program-meta-link" :href="link.href" target="_blank" rel="noopener noreferrer">{{ link.label }}：{{ link.display }} ↗</a>

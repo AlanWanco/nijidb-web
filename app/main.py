@@ -214,9 +214,10 @@ def init_db() -> None:
            id INTEGER PRIMARY KEY AUTOINCREMENT,
            program_id TEXT NOT NULL,
            original_date TEXT NOT NULL,
-           generated_date TEXT NOT NULL DEFAULT '',
-           original_time TEXT NOT NULL DEFAULT '',
-           source_url TEXT NOT NULL DEFAULT '',
+            generated_date TEXT NOT NULL DEFAULT '',
+            original_time TEXT NOT NULL DEFAULT '',
+            delivery TEXT NOT NULL DEFAULT '',
+            source_url TEXT NOT NULL DEFAULT '',
            mirror_url TEXT NOT NULL DEFAULT '',
            subtitle_url TEXT NOT NULL DEFAULT '',
            status TEXT NOT NULL DEFAULT 'scheduled',
@@ -266,6 +267,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE program_occurrences ADD COLUMN mirror_url TEXT NOT NULL DEFAULT ''")
         if "subtitle_url" not in occurrence_columns:
             conn.execute("ALTER TABLE program_occurrences ADD COLUMN subtitle_url TEXT NOT NULL DEFAULT ''")
+        if "delivery" not in occurrence_columns:
+            conn.execute("ALTER TABLE program_occurrences ADD COLUMN delivery TEXT NOT NULL DEFAULT ''")
         seed_program_periods(conn)
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(releases)")}
         if "position" not in columns:
@@ -457,6 +460,8 @@ def occurrence_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     payload = dict(row)
     payload["guests"] = program_people(payload.get("guests", "[]"))
     payload["special"] = str(payload.get("special") or "").strip().upper()
+    delivery = str(payload.get("delivery") or "").strip()
+    payload["delivery"] = delivery if delivery in PROGRAM_DELIVERIES else ""
     for key in ("source_url", "mirror_url", "subtitle_url"):
         payload[key] = str(payload.get(key) or "").strip()
     payload["materialized"] = boolean_value(payload.get("materialized"), False)
@@ -777,6 +782,9 @@ def normalized_occurrence(values: dict[str, Any]) -> dict[str, Any]:
         status = "rescheduled"
     if status == "rescheduled" and not adjusted_date:
         raise ValueError("已改期单集需要填写调整日期")
+    delivery = str(values.get("delivery") or "").strip()
+    if delivery and delivery not in PROGRAM_DELIVERIES:
+        raise ValueError("单集播出方式无效")
     original_time = str(values.get("original_time") or "").strip()
     adjusted_time = str(values.get("adjusted_time") or "").strip()
     for label, value in (("原定时间", original_time), ("调整时间", adjusted_time)):
@@ -786,6 +794,7 @@ def normalized_occurrence(values: dict[str, Any]) -> dict[str, Any]:
         "original_date": original_date,
         "generated_date": generated_date,
         "original_time": original_time,
+        "delivery": delivery,
         "source_url": normalized_program_link(values.get("source_url"), "源地址"),
         "mirror_url": normalized_program_link(values.get("mirror_url"), "搬运地址", True),
         "subtitle_url": normalized_program_link(values.get("subtitle_url"), "字幕地址", True),
@@ -866,6 +875,10 @@ def occurrence_record(
     effective_original_date = str(override.get("original_date") or base_original_date).strip() if has_override else base_original_date
     default_time = schedule_time or program.get("schedule_time", "")
     effective_original_time = str(override.get("original_time") or default_time) if has_override else default_time
+    delivery_override = str(override.get("delivery") or "").strip() if has_override else ""
+    if delivery_override not in PROGRAM_DELIVERIES:
+        delivery_override = ""
+    delivery = delivery_override or str(program.get("delivery") or "recorded")
     event_date = override.get("adjusted_date") or effective_original_date
     event_time = override.get("adjusted_time") or effective_original_time
     status = override.get("status", "scheduled")
@@ -879,6 +892,8 @@ def occurrence_record(
         "original_date": effective_original_date,
         "generated_date": generated_date or (base_original_date if individual else ""),
         "original_time": effective_original_time,
+        "delivery": delivery,
+        "delivery_override": delivery_override,
         "source_url": str(override.get("source_url") or "").strip(),
         "mirror_url": str(override.get("mirror_url") or "").strip(),
         "subtitle_url": str(override.get("subtitle_url") or "").strip(),
@@ -1057,6 +1072,7 @@ def materialize_generated_occurrences(conn: sqlite3.Connection, program: dict[st
             record["original_date"],
             record.get("generated_date", ""),
             record.get("original_time", ""),
+            record.get("delivery_override", ""),
             record.get("source_url", ""),
             record.get("mirror_url", ""),
             record.get("subtitle_url", ""),
@@ -1079,9 +1095,9 @@ def materialize_generated_occurrences(conn: sqlite3.Connection, program: dict[st
     before = conn.total_changes
     conn.executemany(
         """INSERT OR IGNORE INTO program_occurrences (
-            program_id, original_date, generated_date, original_time, source_url, mirror_url, subtitle_url, status,
+            program_id, original_date, generated_date, original_time, delivery, source_url, mirror_url, subtitle_url, status,
             adjusted_date, adjusted_time, note, guests, special, materialized, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         rows,
     )
     return conn.total_changes - before
@@ -1223,7 +1239,7 @@ def program_calendar_events(program: dict[str, Any], range_start: date, range_en
                 "category": program["category"],
                 "status": program["status"],
                 "format": program["format"],
-                "delivery": program.get("delivery", "recorded"),
+                "delivery": record.get("delivery", program.get("delivery", "recorded")),
                 "occurrenceId": record["id"],
                 "originalDate": record["original_date"],
                 "originalTime": record["original_time"],
@@ -2202,9 +2218,9 @@ async def api_create_occurrence(program_id: str, request: Request) -> dict[str, 
             raise HTTPException(404, "节目不存在")
         try:
             cursor = conn.execute("""INSERT INTO program_occurrences (
-            program_id, original_date, generated_date, original_time, source_url, mirror_url, subtitle_url, status, adjusted_date, adjusted_time, note, guests, special, created_at, updated_at
+            program_id, original_date, generated_date, original_time, delivery, source_url, mirror_url, subtitle_url, status, adjusted_date, adjusted_time, note, guests, special, created_at, updated_at
         ) VALUES (
-            :program_id, :original_date, :generated_date, :original_time, :source_url, :mirror_url, :subtitle_url, :status, :adjusted_date, :adjusted_time, :note, :guests, :special, :created_at, :updated_at
+            :program_id, :original_date, :generated_date, :original_time, :delivery, :source_url, :mirror_url, :subtitle_url, :status, :adjusted_date, :adjusted_time, :note, :guests, :special, :created_at, :updated_at
         )""", values)
         except sqlite3.IntegrityError as exc:
             raise HTTPException(409, "该原定日期已经有单集调整") from exc
@@ -2269,7 +2285,7 @@ async def api_update_occurrence(program_id: str, occurrence_id: int, request: Re
     with db() as conn:
         try:
             conn.execute("""UPDATE program_occurrences SET
-                original_date=:original_date, generated_date=:generated_date, original_time=:original_time, status=:status,
+                original_date=:original_date, generated_date=:generated_date, original_time=:original_time, delivery=:delivery, status=:status,
                 source_url=:source_url, mirror_url=:mirror_url, subtitle_url=:subtitle_url,
                 adjusted_date=:adjusted_date, adjusted_time=:adjusted_time, note=:note, guests=:guests, special=:special, updated_at=:updated_at
                 WHERE id=:id AND program_id=:program_id""", values)

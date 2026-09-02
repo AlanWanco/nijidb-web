@@ -90,6 +90,7 @@ function blankOccurrence() {
     original_date: "",
     generated_date: "",
     original_time: "",
+    delivery: "",
     source_url: "",
     mirror_url: "",
     subtitle_url: "",
@@ -633,6 +634,7 @@ function editOccurrence(row) {
     original_date: row.original_date || "",
     generated_date: row.generated_date || "",
     original_time: row.original_time || "",
+    delivery: row.delivery_override || "",
     source_url: row.source_url || "",
     mirror_url: row.mirror_url || "",
     subtitle_url: row.subtitle_url || "",
@@ -724,6 +726,7 @@ async function saveOccurrence() {
       original_date: occurrenceDraft.original_date,
       generated_date: occurrenceDraft.generated_date,
       original_time: occurrenceDraft.original_time,
+      delivery: occurrenceDraft.delivery,
       source_url: occurrenceDraft.source_url,
       mirror_url: occurrenceDraft.mirror_url,
       subtitle_url: occurrenceDraft.subtitle_url,
@@ -1065,7 +1068,16 @@ onUnmounted(() => {
              <span v-if="occurrenceDraft.id" class="program-kind">已保存</span>
            </div>
             <label>原定日期<VueDatePicker v-model="occurrenceDraft.original_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" locale="zh-CN" :enable-time-picker="false" auto-apply :clearable="false" :readonly="occurrenceOriginalLocked" :teleport="true" placeholder="选择日期" /><small>{{ occurrenceDraft.individual ? "逐期设置模式：可直接修改本期原定日期。" : occurrenceOriginalLocked ? "来自节目排期规则，不能修改原定日期。" : "手动补录单集时填写原定日期。" }}</small></label>
-              <label>原定时间<VueDatePicker v-model="occurrenceDraft.original_time" class="program-date-picker" time-picker model-type="HH:mm" format="HH:mm" locale="zh-CN" auto-apply :clearable="true" :is-24="true" :readonly="occurrenceOriginalLocked" :teleport="true" text-input placeholder="选择时间" /><small>{{ occurrenceDraft.individual ? "逐期设置模式：可直接修改本期原定时间。" : occurrenceOriginalLocked ? "来自排期规则，只能修改调整日期；调整时间已默认沿用原定时间。" : "手动补录单集时填写原定时间。" }}节目排期时区：{{ occurrenceTimezoneLabel }}；日历会按访问设备时区显示。</small></label>
+               <label>原定时间<VueDatePicker v-model="occurrenceDraft.original_time" class="program-date-picker" time-picker model-type="HH:mm" format="HH:mm" locale="zh-CN" auto-apply :clearable="true" :is-24="true" :readonly="occurrenceOriginalLocked" :teleport="true" text-input placeholder="选择时间" /><small>{{ occurrenceDraft.individual ? "逐期设置模式：可直接修改本期原定时间。" : occurrenceOriginalLocked ? "来自排期规则，只能修改调整日期；调整时间已默认沿用原定时间。" : "手动补录单集时填写原定时间。" }}节目排期时区：{{ occurrenceTimezoneLabel }}；日历会按访问设备时区显示。</small></label>
+           <div class="program-form-field">
+             <span class="program-field-label">本期播出方式</span>
+             <div class="choice-tags" role="radiogroup" aria-label="本期播出方式">
+               <button type="button" :class="{ selected: !occurrenceDraft.delivery }" @click="occurrenceDraft.delivery = ''">跟随节目默认</button>
+               <button type="button" :class="{ selected: occurrenceDraft.delivery === 'live' }" @click="occurrenceDraft.delivery = 'live'">直播</button>
+               <button type="button" :class="{ selected: occurrenceDraft.delivery === 'recorded' }" @click="occurrenceDraft.delivery = 'recorded'">录播</button>
+             </div>
+             <small>仅作用于这一期，不会修改整个节目的默认播出方式。</small>
+           </div>
            <div class="program-form-field">
              <span class="program-field-label">本期类型</span>
              <div class="choice-tags" role="radiogroup" aria-label="本期类型">
@@ -1088,7 +1100,7 @@ onUnmounted(() => {
                <label>调整时间<VueDatePicker v-model="occurrenceDraft.adjusted_time" class="program-date-picker" time-picker model-type="HH:mm" format="HH:mm" locale="zh-CN" auto-apply :clearable="true" :is-24="true" :teleport="true" text-input placeholder="沿用原定时间" /></label>
             </div>
             <div class="occurrence-link-fields">
-              <label><span class="program-field-label">源地址</span><input v-model="occurrenceDraft.source_url" type="url" placeholder="https://"></label>
+              <label class="occurrence-source-field"><span class="program-field-label">源地址</span><input v-model="occurrenceDraft.source_url" type="url" placeholder="https://"></label>
               <label><span class="program-field-label">搬运地址</span><input v-model="occurrenceDraft.mirror_url" type="text" placeholder="BV号或B站地址"></label>
               <label><span class="program-field-label">字幕地址</span><input v-model="occurrenceDraft.subtitle_url" type="text" placeholder="BV号或B站地址"></label>
               <small>源地址填写 HTTP/HTTPS 地址；搬运地址和字幕地址支持 BV 号、B 站地址或其他 HTTP/HTTPS 地址。</small>

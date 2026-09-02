@@ -421,7 +421,8 @@ def integer_value(value: Any, label: str, minimum: int, maximum: int) -> int:
 
 def occurrence_shift_days(value: Any) -> int:
     try:
-        return 7 if int(value or 0) == 7 else 0
+        value = int(value or 0)
+        return value if value in {-7, 7} else 0
     except (TypeError, ValueError):
         return 0
 
@@ -796,9 +797,9 @@ def normalized_occurrence(values: dict[str, Any]) -> dict[str, Any]:
     delivery = str(values.get("delivery") or "").strip()
     if delivery and delivery not in PROGRAM_DELIVERIES:
         raise ValueError("单集播出方式无效")
-    shift_following_days = integer_value(values.get("shift_following_days"), "后续顺延天数", 0, 7)
-    if shift_following_days not in {0, 7}:
-        raise ValueError("后续顺延天数只能为 0 或 7")
+    shift_following_days = integer_value(values.get("shift_following_days"), "后续排期偏移天数", -7, 7)
+    if shift_following_days not in {-7, 0, 7}:
+        raise ValueError("后续排期偏移只能为 -7、0 或 7 天")
     if shift_following_days and status != "rescheduled":
         raise ValueError("只有已改期单集可以顺延后续排期")
     original_time = str(values.get("original_time") or "").strip()

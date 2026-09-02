@@ -92,6 +92,7 @@ function blankOccurrence() {
     original_time: "",
     delivery: "",
     effective_date: "",
+    schedule_shift_days: 0,
     shift_following_days: 0,
     source_url: "",
     mirror_url: "",
@@ -133,7 +134,9 @@ const occurrencePeriod = computed(() => {
   return form.periods.find(period => period.start_date && anchor >= period.start_date && (!period.end_date || anchor <= period.end_date)) || null;
 });
 const canShiftFollowing = computed(() => occurrencePeriod.value?.frequency === "weekly" && Number(occurrencePeriod.value.week_interval) === 2);
-const occurrenceRescheduleBaseDate = computed(() => occurrenceDraft.effective_date || occurrenceDraft.adjusted_date || occurrenceDraft.original_date);
+const occurrenceRescheduleBaseDate = computed(() => occurrenceDraft.original_date
+  ? addDays(occurrenceDraft.original_date, Number(occurrenceDraft.schedule_shift_days) || 0)
+  : occurrenceDraft.effective_date || occurrenceDraft.adjusted_date || "");
 const occurrenceDeleteLabel = computed(() => occurrenceDraft.status === "deleted" ? "恢复单集" : "删除单集");
 const selectedOccurrenceIndex = computed(() => {
   if (!occurrenceDraft.original_date) return -1;
@@ -495,9 +498,9 @@ function addDays(value, days) {
   return shifted.toISOString().slice(0, 10);
 }
 
-function setOccurrenceShift(enabled) {
-  occurrenceDraft.shift_following_days = enabled ? 7 : 0;
-  if (enabled) occurrenceDraft.adjusted_date = addDays(occurrenceRescheduleBaseDate.value, 7);
+function setOccurrenceShift(days) {
+  occurrenceDraft.shift_following_days = days;
+  if (days) occurrenceDraft.adjusted_date = addDays(occurrenceRescheduleBaseDate.value, days);
 }
 
 function newSubprogram(parent) {
@@ -662,7 +665,8 @@ function editOccurrence(row) {
     original_time: row.original_time || "",
     delivery: row.delivery_override || "",
     effective_date: row.date || row.adjusted_date || row.original_date || "",
-    shift_following_days: Number(row.shift_following_days) === 7 ? 7 : 0,
+    schedule_shift_days: Number(row.schedule_shift_days) || 0,
+    shift_following_days: [-7, 7].includes(Number(row.shift_following_days)) ? Number(row.shift_following_days) : 0,
     source_url: row.source_url || "",
     mirror_url: row.mirror_url || "",
     subtitle_url: row.subtitle_url || "",
@@ -1131,9 +1135,10 @@ onUnmounted(() => {
              <div v-if="occurrenceDraft.status === 'rescheduled' && canShiftFollowing" class="program-form-field program-field-wide">
                <span class="program-field-label">后续排期</span>
                <div class="choice-tags">
-                 <button type="button" :class="{ selected: occurrenceDraft.shift_following_days === 7 }" @click="setOccurrenceShift(occurrenceDraft.shift_following_days !== 7)">{{ occurrenceDraft.shift_following_days === 7 ? "已顺延一周" : "顺延一周" }}</button>
+                 <button type="button" :class="{ selected: occurrenceDraft.shift_following_days === -7 }" @click="setOccurrenceShift(occurrenceDraft.shift_following_days === -7 ? 0 : -7)">{{ occurrenceDraft.shift_following_days === -7 ? "已提前一周" : "提前一周" }}</button>
+                 <button type="button" :class="{ selected: occurrenceDraft.shift_following_days === 7 }" @click="setOccurrenceShift(occurrenceDraft.shift_following_days === 7 ? 0 : 7)">{{ occurrenceDraft.shift_following_days === 7 ? "已顺延一周" : "顺延一周" }}</button>
                </div>
-               <small>本期原定周视为不播，本期顺延一周；之后的隔两周排期也从这里起整体顺延一周。</small>
+               <small>本期原定周视为不播；选择提前或顺延后，之后的隔两周排期也从这里起同步平移一周。</small>
              </div>
              <div class="occurrence-link-fields">
               <label class="occurrence-source-field"><span class="program-field-label">源地址</span><input v-model="occurrenceDraft.source_url" type="url" placeholder="https://"></label>

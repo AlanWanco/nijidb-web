@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import VueDatePicker from "@vuepic/vue-datepicker";
 import "@vuepic/vue-datepicker/dist/main.css";
 import { api } from "../api";
@@ -18,7 +18,12 @@ const timezoneOptions = [
   { value: "America/New_York", label: "美国东部时间" },
 ];
 const router = useRouter();
+const route = useRoute();
 const programs = ref([]);
+const programSearch = ref("");
+const programCastFilter = ref([]);
+const programCastFilterDetails = ref(null);
+const programCastFilterOpen = ref(false);
 const editingId = ref("");
 const editorOpen = ref(false);
 const activePanel = ref("list");
@@ -29,6 +34,7 @@ const occurrenceLoading = ref(false);
 const occurrenceSaving = ref(false);
 const occurrenceRows = ref([]);
 const occurrenceListRef = ref(null);
+const occurrenceEditorRef = ref(null);
 const customPerson = ref("");
 const occurrenceGuestInput = ref("");
 const message = ref("");
@@ -55,6 +61,7 @@ function blankProgram() {
     platform: "network",
     delivery: "recorded",
     auto_generate: true,
+    episode_start: 1,
     people: [],
     official_url: "",
     description: "",
@@ -83,7 +90,11 @@ function blankOccurrence() {
     original_date: "",
     generated_date: "",
     original_time: "",
+    source_url: "",
+    mirror_url: "",
+    subtitle_url: "",
     status: "scheduled",
+    special: "",
     adjusted_date: "",
     adjusted_time: "",
     note: "",
@@ -99,6 +110,12 @@ function blankOccurrence() {
 const form = reactive(blankProgram());
 const occurrenceDraft = reactive(blankOccurrence());
 const peopleOptions = computed(() => castCandidates);
+const allProgramCastSelected = computed(() => programCastFilter.value.length === castCandidates.length);
+const programCastFilterLabel = computed(() => {
+  if (!programCastFilter.value.length || allProgramCastSelected.value) return "全部 Cast";
+  return `已选 ${programCastFilter.value.length} 位`;
+});
+const filteredPrograms = computed(() => programs.value.filter(programMatchesFilters));
 const customPeople = computed(() => form.people.filter(person => !castCandidates.includes(person)));
 const occurrenceOriginalLocked = computed(() => Boolean(!occurrenceDraft.individual && (occurrenceDraft.generated || occurrenceDraft.id)));
 const parentProgramTitle = computed(() => programs.value.find(program => program.id === form.parent_id)?.title || form.title || "当前主节目");
@@ -116,6 +133,14 @@ const selectedOccurrenceIndex = computed(() => {
 });
 const canPreviousOccurrence = computed(() => selectedOccurrenceIndex.value > 0);
 const canNextOccurrence = computed(() => selectedOccurrenceIndex.value >= 0 && selectedOccurrenceIndex.value < occurrenceRows.value.length - 1);
+const requestedProgramId = computed(() => typeof route.query.program === "string" ? route.query.program : "");
+const requestedPanel = computed(() => typeof route.query.panel === "string" ? route.query.panel : "edit");
+const requestedOccurrenceId = computed(() => typeof route.query.occurrence === "string" ? route.query.occurrence : "");
+const requestedOccurrenceDate = computed(() => typeof route.query.date === "string" ? route.query.date : "");
+
+watch(() => occurrenceDraft.original_date, value => {
+  if (occurrenceDraft.status === "rescheduled" && !occurrenceDraft.adjusted_date) occurrenceDraft.adjusted_date = value;
+});
 const panelOrder = ["list", "edit", "occurrences"];
 const panelIndex = computed(() => panelOrder.indexOf(activePanel.value));
 const panelTitle = computed(() => {
@@ -131,6 +156,8 @@ const panelDescription = computed(() => {
 const canMovePrevious = computed(() => panelIndex.value > 0);
 const canMoveNext = computed(() => activePanel.value === "list" || (activePanel.value === "edit" && Boolean(editingId.value)));
 
+const occurrenceItemRefs = new Map();
+
 function programType(program) {
   return program.category === "official" ? "官方节目" : "个人节目";
 }
@@ -143,11 +170,67 @@ function updateStatusLabel(program) {
   return program.update_status === "not_updated" ? "未更新" : "近期有更新";
 }
 
+function programMatchesSearch(program) {
+  const query = programSearch.value.trim().toLocaleLowerCase();
+  if (!query) return true;
+  const text = [program.title, program.subprogram_name, program.description, ...(program.people || [])]
+    .filter(Boolean)
+    .join(" ")
+    .toLocaleLowerCase();
+  return text.includes(query);
+}
+
+function programMatchesCast(program) {
+  if (!programCastFilter.value.length || allProgramCastSelected.value) return true;
+  const people = program.people || [];
+  return programCastFilter.value.some(selectedName => {
+    const member = NIJIGASAKI_CAST.find(item => item.name === selectedName);
+    return Boolean(member && [member.name, ...member.aliases].some(name => people.includes(name)));
+  });
+}
+
+function programMatchesFilters(program) {
+  return programMatchesSearch(program) && programMatchesCast(program);
+}
+
+function toggleProgramCastFilter(name) {
+  programCastFilter.value = programCastFilter.value.includes(name)
+    ? programCastFilter.value.filter(item => item !== name)
+    : [...programCastFilter.value, name];
+}
+
+function selectAllProgramCast() {
+  programCastFilter.value = NIJIGASAKI_CAST.map(member => member.name);
+}
+
+function clearProgramCastFilter() {
+  programCastFilter.value = [];
+}
+
+function closeProgramCastFilter(event) {
+  if (!programCastFilterDetails.value?.open || programCastFilterDetails.value.contains(event.target)) return;
+  programCastFilterDetails.value.open = false;
+  programCastFilterOpen.value = false;
+}
+
+function syncProgramCastFilter(event) {
+  programCastFilterOpen.value = event.target.open;
+}
+
 function occurrenceStatus(row) {
   if (row.status === "deleted") return "已删除";
   if (row.status === "cancelled") return "已取消";
   const airStatus = row.aired ? "已播出" : "未播出";
   return row.status === "rescheduled" ? `已改期 · ${airStatus}` : airStatus;
+}
+
+function episodeLabel(episode, special = "") {
+  return special === "EX" ? "EX 特别节目" : `第 ${episode} 期`;
+}
+
+function occurrenceEpisodeLabel(row) {
+  const label = episodeLabel(row.episode, row.special);
+  return ["cancelled", "deleted"].includes(row.status) ? `原定 ${label}` : label;
 }
 
 function scheduleLabel(program) {
@@ -211,10 +294,38 @@ async function loadPrograms() {
   try {
     const data = await api("/api/programs");
     programs.value = data.programs;
+    return true;
   } catch (requestError) {
     showError(requestError);
+    return false;
   } finally {
     loading.value = false;
+  }
+}
+
+async function openRequestedProgram() {
+  if (!requestedProgramId.value) return;
+  const program = programs.value.find(item => item.id === requestedProgramId.value);
+  if (!program) {
+    error.value = "节目不存在或已被删除";
+    return;
+  }
+  await editProgram(program);
+  if (requestedPanel.value !== "occurrences" && !requestedOccurrenceId.value && !requestedOccurrenceDate.value) return;
+
+  activePanel.value = "occurrences";
+  if (!requestedOccurrenceId.value && !requestedOccurrenceDate.value) {
+    await focusOccurrenceEditor();
+    return;
+  }
+  const row = occurrenceRows.value.find(item => requestedOccurrenceId.value && String(item.id) === requestedOccurrenceId.value)
+    || occurrenceRows.value.find(item => requestedOccurrenceDate.value && item.original_date === requestedOccurrenceDate.value);
+  if (row) {
+    editOccurrence(row);
+    await focusOccurrenceEditor(row);
+  } else {
+    error.value = "单集不存在或已不在当前排期中";
+    await focusOccurrenceEditor();
   }
 }
 
@@ -228,6 +339,7 @@ function applyProgram(program) {
     platform: program.platform || "network",
     delivery: program.delivery || "recorded",
     auto_generate: program.auto_generate !== false,
+    episode_start: Number(program.episode_start) === 0 ? 0 : 1,
     people: [...(program.people || [])],
     official_url: program.official_url || "",
     description: program.description || "",
@@ -353,6 +465,7 @@ function removeOccurrenceGuest(guest) {
 function setOccurrenceStatus(status) {
   occurrenceDraft.status = status;
   if (status === "rescheduled") {
+    occurrenceDraft.adjusted_date ||= occurrenceDraft.original_date;
     occurrenceDraft.adjusted_time ||= occurrenceDraft.original_time;
   } else {
     occurrenceDraft.adjusted_date = "";
@@ -414,11 +527,12 @@ function programBody() {
     category: form.category,
      format: form.format,
      platform: form.platform,
-     delivery: form.delivery,
+      delivery: form.delivery,
      auto_generate: form.auto_generate,
-     people: [...form.people],
-     official_url: form.official_url,
-     description: form.description,
+       episode_start: Number(form.episode_start) === 0 ? 0 : 1,
+       people: [...form.people],
+      official_url: form.official_url,
+      description: form.description,
      parent_id: form.parent_id,
      subprogram_name: form.parent_id ? form.subprogram_name : "主节目",
      start_date: first.start_date || "",
@@ -519,8 +633,12 @@ function editOccurrence(row) {
     original_date: row.original_date || "",
     generated_date: row.generated_date || "",
     original_time: row.original_time || "",
+    source_url: row.source_url || "",
+    mirror_url: row.mirror_url || "",
+    subtitle_url: row.subtitle_url || "",
     status: row.status || "scheduled",
-    adjusted_date: row.adjusted_date || "",
+    special: row.special || "",
+    adjusted_date: row.adjusted_date || (row.status === "rescheduled" ? row.original_date || "" : ""),
      adjusted_time: row.adjusted_time || row.original_time || "",
      note: row.note || "",
     guests: [...(row.guests || [])],
@@ -531,6 +649,38 @@ function editOccurrence(row) {
     timezone: row.timezone || "",
   });
   occurrenceGuestInput.value = "";
+}
+
+function occurrenceRowKey(row) {
+  return `${row.id || "generated"}-${row.original_date}`;
+}
+
+function setOccurrenceItemRef(row, element) {
+  const key = occurrenceRowKey(row);
+  if (element) occurrenceItemRefs.set(key, element);
+  else occurrenceItemRefs.delete(key);
+}
+
+function scrollOccurrenceListTo(row) {
+  const list = occurrenceListRef.value;
+  const item = row && occurrenceItemRefs.get(occurrenceRowKey(row));
+  if (!list || !item) return;
+  const listRect = list.getBoundingClientRect();
+  const itemRect = item.getBoundingClientRect();
+  const itemTop = list.scrollTop + itemRect.top - listRect.top;
+  const centeredTop = itemTop - (list.clientHeight - item.offsetHeight) / 2;
+  const maxTop = Math.max(0, list.scrollHeight - list.clientHeight);
+  const top = Math.min(maxTop, Math.max(0, centeredTop));
+  list.scrollTo({ top, behavior: "smooth" });
+}
+
+async function focusOccurrenceEditor(row = null) {
+  await nextTick();
+  occurrenceEditorRef.value?.scrollIntoView({ behavior: "smooth", block: "start" });
+  if (row) {
+    await nextTick();
+    scrollOccurrenceListTo(row);
+  }
 }
 
 function selectAdjacentOccurrence(direction) {
@@ -574,7 +724,11 @@ async function saveOccurrence() {
       original_date: occurrenceDraft.original_date,
       generated_date: occurrenceDraft.generated_date,
       original_time: occurrenceDraft.original_time,
+      source_url: occurrenceDraft.source_url,
+      mirror_url: occurrenceDraft.mirror_url,
+      subtitle_url: occurrenceDraft.subtitle_url,
       status: occurrenceDraft.status,
+      special: occurrenceDraft.special,
       adjusted_date: occurrenceDraft.adjusted_date,
       adjusted_time: occurrenceDraft.adjusted_time,
       note: occurrenceDraft.note,
@@ -646,8 +800,14 @@ async function deleteProgram(program) {
   }
 }
 
-onMounted(loadPrograms);
-onUnmounted(() => window.clearTimeout(toastTimer));
+onMounted(async () => {
+  if (await loadPrograms()) await openRequestedProgram();
+  document.addEventListener("click", closeProgramCastFilter);
+});
+onUnmounted(() => {
+  window.clearTimeout(toastTimer);
+  document.removeEventListener("click", closeProgramCastFilter);
+});
 </script>
 
 <template>
@@ -673,18 +833,40 @@ onUnmounted(() => window.clearTimeout(toastTimer));
 
     <div v-if="error || message" class="program-toast" :class="error ? 'error' : 'success'" :role="error ? 'alert' : 'status'" aria-live="assertive">{{ error || message }}</div>
 
-    <section v-if="activePanel === 'list'" class="program-admin-list program-panel-content">
+    <section v-if="activePanel === 'list'" class="program-admin-list program-panel-content" :class="{ 'program-cast-filter-open': programCastFilterOpen }">
       <div class="section-heading">
         <div><p class="eyebrow">CURRENT ENTRIES</p><h2>已录入节目</h2></div>
-        <span class="section-count">{{ programs.length }}</span>
+        <span class="section-count">{{ filteredPrograms.length }}<small v-if="programSearch || programCastFilter.length"> / {{ programs.length }}</small></span>
       </div>
       <div class="program-admin-list-footer">
         <p class="muted">选择一个节目进入编辑；已保存的节目可以继续切换到单集列表。</p>
-        <button type="button" class="secondary program-action-button" @click="startNewProgram">新建节目</button>
+        <div class="program-admin-list-tools">
+          <label class="program-admin-search">
+            <span>关键词</span>
+            <input v-model="programSearch" type="search" placeholder="搜索节目、子节目或成员" aria-label="搜索节目、子节目或成员">
+          </label>
+          <div class="program-calendar-filter program-cast-filter program-admin-cast-filter">
+            <span class="program-calendar-filter-label">按 Cast 筛选</span>
+              <details ref="programCastFilterDetails" class="program-cast-filter-details" @toggle="syncProgramCastFilter">
+              <summary class="program-cast-filter-summary"><strong>{{ programCastFilterLabel }}</strong><b>⌄</b></summary>
+              <div class="program-cast-filter-panel">
+                <div class="program-cast-filter-actions">
+                  <button type="button" class="secondary program-action-button" @click="selectAllProgramCast">全选</button>
+                  <button type="button" class="secondary program-action-button" @click="clearProgramCastFilter">清空</button>
+                </div>
+                <div class="program-cast-tags">
+                  <button v-for="member in NIJIGASAKI_CAST" :key="member.name" type="button" class="program-cast-tag" :class="{ selected: programCastFilter.includes(member.name) }" :aria-pressed="programCastFilter.includes(member.name)" @click="toggleProgramCastFilter(member.name)"><i class="program-cast-dot" :style="{ backgroundColor: member.color }"></i>{{ member.name }}</button>
+                </div>
+              </div>
+            </details>
+          </div>
+          <button type="button" class="secondary program-action-button" @click="startNewProgram">新建节目</button>
+        </div>
       </div>
       <p v-if="loading" class="state">正在读取节目……</p>
       <p v-else-if="!programs.length" class="muted">还没有录入节目。</p>
-      <article v-for="program in programs" :key="program.id" class="program-admin-item" :class="{ 'is-subprogram': Boolean(program.parent_id) }">
+      <p v-else-if="!filteredPrograms.length" class="muted">当前关键词和 Cast 筛选没有匹配的节目。</p>
+      <article v-for="program in filteredPrograms" :key="program.id" class="program-admin-item" :class="{ 'is-subprogram': Boolean(program.parent_id) }">
         <span v-if="programCast(program).length" class="program-admin-cast-line" aria-label="固定参与成员">
           <i v-for="member in programCast(program)" :key="member.name" :style="{ '--cast-color': member.color }"></i>
         </span>
@@ -746,6 +928,14 @@ onUnmounted(() => window.clearTimeout(toastTimer));
             <button type="button" :class="{ selected: form.delivery === 'recorded' }" @click="form.delivery = 'recorded'">录播</button>
           </div>
         </div>
+        <div class="program-form-field">
+          <span class="program-field-label">首集编号</span>
+          <div class="choice-tags" role="radiogroup" aria-label="首集编号">
+            <button type="button" :class="{ selected: form.episode_start === 0 }" @click="form.episode_start = 0">第 0 期</button>
+            <button type="button" :class="{ selected: form.episode_start === 1 }" @click="form.episode_start = 1">第 1 期</button>
+          </div>
+          <small>设置节目正篇的起始期数；EX 特别节目不占用正篇编号。</small>
+        </div>
 
         <div class="program-form-field program-field-wide">
            <span class="program-field-label">固定参与成员 / 主持</span>
@@ -761,8 +951,8 @@ onUnmounted(() => window.clearTimeout(toastTimer));
            </div>
            <small>这里填写批量排期下固定出现的虹咲成员、主持人或常驻嘉宾；单期临时嘉宾请在下方单集编辑。</small>
         </div>
-        <label class="program-field-wide">官方链接<input v-model="form.official_url" type="url" placeholder="https://"></label>
-        <label class="program-field-wide">节目简介<textarea v-model="form.description" rows="3" placeholder="可选"></textarea></label>
+          <label class="program-field-wide">相关链接<input v-model="form.official_url" type="url" placeholder="https://"><small>节目层面的补充链接；源地址、搬运地址和字幕地址请在单集编辑中填写。</small></label>
+         <label class="program-field-wide">节目简介<textarea v-model="form.description" rows="3" placeholder="可选"></textarea></label>
       </div>
 
       <div class="program-schedule">
@@ -778,8 +968,11 @@ onUnmounted(() => window.clearTimeout(toastTimer));
               <span class="program-field-label">更新方式</span>
               <div class="choice-tags" role="radiogroup" aria-label="更新方式">
                 <button type="button" :class="{ selected: period.frequency === 'weekly' }" @click="setPeriodFrequency(period, 'weekly')">周更</button>
-                <button type="button" :class="{ selected: period.frequency === 'monthly' }" @click="setPeriodFrequency(period, 'monthly')">月更</button>
-                <button v-if="period.frequency === 'monthly' || period.frequency === 'individual'" type="button" :class="{ selected: period.frequency === 'individual' }" @click="setPeriodFrequency(period, 'individual')">逐期设置</button>
+                <button v-if="!['monthly', 'individual'].includes(period.frequency)" type="button" :class="{ selected: period.frequency === 'monthly' }" @click="setPeriodFrequency(period, 'monthly')">月更</button>
+                <span v-else class="program-frequency-monthly">
+                  <button type="button" :class="{ selected: period.frequency === 'monthly' }" @click="setPeriodFrequency(period, 'monthly')">月更</button>
+                  <button type="button" :class="{ selected: period.frequency === 'individual' }" @click="setPeriodFrequency(period, 'individual')">逐期设置</button>
+                </span>
                 <button type="button" :class="{ selected: period.frequency === 'single' }" @click="setPeriodFrequency(period, 'single')">单次</button>
               </div>
               <small v-if="period.frequency === 'single'">单次表示一个单独的节目，只需要选择播出日期和时间。</small>
@@ -835,7 +1028,7 @@ onUnmounted(() => window.clearTimeout(toastTimer));
       </div>
     </form>
 
-    <section v-if="activePanel === 'occurrences' && editorOpen && editingId" class="settings-card program-occurrence-editor program-panel-content">
+    <section ref="occurrenceEditorRef" v-if="activePanel === 'occurrences' && editorOpen && editingId" class="settings-card program-occurrence-editor program-panel-content">
          <div class="section-heading">
          <div><p class="eyebrow">GENERATED EPISODES / OVERRIDES</p><h2>自动生成单集</h2></div>
           <div class="settings-heading-actions">
@@ -857,8 +1050,8 @@ onUnmounted(() => window.clearTimeout(toastTimer));
       <p v-if="occurrenceLoading" class="state">正在读取单集排期……</p>
        <div v-else class="occurrence-editor-layout">
          <div ref="occurrenceListRef" class="occurrence-list">
-             <button v-for="row in occurrenceRows" :key="`${row.id || 'generated'}-${row.original_date}`" type="button" class="occurrence-list-item" :class="{ selected: occurrenceDraft.original_date === row.original_date }" @click="editOccurrence(row)">
-              <span><b>{{ ["cancelled", "deleted"].includes(row.status) ? `原定第 ${row.episode} 期` : `第 ${row.episode} 期` }}</b><em :class="{ cancelled: row.status === 'cancelled', deleted: row.status === 'deleted', aired: row.aired }">{{ occurrenceStatus(row) }}</em></span>
+              <button v-for="row in occurrenceRows" :key="occurrenceRowKey(row)" :ref="element => setOccurrenceItemRef(row, element)" type="button" class="occurrence-list-item" :class="{ selected: occurrenceDraft.original_date === row.original_date }" @click="editOccurrence(row)">
+              <span><b>{{ occurrenceEpisodeLabel(row) }}</b><em :class="{ cancelled: row.status === 'cancelled', deleted: row.status === 'deleted', aired: row.aired }">{{ occurrenceStatus(row) }}</em></span>
             <strong>{{ row.date }}</strong>
              <small>{{ row.status === "deleted" ? "已删除，不参与生成" : row.generated ? "自动生成" : row.materialized ? "已播出并保存" : row.adjusted_date ? `原定 ${row.original_date}` : "已单独调整" }}{{ row.guests?.length ? ` · 嘉宾 ${row.guests.length} 人` : "" }}</small>
           </button>
@@ -873,8 +1066,16 @@ onUnmounted(() => window.clearTimeout(toastTimer));
            </div>
             <label>原定日期<VueDatePicker v-model="occurrenceDraft.original_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" locale="zh-CN" :enable-time-picker="false" auto-apply :clearable="false" :readonly="occurrenceOriginalLocked" :teleport="true" placeholder="选择日期" /><small>{{ occurrenceDraft.individual ? "逐期设置模式：可直接修改本期原定日期。" : occurrenceOriginalLocked ? "来自节目排期规则，不能修改原定日期。" : "手动补录单集时填写原定日期。" }}</small></label>
               <label>原定时间<VueDatePicker v-model="occurrenceDraft.original_time" class="program-date-picker" time-picker model-type="HH:mm" format="HH:mm" locale="zh-CN" auto-apply :clearable="true" :is-24="true" :readonly="occurrenceOriginalLocked" :teleport="true" text-input placeholder="选择时间" /><small>{{ occurrenceDraft.individual ? "逐期设置模式：可直接修改本期原定时间。" : occurrenceOriginalLocked ? "来自排期规则，只能修改调整日期；调整时间已默认沿用原定时间。" : "手动补录单集时填写原定时间。" }}节目排期时区：{{ occurrenceTimezoneLabel }}；日历会按访问设备时区显示。</small></label>
-          <div class="program-form-field">
-            <span class="program-field-label">本期状态</span>
+           <div class="program-form-field">
+             <span class="program-field-label">本期类型</span>
+             <div class="choice-tags" role="radiogroup" aria-label="本期类型">
+               <button type="button" :class="{ selected: occurrenceDraft.special !== 'EX' }" @click="occurrenceDraft.special = ''">普通节目</button>
+               <button type="button" :class="{ selected: occurrenceDraft.special === 'EX' }" @click="occurrenceDraft.special = 'EX'">EX 特别节目</button>
+             </div>
+              <small>EX 特别节目不占用正篇期数，后续正篇编号顺延；请在自动生成单集结束后手动添加。</small>
+           </div>
+           <div class="program-form-field">
+             <span class="program-field-label">本期状态</span>
              <div class="choice-tags">
                <button type="button" :class="{ selected: occurrenceDraft.status === 'scheduled' }" @click="setOccurrenceStatus('scheduled')">正常播出</button>
                <button type="button" :class="{ selected: occurrenceDraft.status === 'rescheduled' }" @click="setOccurrenceStatus('rescheduled')">已改期</button>
@@ -882,11 +1083,17 @@ onUnmounted(() => window.clearTimeout(toastTimer));
              </div>
               <small>正常播出不会修改排期日期；需要更换日期时选择“已改期”。“因故取消”会保留单集并标记已取消；删除会移除单集，不再显示。</small>
            </div>
-           <div v-if="occurrenceDraft.status === 'rescheduled'" class="occurrence-date-row">
-             <label>调整日期<VueDatePicker v-model="occurrenceDraft.adjusted_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" locale="zh-CN" :enable-time-picker="false" auto-apply :clearable="false" :teleport="true" placeholder="选择新日期" required /></label>
-              <label>调整时间<VueDatePicker v-model="occurrenceDraft.adjusted_time" class="program-date-picker" time-picker model-type="HH:mm" format="HH:mm" locale="zh-CN" auto-apply :clearable="true" :is-24="true" :teleport="true" text-input placeholder="沿用原定时间" /></label>
-           </div>
-           <label>备注<textarea v-model="occurrenceDraft.note" rows="3" placeholder="例如：延期至下周、嘉宾变更……"></textarea></label>
+            <div v-if="occurrenceDraft.status === 'rescheduled'" class="occurrence-date-row">
+              <label>调整日期<VueDatePicker v-model="occurrenceDraft.adjusted_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" locale="zh-CN" :enable-time-picker="false" auto-apply :clearable="false" :teleport="true" placeholder="选择新日期" required /></label>
+               <label>调整时间<VueDatePicker v-model="occurrenceDraft.adjusted_time" class="program-date-picker" time-picker model-type="HH:mm" format="HH:mm" locale="zh-CN" auto-apply :clearable="true" :is-24="true" :teleport="true" text-input placeholder="沿用原定时间" /></label>
+            </div>
+            <div class="occurrence-link-fields">
+              <label><span class="program-field-label">源地址</span><input v-model="occurrenceDraft.source_url" type="url" placeholder="https://"></label>
+              <label><span class="program-field-label">搬运地址</span><input v-model="occurrenceDraft.mirror_url" type="text" placeholder="BV号或B站地址"></label>
+              <label><span class="program-field-label">字幕地址</span><input v-model="occurrenceDraft.subtitle_url" type="text" placeholder="BV号或B站地址"></label>
+              <small>源地址填写 HTTP/HTTPS 地址；搬运地址和字幕地址支持 BV 号、B 站地址或其他 HTTP/HTTPS 地址。</small>
+            </div>
+            <label>备注<textarea v-model="occurrenceDraft.note" rows="3" placeholder="例如：延期至下周、嘉宾变更……"></textarea></label>
            <div class="program-form-field occurrence-guests-field">
              <span class="program-field-label">本期嘉宾</span>
              <div v-if="occurrenceDraft.guests.length" class="people-picker">

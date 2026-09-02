@@ -2,6 +2,7 @@
 import { onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 import { api } from "../api";
+import { formatLocalDateTime } from "../datetime";
 
 const router = useRouter();
 const settings = reactive({
@@ -17,6 +18,7 @@ const loading = ref(true);
 const saving = ref(false);
 const testing = ref(false);
 const syncing = ref(false);
+const activityLogs = ref([]);
 const changingPassword = ref(false);
 const message = ref("");
 const error = ref("");
@@ -28,6 +30,7 @@ const backingUp = ref(false);
 const restoring = ref(false);
 const backupMessage = ref("");
 const backupError = ref("");
+const deviceTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 
 function showError(requestError) {
   if (requestError.status === 401) {
@@ -41,10 +44,16 @@ function setSettings(values) {
   Object.assign(settings, values);
 }
 
+function activityLogSummary(log) {
+  if (log.error) return "歌曲监控检查失败";
+  return `${log.category === "program" ? "节目档案" : "歌曲监控"} · ${log.summary}`;
+}
+
 async function loadSettings() {
   try {
     const data = await api("/api/admin/settings");
     setSettings(data.settings);
+    activityLogs.value = data.activity_logs || [];
   } catch (requestError) {
     showError(requestError);
   } finally {
@@ -103,8 +112,9 @@ async function syncNow() {
   error.value = "";
   try {
     const data = await api("/api/admin/sync", { method: "POST" });
+    activityLogs.value = data.activity_logs || activityLogs.value;
     if (data.error) error.value = `同步失败：${data.error}`;
-    else message.value = `同步完成，检测到 ${data.changed_count} 项变化`;
+    else message.value = data.changed_count ? `歌曲监控发现 ${data.changed_count} 项变化` : "";
   } catch (requestError) {
     showError(requestError);
   } finally {
@@ -238,8 +248,19 @@ onMounted(loadSettings);
             <p>手动执行一次网页检查；首次初始化不会发送通知。</p>
             <button class="secondary" :disabled="syncing">{{ syncing ? "同步中……" : "立即同步" }}</button>
           </form>
+          <section class="settings-card sync-log-card">
+            <div class="form-heading"><span class="form-number">05</span><div><p class="form-kicker">DATABASE ACTIVITY</p><h2>数据库变化记录</h2></div><span class="section-count">{{ activityLogs.length }}</span></div>
+            <p class="sync-log-intro">只显示节目档案和歌曲监控的实际变化；时间按当前访问设备时区显示（{{ deviceTimeZone }}）。</p>
+            <ol v-if="activityLogs.length" class="sync-log-list">
+              <li v-for="log in activityLogs" :key="log.id" :class="{ failed: log.error }">
+                <time :datetime="log.checked_at" :title="`设备时区：${deviceTimeZone}`">{{ formatLocalDateTime(log.checked_at) }}</time>
+                <div><strong>{{ activityLogSummary(log) }}</strong><small v-if="log.error">{{ log.error }}</small></div>
+              </li>
+            </ol>
+            <p v-else class="muted">暂时没有数据库变化记录。</p>
+          </section>
           <section class="settings-card backup">
-            <div class="form-heading"><span class="form-number">05</span><div><p class="form-kicker">DATA SAFETY</p><h2>数据库备份与还原</h2></div></div>
+            <div class="form-heading"><span class="form-number">06</span><div><p class="form-kicker">DATA SAFETY</p><h2>数据库备份与还原</h2></div></div>
             <p class="muted">备份包含设置、节目档案、发行资料和同步记录，不包含封面图片。还原后会在下一次同步重新检查封面缓存。</p>
             <p v-if="backupMessage" class="success">{{ backupMessage }}</p>
             <p v-if="backupError" class="state error">{{ backupError }}</p>

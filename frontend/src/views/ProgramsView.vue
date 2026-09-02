@@ -1,11 +1,13 @@
 <script setup>
-import { computed, reactive, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import FullCalendar from "@fullcalendar/vue3";
 import dayGridPlugin from "@fullcalendar/daygrid";
 import interactionPlugin from "@fullcalendar/interaction";
 import zhCnLocale from "@fullcalendar/core/locales/zh-cn";
+import { useRouter } from "vue-router";
 import { api } from "../api";
 import { NIJIGASAKI_CAST, castColorSegments } from "../programCast";
+import { occurrenceLinkItems, programAdminPath, relatedLinkItem } from "../programLinks";
 
 const weekdayNames = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const timezoneLabels = {
@@ -29,6 +31,11 @@ const today = new Date();
 const visibleMonth = ref(monthKey(today));
 const jumpYear = ref(today.getFullYear());
 const jumpMonth = ref(today.getMonth() + 1);
+const castFilterDetails = ref(null);
+const adminAuthenticated = ref(false);
+const editAccessNotice = ref("");
+const router = useRouter();
+const editAccessMessage = "需要登录管理员后才能编辑；未来将开放编辑审核。";
 
 const monthOptions = Array.from({ length: 12 }, (_, index) => ({
   value: index + 1,
@@ -91,6 +98,8 @@ const calendarOptions = reactive({
     const cast = castColorSegments(eventPeople(event));
     const fallback = props.category === "official" ? "#5979ad" : "#5b9478";
     el.style.setProperty("--program-event-color", cast[0]?.color || fallback);
+    el.setAttribute("aria-label", event.title);
+    el.title = event.title;
   },
   eventClassNames: ({ event }) => [
     `program-event-${event.extendedProps.category}`,
@@ -108,6 +117,13 @@ const selectedProgram = computed(() => {
   const programId = selectedEvent.value?.programId;
   return programs.value.find(program => program.id === programId) || null;
 });
+const selectedAdminEditorPath = computed(() => selectedProgram.value && selectedEvent.value
+  ? programAdminPath(selectedProgram.value.id, {
+    panel: "occurrences",
+    occurrenceId: selectedEvent.value.occurrenceId,
+    occurrenceDate: selectedEvent.value.originalScheduleDate || selectedEvent.value.originalDate,
+  })
+  : "/admin/programs");
 
 function programType(program) {
   return program.category === "official" ? "官方节目" : "个人节目";
@@ -255,6 +271,11 @@ function eventDeliveryLabel(event) {
   return event.extendedProps?.delivery === "live" ? "直播" : "录播";
 }
 
+function eventEpisodeLabel(event) {
+  const props = event.extendedProps || {};
+  return props.special === "EX" ? "EX 特别节目" : `第 ${props.episode} 期`;
+}
+
 function eventStateClass(event) {
   const props = event.extendedProps || {};
   return {
@@ -282,6 +303,11 @@ function selectAllCast() {
 
 function clearCastFilter() {
   filters.cast = [];
+}
+
+function closeCastFilter(event) {
+  if (!castFilterDetails.value?.open || castFilterDetails.value.contains(event.target)) return;
+  castFilterDetails.value.open = false;
 }
 
 function updateVisibleMonth(value) {
@@ -402,6 +428,7 @@ function openEvent(event) {
     ...props,
     originalDate: original?.date || props.originalDate,
     originalTime: original?.time || props.originalTime || "",
+    originalScheduleDate: props.originalDate || "",
   };
   drawerOpen.value = true;
 }
@@ -409,62 +436,91 @@ function openEvent(event) {
 function closeDrawer() {
   drawerOpen.value = false;
   selectedEvent.value = null;
+  editAccessNotice.value = "";
 }
+
+async function checkAdminSession() {
+  try {
+    const session = await api("/api/auth/session");
+    adminAuthenticated.value = Boolean(session.authenticated);
+  } catch {
+    adminAuthenticated.value = false;
+  }
+  return adminAuthenticated.value;
+}
+
+async function openAdminEditor(path) {
+  editAccessNotice.value = "";
+  if (await checkAdminSession()) {
+    router.push(path);
+    return;
+  }
+  editAccessNotice.value = editAccessMessage;
+}
+
+onMounted(() => {
+  checkAdminSession();
+  document.addEventListener("click", closeCastFilter);
+});
+onUnmounted(() => document.removeEventListener("click", closeCastFilter));
 </script>
 
 <template>
-  <main class="page programs-page">
+  <main class="page programs-page" :class="{ 'programs-list-mode': viewMode === 'list' }">
     <div class="programs-topline">
       <div>
         <p class="eyebrow">PROGRAM ARCHIVE</p>
         <h1>节目档案</h1>
         <p class="programs-intro">整理虹咲官方节目与成员个人节目，按排期查看每周和每月更新。</p>
       </div>
-      <RouterLink class="back" to="/">← 返回音乐目录</RouterLink>
+      <RouterLink class="back" to="/music">← 返回音乐目录</RouterLink>
     </div>
 
-    <p v-if="error" class="state error">{{ error }}</p>
-    <div class="program-layout">
-      <section class="program-calendar-card">
-        <div class="program-calendar-tools">
-          <div class="program-filter-group">
-              <div class="program-calendar-filter program-cast-filter">
-               <span class="program-calendar-filter-label">筛选</span>
-               <details class="program-cast-filter-details">
-                 <summary class="program-cast-filter-summary"><strong>{{ castFilterLabel }}</strong><b>⌄</b></summary>
-                 <div class="program-cast-filter-panel">
-                   <div class="program-cast-filter-actions">
-                     <button type="button" class="secondary program-action-button" @click="selectAllCast">全选</button>
-                     <button type="button" class="secondary program-action-button" @click="clearCastFilter">清空</button>
-                   </div>
-                   <div class="program-cast-tags">
-                     <button v-for="member in NIJIGASAKI_CAST" :key="member.name" type="button" class="program-cast-tag" :class="{ selected: filters.cast.includes(member.name) }" :aria-pressed="filters.cast.includes(member.name)" @click="toggleCastFilter(member.name)"><i class="program-cast-dot" :style="{ backgroundColor: member.color }"></i>{{ member.name }}</button>
-                   </div>
-                 </div>
-               </details>
+      <p v-if="error" class="state error">{{ error }}</p>
+      <div class="program-layout">
+        <section class="program-calendar-card">
+          <div class="section-heading">
+           <div><p class="eyebrow">SCHEDULE / CALENDAR</p><h2>播出日历</h2></div>
+           <div class="program-calendar-heading-actions">
+             <RouterLink class="secondary program-action-button" to="/programs/archive">已录入节目</RouterLink>
+             <div class="program-view-switch" role="tablist" aria-label="节目视图">
+               <button type="button" :class="{ selected: viewMode === 'calendar' }" role="tab" :aria-selected="viewMode === 'calendar'" @click="viewMode = 'calendar'">日历</button>
+               <button type="button" :class="{ selected: viewMode === 'list' }" role="tab" :aria-selected="viewMode === 'list'" @click="viewMode = 'list'">列表</button>
              </div>
-            <label class="program-calendar-filter">播出方式
-              <select v-model="filters.delivery" aria-label="按播出方式筛选">
-                <option value="">直播与录播</option>
-                <option value="live">直播</option>
-                <option value="recorded">录播</option>
-              </select>
-             </label>
-             <button v-if="activeFilterCount" type="button" class="secondary program-action-button program-clear-filter" @click="clearFilters">清除筛选</button>
            </div>
-           <div class="program-calendar-jump">
-             <label><span class="sr-only">年份</span><select v-model.number="jumpYear" aria-label="选择年份"><option v-for="year in yearOptions" :key="year" :value="year">{{ year }} 年</option></select></label>
-             <label><span class="sr-only">月份</span><select v-model.number="jumpMonth" aria-label="选择月份"><option v-for="month in monthOptions" :key="month.value" :value="month.value">{{ month.label }}</option></select></label>
-             <button type="button" class="program-action-button" @click="jumpToMonth">跳转</button>
+          </div>
+          <div class="program-calendar-tools">
+            <div class="program-filter-group">
+              <div class="program-calendar-filter program-cast-filter">
+                <span class="program-calendar-filter-label">筛选</span>
+                <details ref="castFilterDetails" class="program-cast-filter-details">
+                  <summary class="program-cast-filter-summary"><strong>{{ castFilterLabel }}</strong><b>⌄</b></summary>
+                  <div class="program-cast-filter-panel">
+                    <div class="program-cast-filter-actions">
+                      <button type="button" class="secondary program-action-button" @click="selectAllCast">全选</button>
+                      <button type="button" class="secondary program-action-button" @click="clearCastFilter">清空</button>
+                    </div>
+                    <div class="program-cast-tags">
+                      <button v-for="member in NIJIGASAKI_CAST" :key="member.name" type="button" class="program-cast-tag" :class="{ selected: filters.cast.includes(member.name) }" :aria-pressed="filters.cast.includes(member.name)" @click="toggleCastFilter(member.name)"><i class="program-cast-dot" :style="{ backgroundColor: member.color }"></i>{{ member.name }}</button>
+                    </div>
+                  </div>
+                </details>
+              </div>
+              <label class="program-calendar-filter">播出方式
+                <select v-model="filters.delivery" aria-label="按播出方式筛选">
+                  <option value="">直播与录播</option>
+                  <option value="live">直播</option>
+                  <option value="recorded">录播</option>
+                </select>
+              </label>
+              <button v-if="activeFilterCount" type="button" class="secondary program-action-button program-clear-filter" @click="clearFilters">清除筛选</button>
+            </div>
+            <div class="program-calendar-jump">
+              <label><span class="sr-only">年份</span><select v-model.number="jumpYear" aria-label="选择年份"><option v-for="year in yearOptions" :key="year" :value="year">{{ year }} 年</option></select></label>
+              <label><span class="sr-only">月份</span><select v-model.number="jumpMonth" aria-label="选择月份"><option v-for="month in monthOptions" :key="month.value" :value="month.value">{{ month.label }}</option></select></label>
+              <button type="button" class="program-action-button" @click="jumpToMonth">跳转</button>
             </div>
           </div>
-        <div class="section-heading">
-          <div><p class="eyebrow">SCHEDULE / CALENDAR</p><h2>播出日历</h2></div>
-          <div class="program-view-switch" role="tablist" aria-label="节目视图">
-            <button type="button" :class="{ selected: viewMode === 'calendar' }" role="tab" :aria-selected="viewMode === 'calendar'" @click="viewMode = 'calendar'">日历</button>
-            <button type="button" :class="{ selected: viewMode === 'list' }" role="tab" :aria-selected="viewMode === 'list'" @click="viewMode = 'list'">列表</button>
-          </div>
-        </div>
           <div class="program-calendar-summary">
            <span>{{ filteredProgramCount }} 个节目 · {{ monthEvents.length }} 期</span>
            <span v-if="activeFilterCount">已应用 {{ activeFilterCount }} 项筛选</span>
@@ -479,23 +535,23 @@ function closeDrawer() {
           <span><i class="program-legend-dot cancelled"></i>已取消</span>
           <small>点击单集查看节目详情</small>
          </div>
-         <div v-show="viewMode === 'calendar'">
-           <div class="program-calendar-sticky-header" aria-label="日历导航和星期">
-             <div class="program-calendar-sticky-heading">
-               <div class="program-calendar-sticky-nav">
-                 <button type="button" aria-label="上个月" title="上个月" @click="previousMonth">←</button>
-                 <button type="button" aria-label="今天" title="今天" @click="goToToday">今天</button>
-                 <button type="button" aria-label="下个月" title="下个月" @click="nextMonth">→</button>
-               </div>
-               <strong>{{ visibleMonthLabel }}</strong>
+         <div class="program-calendar-sticky-header" aria-label="日历导航和星期">
+           <div class="program-calendar-sticky-heading">
+             <div class="program-calendar-sticky-nav">
+               <button type="button" aria-label="上个月" title="上个月" @click="previousMonth">←</button>
+               <button type="button" aria-label="今天" title="今天" @click="goToToday">今天</button>
+               <button type="button" aria-label="下个月" title="下个月" @click="nextMonth">→</button>
              </div>
-             <div class="program-calendar-weekdays" aria-label="星期">
-               <span v-for="weekday in weekdayNames" :key="weekday">{{ weekday }}</span>
-             </div>
+             <strong>{{ visibleMonthLabel }}</strong>
            </div>
+           <div v-show="viewMode === 'calendar'" class="program-calendar-weekdays" aria-label="星期">
+             <span v-for="weekday in weekdayNames" :key="weekday">{{ weekday }}</span>
+           </div>
+         </div>
+         <div v-show="viewMode === 'calendar'">
            <FullCalendar ref="calendarRef" class="program-calendar" :options="calendarOptions" />
-          <p v-if="!filteredEvents.length && !loading" class="muted program-empty">当前筛选没有匹配的节目。</p>
-        </div>
+           <p v-if="!filteredEvents.length && !loading" class="muted program-empty">当前筛选没有匹配的节目。</p>
+         </div>
         <div v-if="viewMode === 'list'" class="program-list-view">
           <div class="program-list-heading">
             <div><p class="eyebrow">MONTHLY RUNNING ORDER</p><h3>{{ visibleMonthLabel }}节目列表</h3></div>
@@ -516,8 +572,11 @@ function closeDrawer() {
       </section>
     </div>
 
-    <div v-if="drawerOpen" class="program-drawer-backdrop" @click="closeDrawer"></div>
-    <aside v-if="drawerOpen && selectedEvent && selectedProgram" class="program-drawer" aria-label="节目详情">
+    <Transition name="program-drawer-backdrop">
+      <div v-if="drawerOpen" class="program-drawer-backdrop" @click="closeDrawer"></div>
+    </Transition>
+    <Transition name="program-drawer-panel">
+      <aside v-if="drawerOpen && selectedEvent && selectedProgram" class="program-drawer" aria-label="节目详情">
       <div class="program-drawer-header">
         <span class="eyebrow">PROGRAM DETAILS</span>
         <button type="button" class="icon-button" aria-label="关闭详情" title="关闭详情" @click="closeDrawer">×</button>
@@ -531,7 +590,7 @@ function closeDrawer() {
         </div>
         <h2>{{ selectedProgram.title }}</h2>
         <div class="program-occurrence-card" :class="{ cancelled: selectedEvent.occurrenceStatus === 'cancelled' }">
-           <span>第 {{ selectedEvent.episode }} 期 · {{ occurrenceAirStatus(selectedEvent) }}</span>
+            <span>{{ eventEpisodeLabel({ extendedProps: selectedEvent }) }} · {{ occurrenceAirStatus(selectedEvent) }}</span>
           <strong>{{ fullDateLabel(selectedEvent.date) }}</strong>
           <b v-if="selectedEvent.time">{{ selectedEvent.time }}</b>
            <small>显示时区：{{ deviceTimeZone }}；排期时区：{{ timezoneLabel(selectedEvent.timezone) }}</small>
@@ -554,14 +613,22 @@ function closeDrawer() {
             <dt>节目属性</dt><dd>{{ formatLabel(selectedProgram) }}</dd>
           <dt>更新排期</dt><dd>{{ scheduleLabel(selectedProgram) }}</dd>
           <dt>已播期数</dt><dd>{{ selectedProgram.episode_count }} 期</dd>
-          <dt>参与成员</dt>
-          <dd>
-            <div v-if="selectedProgram.people.length" class="program-people-tags">
-              <span v-for="person in selectedProgram.people" :key="person">{{ person }}</span>
-            </div>
-            <span v-else class="muted">未填写</span>
-          </dd>
-          <dt>排期时期</dt>
+           <dt>参与成员</dt>
+           <dd>
+             <div v-if="selectedProgram.people.length" class="program-people-tags">
+               <span v-for="person in selectedProgram.people" :key="person">{{ person }}</span>
+             </div>
+             <span v-else class="muted">未填写</span>
+           </dd>
+           <template v-if="relatedLinkItem(selectedProgram)">
+             <dt>相关链接</dt>
+             <dd><a class="program-meta-link" :href="relatedLinkItem(selectedProgram).href" target="_blank" rel="noopener noreferrer">{{ relatedLinkItem(selectedProgram).display }} ↗</a></dd>
+           </template>
+           <template v-for="link in occurrenceLinkItems(selectedEvent)" :key="link.key">
+              <dt>{{ link.label }}</dt>
+              <dd><a v-if="link.href" class="program-meta-link" :href="link.href" target="_blank" rel="noopener noreferrer">{{ link.display }} ↗</a><span v-else>{{ link.display }}</span></dd>
+            </template>
+           <dt>排期时期</dt>
           <dd>
             <ul class="program-period-summary">
               <li v-for="(period, index) in selectedProgram.periods" :key="period.id || `${period.start_date}-${index}`">
@@ -569,11 +636,18 @@ function closeDrawer() {
                 <small>{{ periodRangeLabel(period) }} · {{ timezoneLabel(period.timezone) }}</small>
               </li>
             </ul>
-          </dd>
-          <dt>档案区间</dt><dd>{{ selectedProgram.start_date }}{{ selectedProgram.end_date ? ` → ${selectedProgram.end_date}` : " → 至今" }}</dd>
-        </dl>
-        <a v-if="selectedProgram.official_url" class="source" :href="selectedProgram.official_url" target="_blank" rel="noopener noreferrer">查看节目来源 ↗</a>
-      </div>
-    </aside>
+           </dd>
+           <dt>档案区间</dt><dd>{{ selectedProgram.start_date }}{{ selectedProgram.end_date ? ` → ${selectedProgram.end_date}` : " → 至今" }}</dd>
+         </dl>
+           <div class="program-drawer-links">
+             <button type="button" class="secondary program-action-button" @click="openAdminEditor(selectedAdminEditorPath)">编辑单集</button>
+             <RouterLink class="secondary program-action-button" :to="`/programs/archive/${encodeURIComponent(selectedProgram.id)}`">查看节目详情</RouterLink>
+           </div>
+           <p v-if="editAccessNotice" class="program-edit-access-notice" role="status">
+             {{ editAccessNotice }}
+           </p>
+       </div>
+      </aside>
+    </Transition>
   </main>
 </template>

@@ -54,7 +54,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", handleKeydown));
 <template>
   <main class="page">
     <div class="detail-topline">
-      <RouterLink class="back" to="/"><span aria-hidden="true">←</span> 返回专辑目录</RouterLink>
+      <RouterLink class="back" to="/music"><span aria-hidden="true">←</span> 返回专辑目录</RouterLink>
       <span class="keyboard-hint">← / → 浏览发行</span>
     </div>
     <p v-if="loading" class="state">正在读取专辑……</p>

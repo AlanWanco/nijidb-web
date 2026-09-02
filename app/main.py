@@ -164,6 +164,10 @@ def init_db() -> None:
           id INTEGER PRIMARY KEY AUTOINCREMENT, checked_at TEXT NOT NULL,
           changed_count INTEGER NOT NULL, error TEXT
         );
+        CREATE TABLE IF NOT EXISTS database_activity_log (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
+          category TEXT NOT NULL, summary TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS programs (
           id TEXT PRIMARY KEY,
           title TEXT NOT NULL,
@@ -172,10 +176,10 @@ def init_db() -> None:
            format TEXT NOT NULL DEFAULT 'video',
            platform TEXT NOT NULL DEFAULT 'network',
            delivery TEXT NOT NULL DEFAULT 'recorded',
-           auto_generate INTEGER NOT NULL DEFAULT 1,
-           people TEXT NOT NULL DEFAULT '',
-          official_url TEXT NOT NULL DEFAULT '',
-          description TEXT NOT NULL DEFAULT '',
+          auto_generate INTEGER NOT NULL DEFAULT 1,
+          people TEXT NOT NULL DEFAULT '',
+           official_url TEXT NOT NULL DEFAULT '',
+           description TEXT NOT NULL DEFAULT '',
           frequency TEXT NOT NULL DEFAULT 'weekly',
           week_interval INTEGER NOT NULL DEFAULT 1,
           monthly_mode TEXT NOT NULL DEFAULT 'week',
@@ -186,6 +190,7 @@ def init_db() -> None:
            end_date TEXT NOT NULL DEFAULT '',
            parent_id TEXT NOT NULL DEFAULT '',
            subprogram_name TEXT NOT NULL DEFAULT '主节目',
+           episode_start INTEGER NOT NULL DEFAULT 1,
            created_at TEXT NOT NULL,
            updated_at TEXT NOT NULL
          );
@@ -211,11 +216,15 @@ def init_db() -> None:
            original_date TEXT NOT NULL,
            generated_date TEXT NOT NULL DEFAULT '',
            original_time TEXT NOT NULL DEFAULT '',
+           source_url TEXT NOT NULL DEFAULT '',
+           mirror_url TEXT NOT NULL DEFAULT '',
+           subtitle_url TEXT NOT NULL DEFAULT '',
            status TEXT NOT NULL DEFAULT 'scheduled',
            adjusted_date TEXT NOT NULL DEFAULT '',
            adjusted_time TEXT NOT NULL DEFAULT '',
            note TEXT NOT NULL DEFAULT '',
            guests TEXT NOT NULL DEFAULT '[]',
+           special TEXT NOT NULL DEFAULT '',
            materialized INTEGER NOT NULL DEFAULT 0,
            created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
@@ -231,6 +240,7 @@ def init_db() -> None:
             "auto_generate": "INTEGER NOT NULL DEFAULT 1",
             "parent_id": "TEXT NOT NULL DEFAULT ''",
             "subprogram_name": "TEXT NOT NULL DEFAULT '主节目'",
+            "episode_start": "INTEGER NOT NULL DEFAULT 1",
         }
         for name, definition in program_migrations.items():
             if name not in program_columns:
@@ -248,6 +258,14 @@ def init_db() -> None:
             conn.execute("ALTER TABLE program_occurrences ADD COLUMN guests TEXT NOT NULL DEFAULT '[]'")
         if "materialized" not in occurrence_columns:
             conn.execute("ALTER TABLE program_occurrences ADD COLUMN materialized INTEGER NOT NULL DEFAULT 0")
+        if "special" not in occurrence_columns:
+            conn.execute("ALTER TABLE program_occurrences ADD COLUMN special TEXT NOT NULL DEFAULT ''")
+        if "source_url" not in occurrence_columns:
+            conn.execute("ALTER TABLE program_occurrences ADD COLUMN source_url TEXT NOT NULL DEFAULT ''")
+        if "mirror_url" not in occurrence_columns:
+            conn.execute("ALTER TABLE program_occurrences ADD COLUMN mirror_url TEXT NOT NULL DEFAULT ''")
+        if "subtitle_url" not in occurrence_columns:
+            conn.execute("ALTER TABLE program_occurrences ADD COLUMN subtitle_url TEXT NOT NULL DEFAULT ''")
         seed_program_periods(conn)
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(releases)")}
         if "position" not in columns:
@@ -280,6 +298,50 @@ def public_settings() -> dict[str, str]:
     values = settings()
     values.pop("admin_password_hash", None)
     return values
+
+
+def log_database_activity(category: str, summary: str) -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO database_activity_log(created_at, category, summary) VALUES (?, ?, ?)",
+            (datetime.now(timezone.utc).isoformat(), category, summary),
+        )
+
+
+def recent_database_logs(limit: int = 20) -> list[dict[str, Any]]:
+    with db() as conn:
+        sync_rows = conn.execute(
+            "SELECT id, checked_at, changed_count, error FROM sync_log WHERE changed_count > 0 OR (error IS NOT NULL AND error != '') ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        activity_rows = conn.execute(
+            "SELECT id, created_at, category, summary FROM database_activity_log ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    logs = [
+        {
+            "id": f"music-{row['id']}",
+            "checked_at": row["checked_at"],
+            "category": "music",
+            "summary": f"发现 {row['changed_count']} 项变化",
+            "changed_count": row["changed_count"],
+            "error": row["error"],
+        }
+        for row in sync_rows
+    ]
+    logs.extend(
+        {
+            "id": f"program-{row['id']}",
+            "checked_at": row["created_at"],
+            "category": row["category"],
+            "summary": row["summary"],
+            "changed_count": 1,
+            "error": None,
+        }
+        for row in activity_rows
+    )
+    logs.sort(key=lambda row: row["checked_at"], reverse=True)
+    return logs[:limit]
 
 
 def admin_cookie_value(password_hash: str) -> str:
@@ -328,6 +390,7 @@ PROGRAM_TIMEZONES = {
     "America/Los_Angeles": "美国太平洋时间",
     "America/New_York": "美国东部时间",
 }
+BILIBILI_BV_PATTERN = re.compile(r"(?<![A-Za-z0-9])(BV[0-9A-Za-z]{10})(?![A-Za-z0-9])", re.IGNORECASE)
 
 
 def boolean_value(value: Any, default: bool = False) -> bool:
@@ -368,6 +431,18 @@ def normalized_people(value: Any) -> str:
     return json.dumps(people, ensure_ascii=False)
 
 
+def normalized_program_link(value: Any, label: str, allow_bilibili_id: bool = False) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if allow_bilibili_id and BILIBILI_BV_PATTERN.fullmatch(raw):
+        return f"BV{raw[2:]}"
+    parsed = urlparse(raw)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"{label}需要填写完整的 HTTP/HTTPS 地址或有效的 BV 号")
+    return raw
+
+
 def program_people(value: Any) -> list[str]:
     try:
         parsed = json.loads(value or "[]") if isinstance(value, str) else value
@@ -381,6 +456,9 @@ def program_people(value: Any) -> list[str]:
 def occurrence_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     payload = dict(row)
     payload["guests"] = program_people(payload.get("guests", "[]"))
+    payload["special"] = str(payload.get("special") or "").strip().upper()
+    for key in ("source_url", "mirror_url", "subtitle_url"):
+        payload[key] = str(payload.get(key) or "").strip()
     payload["materialized"] = boolean_value(payload.get("materialized"), False)
     if payload.get("status") == "scheduled" and payload.get("adjusted_date"):
         payload["status"] = "rescheduled"
@@ -431,6 +509,8 @@ def program_payload(
     payload = dict(row)
     payload.pop("duration_minutes", None)
     payload.pop("episode_count", None)
+    payload.pop("mirror_url", None)
+    payload.pop("subtitle_url", None)
     payload["people"] = program_people(payload.get("people", ""))
     payload["auto_generate"] = boolean_value(payload.get("auto_generate"), True)
     payload["week_interval"] = int(payload.get("week_interval") or 1)
@@ -438,6 +518,7 @@ def program_payload(
     payload["weekday"] = int(payload.get("weekday") or 0)
     payload["parent_id"] = str(payload.get("parent_id") or "").strip()
     payload["subprogram_name"] = str(payload.get("subprogram_name") or "主节目").strip() or "主节目"
+    payload["episode_start"] = 0 if str(payload.get("episode_start", 1)).strip() == "0" else 1
     payload["occurrences"] = occurrences or []
     payload["periods"] = periods if periods else ([legacy_period(payload)] if payload.get("start_date") else [])
     payload["timezone"] = payload["periods"][0].get("timezone", "Asia/Tokyo") if payload["periods"] else "Asia/Tokyo"
@@ -561,6 +642,8 @@ def normalized_program(values: dict[str, Any]) -> dict[str, Any]:
     end_date = str(values.get("end_date") or "").strip()
     parent_id = str(values.get("parent_id") or "").strip()
     subprogram_name = str(values.get("subprogram_name") or "").strip()
+    raw_episode_start = values.get("episode_start", 1)
+    episode_start = 1 if raw_episode_start in (None, "") else integer_value(raw_episode_start, "首集编号", 0, 1)
     if not parent_id:
         subprogram_name = "主节目"
     elif not subprogram_name or subprogram_name == "主节目":
@@ -606,7 +689,7 @@ def normalized_program(values: dict[str, Any]) -> dict[str, Any]:
         "delivery": delivery,
         "auto_generate": auto_generate,
         "people": normalized_people(values.get("people")),
-        "official_url": str(values.get("official_url") or "").strip(),
+        "official_url": normalized_program_link(values.get("official_url"), "相关链接"),
         "description": str(values.get("description") or "").strip(),
         "frequency": first_period["frequency"],
         "week_interval": first_period["week_interval"],
@@ -618,6 +701,7 @@ def normalized_program(values: dict[str, Any]) -> dict[str, Any]:
         "end_date": normalized_end,
         "parent_id": parent_id,
         "subprogram_name": subprogram_name,
+        "episode_start": episode_start,
         "periods": periods,
     }
 
@@ -686,6 +770,9 @@ def normalized_occurrence(values: dict[str, Any]) -> dict[str, Any]:
     status = str(values.get("status") or "scheduled").strip()
     if status not in OCCURRENCE_STATUSES:
         raise ValueError("排期状态无效")
+    special = str(values.get("special") or "").strip().upper()
+    if special not in {"", "EX"}:
+        raise ValueError("特殊节目类型无效")
     if status == "scheduled" and adjusted_date:
         status = "rescheduled"
     if status == "rescheduled" and not adjusted_date:
@@ -699,7 +786,11 @@ def normalized_occurrence(values: dict[str, Any]) -> dict[str, Any]:
         "original_date": original_date,
         "generated_date": generated_date,
         "original_time": original_time,
+        "source_url": normalized_program_link(values.get("source_url"), "源地址"),
+        "mirror_url": normalized_program_link(values.get("mirror_url"), "搬运地址", True),
+        "subtitle_url": normalized_program_link(values.get("subtitle_url"), "字幕地址", True),
         "status": status,
+        "special": special,
         "adjusted_date": adjusted_date if status == "rescheduled" else "",
         "adjusted_time": adjusted_time if status == "rescheduled" else "",
         "note": str(values.get("note") or "").strip(),
@@ -780,6 +871,7 @@ def occurrence_record(
     status = override.get("status", "scheduled")
     if status == "scheduled" and override.get("adjusted_date"):
         status = "rescheduled"
+    special = str(override.get("special") or "").strip().upper()
     record = {
         "id": override.get("id"),
         "generated": not has_override,
@@ -787,10 +879,14 @@ def occurrence_record(
         "original_date": effective_original_date,
         "generated_date": generated_date or (base_original_date if individual else ""),
         "original_time": effective_original_time,
+        "source_url": str(override.get("source_url") or "").strip(),
+        "mirror_url": str(override.get("mirror_url") or "").strip(),
+        "subtitle_url": str(override.get("subtitle_url") or "").strip(),
         "date": date.fromisoformat(event_date),
         "time": event_time,
         "timezone": timezone or program.get("timezone", "Asia/Tokyo"),
         "status": status,
+        "special": special,
         "adjusted_date": override.get("adjusted_date", ""),
         "adjusted_time": override.get("adjusted_time", ""),
         "note": override.get("note", ""),
@@ -833,7 +929,8 @@ def program_occurrence_records(program: dict[str, Any], range_start: date, range
                     )
                 )
     for row in override_rows:
-        generated_date = str(row.get("generated_date") or row["original_date"])
+        stored_generated_date = str(row.get("generated_date") or "").strip()
+        generated_date = stored_generated_date or row["original_date"]
         if generated_date in base_date_keys:
             continue
         original = date.fromisoformat(row["original_date"])
@@ -854,7 +951,7 @@ def program_occurrence_records(program: dict[str, Any], range_start: date, range
             period.get("schedule_time", ""),
             period.get("timezone", "Asia/Tokyo"),
             period.get("frequency", "weekly"),
-            manual=not generated_date and not boolean_value(row.get("materialized"), False),
+            manual=not stored_generated_date and not boolean_value(row.get("materialized"), False),
         ))
     return records
 
@@ -867,16 +964,21 @@ def effective_program_occurrences(program: dict[str, Any], range_start: date, ra
     )
 
 
-def occurrence_episode_numbers(records: list[dict[str, Any]]) -> list[int]:
-    episode = 0
+def occurrence_episode_numbers(records: list[dict[str, Any]], episode_start: int = 1) -> list[int]:
+    episode = episode_start
     numbers = []
     for record in records:
         if record["status"] in {"cancelled", "deleted"}:
-            numbers.append(episode + 1)
+            numbers.append(episode)
             continue
-        episode += 1
         numbers.append(episode)
+        if record.get("special") != "EX":
+            episode += 1
     return numbers
+
+
+def program_episode_start(program: dict[str, Any]) -> int:
+    return 0 if str(program.get("episode_start", 1)).strip() == "0" else 1
 
 
 def program_update_status(program: dict[str, Any]) -> str:
@@ -930,11 +1032,11 @@ def program_episode_count(program: dict[str, Any]) -> int:
         return 0
     occurrences = effective_program_occurrences(program, program_start, limit)
     if program.get("status") == "completed":
-        return len(occurrences)
+        return sum(1 for item in occurrences if item.get("special") != "EX")
     return sum(
         1
         for item in occurrences
-        if occurrence_has_passed(item)
+        if item.get("special") != "EX" and occurrence_has_passed(item)
     )
 
 
@@ -955,11 +1057,15 @@ def materialize_generated_occurrences(conn: sqlite3.Connection, program: dict[st
             record["original_date"],
             record.get("generated_date", ""),
             record.get("original_time", ""),
+            record.get("source_url", ""),
+            record.get("mirror_url", ""),
+            record.get("subtitle_url", ""),
             record.get("status", "scheduled"),
             "",
             "",
             "",
             json.dumps([], ensure_ascii=False),
+            record.get("special", ""),
             1,
             now,
             now,
@@ -973,9 +1079,9 @@ def materialize_generated_occurrences(conn: sqlite3.Connection, program: dict[st
     before = conn.total_changes
     conn.executemany(
         """INSERT OR IGNORE INTO program_occurrences (
-            program_id, original_date, generated_date, original_time, status,
-            adjusted_date, adjusted_time, note, guests, materialized, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            program_id, original_date, generated_date, original_time, source_url, mirror_url, subtitle_url, status,
+            adjusted_date, adjusted_time, note, guests, special, materialized, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         rows,
     )
     return conn.total_changes - before
@@ -1085,7 +1191,7 @@ def occurrence_start_value(value_date: date, value_time: str, timezone_value: st
 def program_calendar_events(program: dict[str, Any], range_start: date, range_end: date) -> list[dict[str, Any]]:
     program_start = date.fromisoformat(program["start_date"]) if program.get("start_date") else range_start
     records = sorted(program_occurrence_records(program, program_start, range_end), key=lambda record: record["original_date"])
-    episode_numbers = occurrence_episode_numbers(records)
+    episode_numbers = occurrence_episode_numbers(records, program_episode_start(program))
     events = []
     for index, record in enumerate(records):
         if record["status"] == "deleted":
@@ -1094,7 +1200,12 @@ def program_calendar_events(program: dict[str, Any], range_start: date, range_en
             continue
         episode_number = episode_numbers[index]
         update_suffix = " · 未更新" if program.get("update_status") == "not_updated" else ""
-        episode_label = f"原定第{episode_number}期" if record["status"] == "cancelled" else f"第{episode_number}期"
+        if record.get("special") == "EX":
+            episode_label = "EX 特别节目"
+        elif record["status"] == "cancelled":
+            episode_label = f"原定第{episode_number}期"
+        else:
+            episode_label = f"第{episode_number}期"
         event: dict[str, Any] = {
             "id": f"{program['id']}-{record['original_date']}",
             "title": f"{program_display_name(program)} · {episode_label}" + (" · 已取消" if record["status"] == "cancelled" else update_suffix),
@@ -1105,6 +1216,10 @@ def program_calendar_events(program: dict[str, Any], range_start: date, range_en
                 "programTitle": program["title"],
                 "subprogramName": program.get("subprogram_name") or "主节目",
                 "episode": episode_number,
+                "special": record.get("special", ""),
+                "source_url": record.get("source_url", ""),
+                "mirror_url": record.get("mirror_url", ""),
+                "subtitle_url": record.get("subtitle_url", ""),
                 "category": program["category"],
                 "status": program["status"],
                 "format": program["format"],
@@ -1734,6 +1849,14 @@ async def api_program_calendar(start: str = "", end: str = "") -> dict[str, Any]
     return {"events": events, "programs": programs, "start": range_start.isoformat(), "end": range_end.isoformat()}
 
 
+@app.get("/api/programs/{program_id}/occurrences")
+async def api_public_program_occurrences(program_id: str, start: str = "", end: str = "") -> dict[str, Any]:
+    program = next((item for item in program_rows() if item["id"] == program_id), None)
+    if not program:
+        raise HTTPException(404, "节目不存在")
+    return program_occurrence_list(program, start, end)
+
+
 @app.get("/api/programs/{program_id}")
 async def api_program_detail(program_id: str) -> dict[str, Any]:
     program = next((item for item in program_rows() if item["id"] == program_id), None)
@@ -1772,9 +1895,9 @@ async def api_logout() -> JSONResponse:
 
 
 @app.get("/api/admin/settings")
-async def api_get_settings(request: Request) -> dict[str, dict[str, str]]:
+async def api_get_settings(request: Request) -> dict[str, Any]:
     require_api_admin(request)
-    return {"settings": public_settings()}
+    return {"settings": public_settings(), "activity_logs": recent_database_logs()}
 
 
 @app.patch("/api/admin/settings")
@@ -1892,7 +2015,7 @@ async def api_change_password(request: Request) -> dict[str, str]:
 async def api_manual_sync(request: Request) -> dict[str, Any]:
     require_api_admin(request)
     changed, error = await sync_once()
-    return {"changed_count": changed, "error": error}
+    return {"changed_count": changed, "error": error, "activity_logs": recent_database_logs()}
 
 
 @app.post("/api/admin/programs")
@@ -1916,13 +2039,14 @@ async def api_create_program(request: Request) -> dict[str, Any]:
         conn.execute("""INSERT INTO programs (
             id, title, status, category, format, platform, delivery, auto_generate, people, official_url, description,
             frequency, week_interval, monthly_mode, week_index, weekday, schedule_time,
-            start_date, end_date, parent_id, subprogram_name, created_at, updated_at
+            start_date, end_date, parent_id, subprogram_name, episode_start, created_at, updated_at
         ) VALUES (
             :id, :title, :status, :category, :format, :platform, :delivery, :auto_generate, :people, :official_url, :description,
             :frequency, :week_interval, :monthly_mode, :week_index, :weekday, :schedule_time,
-            :start_date, :end_date, :parent_id, :subprogram_name, :created_at, :updated_at
+            :start_date, :end_date, :parent_id, :subprogram_name, :episode_start, :created_at, :updated_at
         )""", values)
         replace_program_periods(conn, values["id"], values["periods"], now)
+    log_database_activity("program", f"新增节目：{values['title']}")
     program = next(item for item in program_rows() if item["id"] == values["id"])
     return {"program": program}
 
@@ -1959,7 +2083,7 @@ async def api_update_program(program_id: str, request: Request) -> dict[str, Any
             people=:people, official_url=:official_url, description=:description,
             frequency=:frequency, week_interval=:week_interval, monthly_mode=:monthly_mode,
             week_index=:week_index, weekday=:weekday, schedule_time=:schedule_time,
-            start_date=:start_date, end_date=:end_date, parent_id=:parent_id, subprogram_name=:subprogram_name, updated_at=:updated_at
+            start_date=:start_date, end_date=:end_date, parent_id=:parent_id, subprogram_name=:subprogram_name, episode_start=:episode_start, updated_at=:updated_at
             WHERE id=:id""", values)
         if not values["parent_id"]:
             conn.execute(
@@ -1968,6 +2092,7 @@ async def api_update_program(program_id: str, request: Request) -> dict[str, Any
             )
         backfill_individual_occurrence_anchors(conn, program_id, old_periods, values["periods"])
         replace_program_periods(conn, program_id, values["periods"], values["updated_at"])
+    log_database_activity("program", f"更新节目：{values['title']}")
     program = next(item for item in program_rows() if item["id"] == program_id)
     return {"program": program}
 
@@ -1976,7 +2101,7 @@ async def api_update_program(program_id: str, request: Request) -> dict[str, Any
 async def api_delete_program(program_id: str, request: Request) -> dict[str, str]:
     require_api_admin(request)
     with db() as conn:
-        program = conn.execute("SELECT id, parent_id FROM programs WHERE id = ?", (program_id,)).fetchone()
+        program = conn.execute("SELECT id, title, parent_id FROM programs WHERE id = ?", (program_id,)).fetchone()
         if not program:
             raise HTTPException(404, "节目不存在")
         if not program["parent_id"] and conn.execute("SELECT 1 FROM programs WHERE parent_id = ? LIMIT 1", (program_id,)).fetchone():
@@ -1986,6 +2111,7 @@ async def api_delete_program(program_id: str, request: Request) -> dict[str, str
         result = conn.execute("DELETE FROM programs WHERE id = ?", (program_id,))
     if result.rowcount == 0:
         raise HTTPException(404, "节目不存在")
+    log_database_activity("program", f"删除节目：{program['title']}")
     return {"message": "节目已删除"}
 
 
@@ -2008,15 +2134,13 @@ async def api_update_auto_generation(program_id: str, request: Request) -> dict[
             "UPDATE programs SET auto_generate = ?, updated_at = ? WHERE id = ?",
             (int(auto_generate), datetime.now(timezone.utc).isoformat(), program_id),
         )
+    state = "开启" if auto_generate else "关闭"
+    suffix = f"，保存 {materialized_count} 期" if materialized_count else ""
+    log_database_activity("program", f"{state}自动生成：{program['title']}{suffix}")
     return {"auto_generate": auto_generate, "materialized_count": materialized_count}
 
 
-@app.get("/api/admin/programs/{program_id}/occurrences")
-async def api_program_occurrences(program_id: str, request: Request, start: str = "", end: str = "") -> dict[str, Any]:
-    require_api_admin(request)
-    program = next((item for item in program_rows() if item["id"] == program_id), None)
-    if not program:
-        raise HTTPException(404, "节目不存在")
+def program_occurrence_list(program: dict[str, Any], start: str = "", end: str = "") -> dict[str, Any]:
     today = datetime.now(JAPAN_TZ).date()
     program_start = calendar_date(program.get("start_date", ""), today)
     default_start = program_start
@@ -2028,7 +2152,7 @@ async def api_program_occurrences(program_id: str, request: Request, start: str 
     if range_end < range_start:
         raise HTTPException(400, "排期结束日期不能早于开始日期")
     records = sorted(program_occurrence_records(program, program_start, range_end), key=lambda item: item["original_date"])
-    episode_numbers = occurrence_episode_numbers(records)
+    episode_numbers = occurrence_episode_numbers(records, program_episode_start(program))
     visible_records = [
         (episode_numbers[index], record)
         for index, record in enumerate(records)
@@ -2048,6 +2172,15 @@ async def api_program_occurrences(program_id: str, request: Request, start: str 
     }
 
 
+@app.get("/api/admin/programs/{program_id}/occurrences")
+async def api_program_occurrences(program_id: str, request: Request, start: str = "", end: str = "") -> dict[str, Any]:
+    require_api_admin(request)
+    program = next((item for item in program_rows() if item["id"] == program_id), None)
+    if not program:
+        raise HTTPException(404, "节目不存在")
+    return program_occurrence_list(program, start, end)
+
+
 @app.post("/api/admin/programs/{program_id}/occurrences")
 async def api_create_occurrence(program_id: str, request: Request) -> dict[str, Any]:
     require_api_admin(request)
@@ -2064,17 +2197,19 @@ async def api_create_occurrence(program_id: str, request: Request) -> dict[str, 
     now = datetime.now(timezone.utc).isoformat()
     values.update({"program_id": program_id, "created_at": now, "updated_at": now})
     with db() as conn:
-        if not conn.execute("SELECT 1 FROM programs WHERE id = ?", (program_id,)).fetchone():
+        program = conn.execute("SELECT title FROM programs WHERE id = ?", (program_id,)).fetchone()
+        if not program:
             raise HTTPException(404, "节目不存在")
         try:
             cursor = conn.execute("""INSERT INTO program_occurrences (
-                program_id, original_date, generated_date, original_time, status, adjusted_date, adjusted_time, note, guests, created_at, updated_at
-            ) VALUES (
-                :program_id, :original_date, :generated_date, :original_time, :status, :adjusted_date, :adjusted_time, :note, :guests, :created_at, :updated_at
-            )""", values)
+            program_id, original_date, generated_date, original_time, source_url, mirror_url, subtitle_url, status, adjusted_date, adjusted_time, note, guests, special, created_at, updated_at
+        ) VALUES (
+            :program_id, :original_date, :generated_date, :original_time, :source_url, :mirror_url, :subtitle_url, :status, :adjusted_date, :adjusted_time, :note, :guests, :special, :created_at, :updated_at
+        )""", values)
         except sqlite3.IntegrityError as exc:
             raise HTTPException(409, "该原定日期已经有单集调整") from exc
         row = conn.execute("SELECT * FROM program_occurrences WHERE id = ?", (cursor.lastrowid,)).fetchone()
+    log_database_activity("program", f"新增单集：{program['title']}（{values['original_date']}）")
     return {"occurrence": occurrence_payload(row)}
 
 
@@ -2082,7 +2217,8 @@ async def api_create_occurrence(program_id: str, request: Request) -> dict[str, 
 async def api_restore_rescheduled_occurrences(program_id: str, request: Request) -> dict[str, int]:
     require_api_admin(request)
     with db() as conn:
-        if not conn.execute("SELECT 1 FROM programs WHERE id = ?", (program_id,)).fetchone():
+        program = conn.execute("SELECT title FROM programs WHERE id = ?", (program_id,)).fetchone()
+        if not program:
             raise HTTPException(404, "节目不存在")
         try:
             # Keep the old date as the generation key so monthly schedules do not duplicate the row.
@@ -2104,6 +2240,8 @@ async def api_restore_rescheduled_occurrences(program_id: str, request: Request)
             )
         except sqlite3.IntegrityError as exc:
             raise HTTPException(409, "改期时间覆盖后出现重复的原定日期") from exc
+    if result.rowcount:
+        log_database_activity("program", f"恢复改期单集：{program['title']}（{result.rowcount} 期）")
     return {"count": result.rowcount}
 
 
@@ -2118,8 +2256,11 @@ async def api_update_occurrence(program_id: str, occurrence_id: int, request: Re
         raise HTTPException(400, "请求格式无效")
     with db() as conn:
         existing = conn.execute("SELECT * FROM program_occurrences WHERE id = ? AND program_id = ?", (occurrence_id, program_id)).fetchone()
+        program = conn.execute("SELECT title FROM programs WHERE id = ?", (program_id,)).fetchone()
     if not existing:
         raise HTTPException(404, "单集排期不存在")
+    if not program:
+        raise HTTPException(404, "节目不存在")
     try:
         values = normalized_occurrence({**dict(existing), **payload})
     except ValueError as exc:
@@ -2129,11 +2270,13 @@ async def api_update_occurrence(program_id: str, occurrence_id: int, request: Re
         try:
             conn.execute("""UPDATE program_occurrences SET
                 original_date=:original_date, generated_date=:generated_date, original_time=:original_time, status=:status,
-                adjusted_date=:adjusted_date, adjusted_time=:adjusted_time, note=:note, guests=:guests, updated_at=:updated_at
+                source_url=:source_url, mirror_url=:mirror_url, subtitle_url=:subtitle_url,
+                adjusted_date=:adjusted_date, adjusted_time=:adjusted_time, note=:note, guests=:guests, special=:special, updated_at=:updated_at
                 WHERE id=:id AND program_id=:program_id""", values)
         except sqlite3.IntegrityError as exc:
             raise HTTPException(409, "该原定日期已经有单集调整") from exc
         row = conn.execute("SELECT * FROM program_occurrences WHERE id = ?", (occurrence_id,)).fetchone()
+    log_database_activity("program", f"修改单集：{program['title']}（{values['original_date']}）")
     return {"occurrence": occurrence_payload(row)}
 
 
@@ -2141,6 +2284,7 @@ async def api_update_occurrence(program_id: str, occurrence_id: int, request: Re
 async def api_delete_occurrence(program_id: str, occurrence_id: int, request: Request) -> dict[str, str]:
     require_api_admin(request)
     with db() as conn:
+        program = conn.execute("SELECT title FROM programs WHERE id = ?", (program_id,)).fetchone()
         result = conn.execute(
             """UPDATE program_occurrences
                SET status = 'deleted', adjusted_date = '', adjusted_time = '', updated_at = ?
@@ -2149,6 +2293,8 @@ async def api_delete_occurrence(program_id: str, occurrence_id: int, request: Re
         )
     if result.rowcount == 0:
         raise HTTPException(404, "单集排期不存在")
+    if program:
+        log_database_activity("program", f"删除单集：{program['title']}（编号 {occurrence_id}）")
     return {"message": "单集已删除"}
 
 

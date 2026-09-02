@@ -28,7 +28,7 @@ async function loadReleases() {
 
 function search() {
   const nextQuery = query.value.trim();
-  router.push(nextQuery ? { path: "/", query: { q: nextQuery } } : { path: "/" });
+  router.push(nextQuery ? { path: "/music", query: { q: nextQuery } } : { path: "/music" });
 }
 
 watch(() => route.query.q, value => {

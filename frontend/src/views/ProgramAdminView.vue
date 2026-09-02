@@ -91,6 +91,8 @@ function blankOccurrence() {
     generated_date: "",
     original_time: "",
     delivery: "",
+    effective_date: "",
+    shift_following_days: 0,
     source_url: "",
     mirror_url: "",
     subtitle_url: "",
@@ -126,6 +128,12 @@ const deletedOccurrenceCount = computed(() => occurrenceRows.value.filter(row =>
 const adjustedOccurrenceCount = computed(() => occurrenceRows.value.filter(row => !row.generated && !row.materialized && row.status !== "deleted").length);
 const occurrenceTimezone = computed(() => occurrenceDraft.timezone || form.periods.find(period => period.start_date && occurrenceDraft.original_date >= period.start_date && (!period.end_date || occurrenceDraft.original_date <= period.end_date))?.timezone || form.periods[0]?.timezone || "Asia/Tokyo");
 const occurrenceTimezoneLabel = computed(() => timezoneOptions.find(option => option.value === occurrenceTimezone.value)?.label || occurrenceTimezone.value);
+const occurrencePeriod = computed(() => {
+  const anchor = occurrenceDraft.generated_date || occurrenceDraft.original_date;
+  return form.periods.find(period => period.start_date && anchor >= period.start_date && (!period.end_date || anchor <= period.end_date)) || null;
+});
+const canShiftFollowing = computed(() => occurrencePeriod.value?.frequency === "weekly" && Number(occurrencePeriod.value.week_interval) === 2);
+const occurrenceRescheduleBaseDate = computed(() => occurrenceDraft.effective_date || occurrenceDraft.adjusted_date || occurrenceDraft.original_date);
 const occurrenceDeleteLabel = computed(() => occurrenceDraft.status === "deleted" ? "恢复单集" : "删除单集");
 const selectedOccurrenceIndex = computed(() => {
   if (!occurrenceDraft.original_date) return -1;
@@ -471,12 +479,25 @@ function removeOccurrenceGuest(guest) {
 function setOccurrenceStatus(status) {
   occurrenceDraft.status = status;
   if (status === "rescheduled") {
-    occurrenceDraft.adjusted_date ||= occurrenceDraft.original_date;
+    occurrenceDraft.adjusted_date ||= occurrenceRescheduleBaseDate.value;
     occurrenceDraft.adjusted_time ||= occurrenceDraft.original_time;
   } else {
     occurrenceDraft.adjusted_date = "";
     occurrenceDraft.adjusted_time = "";
+    occurrenceDraft.shift_following_days = 0;
   }
+}
+
+function addDays(value, days) {
+  if (!value) return "";
+  const [year, month, day] = value.split("-").map(Number);
+  const shifted = new Date(Date.UTC(year, month - 1, day + days));
+  return shifted.toISOString().slice(0, 10);
+}
+
+function setOccurrenceShift(enabled) {
+  occurrenceDraft.shift_following_days = enabled ? 7 : 0;
+  if (enabled) occurrenceDraft.adjusted_date = addDays(occurrenceRescheduleBaseDate.value, 7);
 }
 
 function newSubprogram(parent) {
@@ -640,6 +661,8 @@ function editOccurrence(row) {
     generated_date: row.generated_date || "",
     original_time: row.original_time || "",
     delivery: row.delivery_override || "",
+    effective_date: row.date || row.adjusted_date || row.original_date || "",
+    shift_following_days: Number(row.shift_following_days) === 7 ? 7 : 0,
     source_url: row.source_url || "",
     mirror_url: row.mirror_url || "",
     subtitle_url: row.subtitle_url || "",
@@ -732,6 +755,7 @@ async function saveOccurrence() {
       generated_date: occurrenceDraft.generated_date,
       original_time: occurrenceDraft.original_time,
       delivery: occurrenceDraft.delivery,
+      shift_following_days: occurrenceDraft.shift_following_days,
       source_url: occurrenceDraft.source_url,
       mirror_url: occurrenceDraft.mirror_url,
       subtitle_url: occurrenceDraft.subtitle_url,
@@ -1100,11 +1124,18 @@ onUnmounted(() => {
              </div>
               <small>正常播出不会修改排期日期；需要更换日期时选择“已改期”。“因故取消”会保留单集并标记已取消；删除会移除单集，不再显示。</small>
            </div>
-            <div v-if="occurrenceDraft.status === 'rescheduled'" class="occurrence-date-row">
-              <label>调整日期<VueDatePicker v-model="occurrenceDraft.adjusted_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" locale="zh-CN" :enable-time-picker="false" auto-apply :clearable="false" :teleport="true" placeholder="选择新日期" required /></label>
-               <label>调整时间<VueDatePicker v-model="occurrenceDraft.adjusted_time" class="program-date-picker" time-picker model-type="HH:mm" format="HH:mm" locale="zh-CN" auto-apply :clearable="true" :is-24="true" :teleport="true" text-input placeholder="沿用原定时间" /></label>
-            </div>
-            <div class="occurrence-link-fields">
+             <div v-if="occurrenceDraft.status === 'rescheduled'" class="occurrence-date-row">
+               <label>调整日期<VueDatePicker v-model="occurrenceDraft.adjusted_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" locale="zh-CN" :enable-time-picker="false" auto-apply :clearable="false" :teleport="true" placeholder="选择新日期" required /></label>
+                <label>调整时间<VueDatePicker v-model="occurrenceDraft.adjusted_time" class="program-date-picker" time-picker model-type="HH:mm" format="HH:mm" locale="zh-CN" auto-apply :clearable="true" :is-24="true" :teleport="true" text-input placeholder="沿用原定时间" /></label>
+             </div>
+             <div v-if="occurrenceDraft.status === 'rescheduled' && canShiftFollowing" class="program-form-field program-field-wide">
+               <span class="program-field-label">后续排期</span>
+               <div class="choice-tags">
+                 <button type="button" :class="{ selected: occurrenceDraft.shift_following_days === 7 }" @click="setOccurrenceShift(occurrenceDraft.shift_following_days !== 7)">{{ occurrenceDraft.shift_following_days === 7 ? "已顺延一周" : "顺延一周" }}</button>
+               </div>
+               <small>本期原定周视为不播，本期顺延一周；之后的隔两周排期也从这里起整体顺延一周。</small>
+             </div>
+             <div class="occurrence-link-fields">
               <label class="occurrence-source-field"><span class="program-field-label">源地址</span><input v-model="occurrenceDraft.source_url" type="url" placeholder="https://"></label>
               <label><span class="program-field-label">搬运地址</span><input v-model="occurrenceDraft.mirror_url" type="text" placeholder="BV号或B站地址"></label>
               <label><span class="program-field-label">字幕地址</span><input v-model="occurrenceDraft.subtitle_url" type="text" placeholder="BV号或B站地址"></label>

@@ -213,11 +213,12 @@ def init_db() -> None:
          CREATE TABLE IF NOT EXISTS program_occurrences (
            id INTEGER PRIMARY KEY AUTOINCREMENT,
            program_id TEXT NOT NULL,
-           original_date TEXT NOT NULL,
-            generated_date TEXT NOT NULL DEFAULT '',
-            original_time TEXT NOT NULL DEFAULT '',
-            delivery TEXT NOT NULL DEFAULT '',
-            source_url TEXT NOT NULL DEFAULT '',
+            original_date TEXT NOT NULL,
+             generated_date TEXT NOT NULL DEFAULT '',
+             original_time TEXT NOT NULL DEFAULT '',
+             delivery TEXT NOT NULL DEFAULT '',
+             shift_following_days INTEGER NOT NULL DEFAULT 0,
+             source_url TEXT NOT NULL DEFAULT '',
            mirror_url TEXT NOT NULL DEFAULT '',
            subtitle_url TEXT NOT NULL DEFAULT '',
            status TEXT NOT NULL DEFAULT 'scheduled',
@@ -269,6 +270,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE program_occurrences ADD COLUMN subtitle_url TEXT NOT NULL DEFAULT ''")
         if "delivery" not in occurrence_columns:
             conn.execute("ALTER TABLE program_occurrences ADD COLUMN delivery TEXT NOT NULL DEFAULT ''")
+        if "shift_following_days" not in occurrence_columns:
+            conn.execute("ALTER TABLE program_occurrences ADD COLUMN shift_following_days INTEGER NOT NULL DEFAULT 0")
         seed_program_periods(conn)
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(releases)")}
         if "position" not in columns:
@@ -416,6 +419,13 @@ def integer_value(value: Any, label: str, minimum: int, maximum: int) -> int:
     return result
 
 
+def occurrence_shift_days(value: Any) -> int:
+    try:
+        return 7 if int(value or 0) == 7 else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 def normalized_people(value: Any) -> str:
     source = value
     if isinstance(value, str):
@@ -462,6 +472,7 @@ def occurrence_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     payload["special"] = str(payload.get("special") or "").strip().upper()
     delivery = str(payload.get("delivery") or "").strip()
     payload["delivery"] = delivery if delivery in PROGRAM_DELIVERIES else ""
+    payload["shift_following_days"] = occurrence_shift_days(payload.get("shift_following_days"))
     for key in ("source_url", "mirror_url", "subtitle_url"):
         payload[key] = str(payload.get(key) or "").strip()
     payload["materialized"] = boolean_value(payload.get("materialized"), False)
@@ -785,6 +796,11 @@ def normalized_occurrence(values: dict[str, Any]) -> dict[str, Any]:
     delivery = str(values.get("delivery") or "").strip()
     if delivery and delivery not in PROGRAM_DELIVERIES:
         raise ValueError("单集播出方式无效")
+    shift_following_days = integer_value(values.get("shift_following_days"), "后续顺延天数", 0, 7)
+    if shift_following_days not in {0, 7}:
+        raise ValueError("后续顺延天数只能为 0 或 7")
+    if shift_following_days and status != "rescheduled":
+        raise ValueError("只有已改期单集可以顺延后续排期")
     original_time = str(values.get("original_time") or "").strip()
     adjusted_time = str(values.get("adjusted_time") or "").strip()
     for label, value in (("原定时间", original_time), ("调整时间", adjusted_time)):
@@ -795,6 +811,7 @@ def normalized_occurrence(values: dict[str, Any]) -> dict[str, Any]:
         "generated_date": generated_date,
         "original_time": original_time,
         "delivery": delivery,
+        "shift_following_days": shift_following_days,
         "source_url": normalized_program_link(values.get("source_url"), "源地址"),
         "mirror_url": normalized_program_link(values.get("mirror_url"), "搬运地址", True),
         "subtitle_url": normalized_program_link(values.get("subtitle_url"), "字幕地址", True),
@@ -866,6 +883,7 @@ def occurrence_record(
     timezone: str = "Asia/Tokyo",
     frequency: str = "",
     manual: bool = False,
+    schedule_shift_days: int = 0,
 ) -> dict[str, Any]:
     has_override = bool(override)
     override = override or {}
@@ -879,7 +897,13 @@ def occurrence_record(
     if delivery_override not in PROGRAM_DELIVERIES:
         delivery_override = ""
     delivery = delivery_override or str(program.get("delivery") or "recorded")
-    event_date = override.get("adjusted_date") or effective_original_date
+    shift_following_days = occurrence_shift_days(override.get("shift_following_days")) if has_override else 0
+    explicit_adjusted_date = str(override.get("adjusted_date") or "").strip()
+    event_date = explicit_adjusted_date or effective_original_date
+    shifted_by_reschedule = False
+    if not explicit_adjusted_date and schedule_shift_days:
+        event_date = (date.fromisoformat(event_date) + timedelta(days=schedule_shift_days)).isoformat()
+        shifted_by_reschedule = True
     event_time = override.get("adjusted_time") or effective_original_time
     status = override.get("status", "scheduled")
     if status == "scheduled" and override.get("adjusted_date"):
@@ -894,6 +918,9 @@ def occurrence_record(
         "original_time": effective_original_time,
         "delivery": delivery,
         "delivery_override": delivery_override,
+        "shift_following_days": shift_following_days,
+        "schedule_shift_days": schedule_shift_days,
+        "shifted_by_reschedule": shifted_by_reschedule,
         "source_url": str(override.get("source_url") or "").strip(),
         "mirror_url": str(override.get("mirror_url") or "").strip(),
         "subtitle_url": str(override.get("subtitle_url") or "").strip(),
@@ -932,17 +959,21 @@ def program_occurrence_records(program: dict[str, Any], range_start: date, range
                 continue
             base_dates = period_recurring_dates(period, period_generation_end)
             base_date_keys.update(item.isoformat() for item in base_dates)
+            schedule_shift_days = 0
+            can_shift_following = period.get("frequency") == "weekly" and int(period.get("week_interval") or 1) == 2
             for original in base_dates:
-                records.append(
-                    occurrence_record(
-                        program,
-                        original,
-                        overrides.get(original.isoformat()),
-                        period.get("schedule_time", ""),
-                        period.get("timezone", "Asia/Tokyo"),
-                        period.get("frequency", "weekly"),
-                    )
+                record = occurrence_record(
+                    program,
+                    original,
+                    overrides.get(original.isoformat()),
+                    period.get("schedule_time", ""),
+                    period.get("timezone", "Asia/Tokyo"),
+                    period.get("frequency", "weekly"),
+                    schedule_shift_days=schedule_shift_days,
                 )
+                records.append(record)
+                if can_shift_following and record["status"] == "rescheduled":
+                    schedule_shift_days += record.get("shift_following_days", 0)
     for row in override_rows:
         stored_generated_date = str(row.get("generated_date") or "").strip()
         generated_date = stored_generated_date or row["original_date"]
@@ -1073,11 +1104,12 @@ def materialize_generated_occurrences(conn: sqlite3.Connection, program: dict[st
             record.get("generated_date", ""),
             record.get("original_time", ""),
             record.get("delivery_override", ""),
+            0,
             record.get("source_url", ""),
             record.get("mirror_url", ""),
             record.get("subtitle_url", ""),
-            record.get("status", "scheduled"),
-            "",
+            "rescheduled" if record["date"].isoformat() != record["original_date"] else record.get("status", "scheduled"),
+            record["date"].isoformat() if record["date"].isoformat() != record["original_date"] else "",
             "",
             "",
             json.dumps([], ensure_ascii=False),
@@ -1095,9 +1127,9 @@ def materialize_generated_occurrences(conn: sqlite3.Connection, program: dict[st
     before = conn.total_changes
     conn.executemany(
         """INSERT OR IGNORE INTO program_occurrences (
-            program_id, original_date, generated_date, original_time, delivery, source_url, mirror_url, subtitle_url, status,
+            program_id, original_date, generated_date, original_time, delivery, shift_following_days, source_url, mirror_url, subtitle_url, status,
             adjusted_date, adjusted_time, note, guests, special, materialized, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         rows,
     )
     return conn.total_changes - before
@@ -2240,7 +2272,7 @@ async def api_restore_rescheduled_occurrences(program_id: str, request: Request)
             # Keep the old date as the generation key so monthly schedules do not duplicate the row.
             conn.execute(
                 """UPDATE program_occurrences
-                   SET generated_date = original_date
+                   SET generated_date = original_date, shift_following_days = 0
                    WHERE program_id = ? AND generated_date = ''
                      AND (status = 'rescheduled' OR adjusted_date != '' OR adjusted_time != '')""",
                 (program_id,),
@@ -2249,7 +2281,7 @@ async def api_restore_rescheduled_occurrences(program_id: str, request: Request)
                 """UPDATE program_occurrences
                    SET original_date = CASE WHEN adjusted_date != '' THEN adjusted_date ELSE original_date END,
                        original_time = CASE WHEN adjusted_time != '' THEN adjusted_time ELSE original_time END,
-                       status = 'scheduled', adjusted_date = '', adjusted_time = '', updated_at = ?
+                       status = 'scheduled', adjusted_date = '', adjusted_time = '', shift_following_days = 0, updated_at = ?
                    WHERE program_id = ?
                      AND (status = 'rescheduled' OR adjusted_date != '' OR adjusted_time != '')""",
                 (datetime.now(timezone.utc).isoformat(), program_id),
@@ -2285,7 +2317,7 @@ async def api_update_occurrence(program_id: str, occurrence_id: int, request: Re
     with db() as conn:
         try:
             conn.execute("""UPDATE program_occurrences SET
-                original_date=:original_date, generated_date=:generated_date, original_time=:original_time, delivery=:delivery, status=:status,
+                original_date=:original_date, generated_date=:generated_date, original_time=:original_time, delivery=:delivery, shift_following_days=:shift_following_days, status=:status,
                 source_url=:source_url, mirror_url=:mirror_url, subtitle_url=:subtitle_url,
                 adjusted_date=:adjusted_date, adjusted_time=:adjusted_time, note=:note, guests=:guests, special=:special, updated_at=:updated_at
                 WHERE id=:id AND program_id=:program_id""", values)
@@ -2303,7 +2335,7 @@ async def api_delete_occurrence(program_id: str, occurrence_id: int, request: Re
         program = conn.execute("SELECT title FROM programs WHERE id = ?", (program_id,)).fetchone()
         result = conn.execute(
             """UPDATE program_occurrences
-               SET status = 'deleted', adjusted_date = '', adjusted_time = '', updated_at = ?
+               SET status = 'deleted', adjusted_date = '', adjusted_time = '', shift_following_days = 0, updated_at = ?
                WHERE id = ? AND program_id = ?""",
             (datetime.now(timezone.utc).isoformat(), occurrence_id, program_id),
         )

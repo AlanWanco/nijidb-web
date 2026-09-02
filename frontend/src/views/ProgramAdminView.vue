@@ -138,6 +138,7 @@ const requestedProgramId = computed(() => typeof route.query.program === "string
 const requestedPanel = computed(() => typeof route.query.panel === "string" ? route.query.panel : "edit");
 const requestedOccurrenceId = computed(() => typeof route.query.occurrence === "string" ? route.query.occurrence : "");
 const requestedOccurrenceDate = computed(() => typeof route.query.date === "string" ? route.query.date : "");
+const requestedNewProgram = computed(() => route.query.new === "1");
 
 watch(() => occurrenceDraft.original_date, value => {
   if (occurrenceDraft.status === "rescheduled" && !occurrenceDraft.adjusted_date) occurrenceDraft.adjusted_date = value;
@@ -305,6 +306,10 @@ async function loadPrograms() {
 }
 
 async function openRequestedProgram() {
+  if (requestedNewProgram.value) {
+    startNewProgram();
+    return;
+  }
   if (!requestedProgramId.value) return;
   const program = programs.value.find(item => item.id === requestedProgramId.value);
   if (!program) {

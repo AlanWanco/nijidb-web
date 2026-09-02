@@ -4531,6 +4531,13 @@ html[data-theme="mocha"] .dp__theme_dark {
   gap: 9px;
 }
 
+.program-readonly-list-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .program-readonly-detail-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(250px, .85fr);
@@ -5187,6 +5194,11 @@ html[data-theme="mocha"] .dp__theme_dark {
 
   .program-readonly-actions {
     width: 100%;
+  }
+
+  .program-readonly-list-actions {
+    width: 100%;
+    justify-content: space-between;
   }
 
   .program-readonly-actions > * {

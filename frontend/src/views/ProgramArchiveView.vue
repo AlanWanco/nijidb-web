@@ -37,6 +37,7 @@ const selectedAdminProgramPath = computed(() => programId.value ? programAdminPa
 const selectedAdminOccurrencePath = computed(() => programId.value
   ? programAdminPath(programId.value, { panel: "occurrences" })
   : "/admin/programs");
+const newAdminProgramPath = "/admin/programs?new=1";
 const allCastSelected = computed(() => castFilter.value.length === NIJIGASAKI_CAST.length);
 const castFilterLabel = computed(() => {
   if (!castFilter.value.length || allCastSelected.value) return "全部 Cast";
@@ -259,7 +260,10 @@ onUnmounted(() => document.removeEventListener("click", closeCastFilter));
       <section class="program-calendar-card program-readonly-list-card" :class="{ 'program-cast-filter-open': castFilterOpen }">
         <div class="section-heading">
           <div><p class="eyebrow">CURRENT ENTRIES</p><h2>已录入节目</h2></div>
-          <span class="section-count">{{ filteredPrograms.length }}<small v-if="keyword || castFilter.length"> / {{ programs.length }}</small></span>
+          <div class="program-readonly-list-actions">
+            <span class="section-count">{{ filteredPrograms.length }}<small v-if="keyword || castFilter.length"> / {{ programs.length }}</small></span>
+            <button type="button" class="secondary program-action-button" @click="openAdminEditor(newAdminProgramPath)">新建节目</button>
+          </div>
         </div>
         <div class="program-readonly-tools">
           <label class="program-readonly-search">

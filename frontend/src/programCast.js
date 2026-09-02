@@ -13,7 +13,7 @@ export const NIJIGASAKI_CAST = [
   { name: "小泉萌香", aliases: [], color: "#37b484" },
   { name: "内田秀", aliases: [], color: "#a99e98" },
   { name: "法元明菜", aliases: [], color: "#f8c8c4" },
-  { name: "矢野妃菜喜", aliases: [], color: "#1d1d1d" },
+  { name: "矢野妃菜喜", aliases: [], color: "#2f2f2f" },
 ];
 
 export function castColorSegments(people = []) {

@@ -2251,10 +2251,10 @@ async def api_create_occurrence(program_id: str, request: Request) -> dict[str, 
             raise HTTPException(404, "节目不存在")
         try:
             cursor = conn.execute("""INSERT INTO program_occurrences (
-            program_id, original_date, generated_date, original_time, delivery, source_url, mirror_url, subtitle_url, status, adjusted_date, adjusted_time, note, guests, special, created_at, updated_at
-        ) VALUES (
-            :program_id, :original_date, :generated_date, :original_time, :delivery, :source_url, :mirror_url, :subtitle_url, :status, :adjusted_date, :adjusted_time, :note, :guests, :special, :created_at, :updated_at
-        )""", values)
+            program_id, original_date, generated_date, original_time, delivery, shift_following_days, source_url, mirror_url, subtitle_url, status, adjusted_date, adjusted_time, note, guests, special, created_at, updated_at
+         ) VALUES (
+            :program_id, :original_date, :generated_date, :original_time, :delivery, :shift_following_days, :source_url, :mirror_url, :subtitle_url, :status, :adjusted_date, :adjusted_time, :note, :guests, :special, :created_at, :updated_at
+         )""", values)
         except sqlite3.IntegrityError as exc:
             raise HTTPException(409, "该原定日期已经有单集调整") from exc
         row = conn.execute("SELECT * FROM program_occurrences WHERE id = ?", (cursor.lastrowid,)).fetchone()

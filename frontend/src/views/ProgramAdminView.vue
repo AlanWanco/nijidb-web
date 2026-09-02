@@ -747,6 +747,26 @@ function leaveOccurrenceFocus() {
   activePanel.value = "edit";
 }
 
+function occurrenceBody(overrides = {}) {
+  return {
+    original_date: occurrenceDraft.original_date,
+    generated_date: occurrenceDraft.generated_date,
+    original_time: occurrenceDraft.original_time,
+    delivery: occurrenceDraft.delivery,
+    shift_following_days: occurrenceDraft.shift_following_days,
+    source_url: occurrenceDraft.source_url,
+    mirror_url: occurrenceDraft.mirror_url,
+    subtitle_url: occurrenceDraft.subtitle_url,
+    status: occurrenceDraft.status,
+    special: occurrenceDraft.special,
+    adjusted_date: occurrenceDraft.adjusted_date,
+    adjusted_time: occurrenceDraft.adjusted_time,
+    note: occurrenceDraft.note,
+    guests: [...occurrenceDraft.guests],
+    ...overrides,
+  };
+}
+
 async function saveOccurrence() {
   if (!editingId.value) return;
   const position = captureOccurrencePosition();
@@ -754,22 +774,7 @@ async function saveOccurrence() {
   message.value = "";
   error.value = "";
   try {
-    const body = {
-      original_date: occurrenceDraft.original_date,
-      generated_date: occurrenceDraft.generated_date,
-      original_time: occurrenceDraft.original_time,
-      delivery: occurrenceDraft.delivery,
-      shift_following_days: occurrenceDraft.shift_following_days,
-      source_url: occurrenceDraft.source_url,
-      mirror_url: occurrenceDraft.mirror_url,
-      subtitle_url: occurrenceDraft.subtitle_url,
-      status: occurrenceDraft.status,
-      special: occurrenceDraft.special,
-      adjusted_date: occurrenceDraft.adjusted_date,
-      adjusted_time: occurrenceDraft.adjusted_time,
-      note: occurrenceDraft.note,
-      guests: [...occurrenceDraft.guests],
-    };
+    const body = occurrenceBody();
     const path = occurrenceDraft.id
       ? `/api/admin/programs/${editingId.value}/occurrences/${occurrenceDraft.id}`
       : `/api/admin/programs/${editingId.value}/occurrences`;
@@ -788,12 +793,19 @@ async function saveOccurrence() {
 }
 
 async function deleteOccurrence() {
-  if (!occurrenceDraft.id || !editingId.value) return;
+  if ((!occurrenceDraft.id && !occurrenceDraft.generated) || !editingId.value) return;
   if (!window.confirm("删除后，这条单集不会再显示在生成列表和日历中；如需保留请使用“因故取消”。继续吗？")) return;
   const position = captureOccurrencePosition();
   occurrenceSaving.value = true;
   try {
-    await api(`/api/admin/programs/${editingId.value}/occurrences/${occurrenceDraft.id}`, { method: "DELETE" });
+    if (occurrenceDraft.id) {
+      await api(`/api/admin/programs/${editingId.value}/occurrences/${occurrenceDraft.id}`, { method: "DELETE" });
+    } else {
+      await api(`/api/admin/programs/${editingId.value}/occurrences`, {
+        method: "POST",
+        body: occurrenceBody({ status: "deleted", adjusted_date: "", adjusted_time: "", shift_following_days: 0 }),
+      });
+    }
     await Promise.all([loadPrograms(), loadOccurrences(editingId.value)]);
     resetOccurrenceDraft();
     await restoreOccurrencePosition(position);
@@ -1096,9 +1108,9 @@ onUnmounted(() => {
         <form class="occurrence-form" @submit.prevent="saveOccurrence">
            <div class="occurrence-form-heading">
              <button type="button" class="occurrence-nav-button" :disabled="!canPreviousOccurrence" aria-label="上一集" title="上一集" @click="selectAdjacentOccurrence(-1)">←</button>
-             <div><p class="form-kicker">ONE EPISODE</p><h3>{{ occurrenceDraft.id ? "编辑单集" : "添加单集调整" }}</h3></div>
-             <button type="button" class="occurrence-nav-button" :disabled="!canNextOccurrence" aria-label="下一集" title="下一集" @click="selectAdjacentOccurrence(1)">→</button>
-             <span v-if="occurrenceDraft.id" class="program-kind">已保存</span>
+              <div><p class="form-kicker">ONE EPISODE</p><h3>{{ occurrenceDraft.id || occurrenceDraft.generated ? "编辑单集" : "添加单集调整" }}</h3></div>
+              <button type="button" class="occurrence-nav-button" :disabled="!canNextOccurrence" aria-label="下一集" title="下一集" @click="selectAdjacentOccurrence(1)">→</button>
+              <span v-if="occurrenceDraft.id || occurrenceDraft.generated" class="program-kind">{{ occurrenceDraft.id ? "已保存" : "自动生成" }}</span>
            </div>
             <label>原定日期<VueDatePicker v-model="occurrenceDraft.original_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" locale="zh-CN" :enable-time-picker="false" auto-apply :clearable="false" :readonly="occurrenceOriginalLocked" :teleport="true" placeholder="选择日期" /><small>{{ occurrenceDraft.individual ? "逐期设置模式：可直接修改本期原定日期。" : occurrenceOriginalLocked ? "来自节目排期规则，不能修改原定日期。" : "手动补录单集时填写原定日期。" }}</small></label>
                <label>原定时间<VueDatePicker v-model="occurrenceDraft.original_time" class="program-date-picker" time-picker model-type="HH:mm" format="HH:mm" locale="zh-CN" auto-apply :clearable="true" :is-24="true" :readonly="occurrenceOriginalLocked" :teleport="true" text-input placeholder="选择时间" /><small>{{ occurrenceDraft.individual ? "逐期设置模式：可直接修改本期原定时间。" : occurrenceOriginalLocked ? "来自排期规则，只能修改调整日期；调整时间已默认沿用原定时间。" : "手动补录单集时填写原定时间。" }}节目排期时区：{{ occurrenceTimezoneLabel }}；日历会按访问设备时区显示。</small></label>
@@ -1160,7 +1172,7 @@ onUnmounted(() => {
            </div>
           <div class="actions">
              <button class="program-action-button" :disabled="occurrenceSaving">{{ occurrenceSaving ? "保存中……" : "保存本期调整" }}</button>
-              <button v-if="occurrenceDraft.id" type="button" class="program-action-button" :class="occurrenceDraft.status === 'deleted' ? 'secondary' : 'danger'" :disabled="occurrenceSaving" @click="toggleOccurrenceDeletion">{{ occurrenceDeleteLabel }}</button>
+              <button v-if="occurrenceDraft.id || occurrenceDraft.generated" type="button" class="program-action-button" :class="occurrenceDraft.status === 'deleted' ? 'secondary' : 'danger'" :disabled="occurrenceSaving" @click="toggleOccurrenceDeletion">{{ occurrenceDeleteLabel }}</button>
              <button type="button" class="secondary program-action-button" @click="resetOccurrenceDraft">清空</button>
           </div>
         </form>

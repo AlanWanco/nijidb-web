@@ -12,7 +12,7 @@ import secrets
 import sqlite3
 import tempfile
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urljoin, urlparse
@@ -216,6 +216,7 @@ def init_db() -> None:
            adjusted_time TEXT NOT NULL DEFAULT '',
            note TEXT NOT NULL DEFAULT '',
            guests TEXT NOT NULL DEFAULT '[]',
+           materialized INTEGER NOT NULL DEFAULT 0,
            created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
           UNIQUE(program_id, original_date)
@@ -245,6 +246,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE program_occurrences ADD COLUMN generated_date TEXT NOT NULL DEFAULT ''")
         if "guests" not in occurrence_columns:
             conn.execute("ALTER TABLE program_occurrences ADD COLUMN guests TEXT NOT NULL DEFAULT '[]'")
+        if "materialized" not in occurrence_columns:
+            conn.execute("ALTER TABLE program_occurrences ADD COLUMN materialized INTEGER NOT NULL DEFAULT 0")
         seed_program_periods(conn)
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(releases)")}
         if "position" not in columns:
@@ -315,7 +318,7 @@ PROGRAM_FORMATS = {"video", "radio"}
 PROGRAM_PLATFORMS = {"tv", "network"}
 PROGRAM_DELIVERIES = {"live", "recorded"}
 PROGRAM_FREQUENCIES = {"weekly", "monthly", "individual", "single"}
-OCCURRENCE_STATUSES = {"scheduled", "rescheduled", "cancelled"}
+OCCURRENCE_STATUSES = {"scheduled", "rescheduled", "cancelled", "deleted"}
 PROGRAM_FORECAST_DAYS = 183
 PROGRAM_TIMEZONES = {
     "Asia/Tokyo": "东京时间",
@@ -378,6 +381,7 @@ def program_people(value: Any) -> list[str]:
 def occurrence_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     payload = dict(row)
     payload["guests"] = program_people(payload.get("guests", "[]"))
+    payload["materialized"] = boolean_value(payload.get("materialized"), False)
     if payload.get("status") == "scheduled" and payload.get("adjusted_date"):
         payload["status"] = "rescheduled"
     return payload
@@ -737,10 +741,9 @@ def period_recurring_dates(period: dict[str, Any], range_end: date) -> list[date
         return dates
     if period["frequency"] == "individual":
         dates = []
-        current = date(period_start.year, period_start.month, 1)
+        current = period_start
         while current <= range_end:
-            if period_start <= current:
-                dates.append(current)
+            dates.append(current)
             current = date(current.year + (current.month == 12), current.month % 12 + 1, 1)
         return dates
     if period["frequency"] != "monthly" or not period.get("week_index"):
@@ -762,6 +765,7 @@ def occurrence_record(
     schedule_time: str = "",
     timezone: str = "Asia/Tokyo",
     frequency: str = "",
+    manual: bool = False,
 ) -> dict[str, Any]:
     has_override = bool(override)
     override = override or {}
@@ -791,8 +795,10 @@ def occurrence_record(
         "adjusted_time": override.get("adjusted_time", ""),
         "note": override.get("note", ""),
         "guests": program_people(override.get("guests", [])),
+        "materialized": boolean_value(override.get("materialized"), False),
+        "manual": manual,
     }
-    record["aired"] = record["status"] != "cancelled" and occurrence_has_passed(record)
+    record["aired"] = record["status"] not in {"cancelled", "deleted"} and occurrence_has_passed(record)
     return record
 
 
@@ -841,14 +847,22 @@ def program_occurrence_records(program: dict[str, Any], range_start: date, range
             ),
             periods[0] if periods else {},
         )
-        records.append(occurrence_record(program, original, row, period.get("schedule_time", ""), period.get("timezone", "Asia/Tokyo"), period.get("frequency", "weekly")))
+        records.append(occurrence_record(
+            program,
+            original,
+            row,
+            period.get("schedule_time", ""),
+            period.get("timezone", "Asia/Tokyo"),
+            period.get("frequency", "weekly"),
+            manual=not generated_date and not boolean_value(row.get("materialized"), False),
+        ))
     return records
 
 
 def effective_program_occurrences(program: dict[str, Any], range_start: date, range_end: date) -> list[dict[str, Any]]:
     records = program_occurrence_records(program, range_start, range_end)
     return sorted(
-        [record for record in records if record["status"] != "cancelled" and range_start <= record["date"] <= range_end],
+        [record for record in records if record["status"] not in {"cancelled", "deleted"} and range_start <= record["date"] <= range_end],
         key=lambda record: (record["date"], record["time"], record["original_date"]),
     )
 
@@ -857,7 +871,7 @@ def occurrence_episode_numbers(records: list[dict[str, Any]]) -> list[int]:
     episode = 0
     numbers = []
     for record in records:
-        if record["status"] == "cancelled":
+        if record["status"] in {"cancelled", "deleted"}:
             numbers.append(episode + 1)
             continue
         episode += 1
@@ -922,6 +936,49 @@ def program_episode_count(program: dict[str, Any]) -> int:
         for item in occurrences
         if occurrence_has_passed(item)
     )
+
+
+def materialize_generated_occurrences(conn: sqlite3.Connection, program: dict[str, Any]) -> int:
+    if not program.get("start_date"):
+        return 0
+    program_start = date.fromisoformat(program["start_date"])
+    program_end = date.fromisoformat(program["end_date"]) if program.get("end_date") else None
+    range_end = program_end or datetime.now(occurrence_timezone(program.get("timezone"))).date() + timedelta(days=PROGRAM_FORECAST_DAYS)
+    if range_end < program_start:
+        return 0
+
+    records = program_occurrence_records({**program, "auto_generate": True}, program_start, range_end)
+    now = datetime.now(timezone.utc).isoformat()
+    rows = [
+        (
+            program["id"],
+            record["original_date"],
+            record.get("generated_date", ""),
+            record.get("original_time", ""),
+            record.get("status", "scheduled"),
+            "",
+            "",
+            "",
+            json.dumps([], ensure_ascii=False),
+            1,
+            now,
+            now,
+        )
+        for record in records
+        if record["generated"] and record["aired"]
+    ]
+    if not rows:
+        return 0
+
+    before = conn.total_changes
+    conn.executemany(
+        """INSERT OR IGNORE INTO program_occurrences (
+            program_id, original_date, generated_date, original_time, status,
+            adjusted_date, adjusted_time, note, guests, materialized, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        rows,
+    )
+    return conn.total_changes - before
 
 
 def backfill_individual_occurrence_anchors(
@@ -1018,12 +1075,21 @@ def program_rows() -> list[dict[str, Any]]:
     return [program_payload(row, grouped.get(row["id"], []), periods_grouped.get(row["id"])) for row in program_rows]
 
 
+def occurrence_start_value(value_date: date, value_time: str, timezone_value: str) -> str:
+    if not value_time:
+        return value_date.isoformat()
+    start = datetime.combine(value_date, time.fromisoformat(value_time), tzinfo=occurrence_timezone(timezone_value))
+    return start.isoformat(timespec="minutes")
+
+
 def program_calendar_events(program: dict[str, Any], range_start: date, range_end: date) -> list[dict[str, Any]]:
     program_start = date.fromisoformat(program["start_date"]) if program.get("start_date") else range_start
     records = sorted(program_occurrence_records(program, program_start, range_end), key=lambda record: record["original_date"])
     episode_numbers = occurrence_episode_numbers(records)
     events = []
     for index, record in enumerate(records):
+        if record["status"] == "deleted":
+            continue
         if not range_start <= record["date"] <= range_end:
             continue
         episode_number = episode_numbers[index]
@@ -1032,7 +1098,7 @@ def program_calendar_events(program: dict[str, Any], range_start: date, range_en
         event: dict[str, Any] = {
             "id": f"{program['id']}-{record['original_date']}",
             "title": f"{program_display_name(program)} · {episode_label}" + (" · 已取消" if record["status"] == "cancelled" else update_suffix),
-            "start": record["date"].isoformat(),
+            "start": occurrence_start_value(record["date"], record["time"], record["timezone"]),
             "allDay": not bool(record["time"]),
             "extendedProps": {
                 "programId": program["id"],
@@ -1046,8 +1112,18 @@ def program_calendar_events(program: dict[str, Any], range_start: date, range_en
                 "occurrenceId": record["id"],
                 "originalDate": record["original_date"],
                 "originalTime": record["original_time"],
+                "originalStart": occurrence_start_value(
+                    date.fromisoformat(record["original_date"]),
+                    record["original_time"],
+                    record["timezone"],
+                ),
                 "adjustedDate": record["adjusted_date"],
                 "adjustedTime": record["adjusted_time"],
+                "adjustedStart": occurrence_start_value(
+                    date.fromisoformat(record["adjusted_date"]),
+                    record["adjusted_time"] or record["original_time"],
+                    record["timezone"],
+                ) if record["adjusted_date"] else "",
                 "timezone": record["timezone"],
                 "occurrenceStatus": record["status"],
                 "aired": record["aired"],
@@ -1057,8 +1133,6 @@ def program_calendar_events(program: dict[str, Any], range_start: date, range_en
                 "people": program_people(program.get("people", [])),
             },
         }
-        if record["time"]:
-            event["start"] = f"{record['date'].isoformat()}T{record['time']}"
         events.append(event)
     return events
 
@@ -1916,7 +1990,7 @@ async def api_delete_program(program_id: str, request: Request) -> dict[str, str
 
 
 @app.patch("/api/admin/programs/{program_id}/auto-generation")
-async def api_update_auto_generation(program_id: str, request: Request) -> dict[str, bool]:
+async def api_update_auto_generation(program_id: str, request: Request) -> dict[str, Any]:
     require_api_admin(request)
     try:
         payload = await request.json()
@@ -1925,14 +1999,16 @@ async def api_update_auto_generation(program_id: str, request: Request) -> dict[
     if not isinstance(payload, dict) or "auto_generate" not in payload:
         raise HTTPException(400, "自动生成设置无效")
     auto_generate = boolean_value(payload["auto_generate"], True)
+    program = next((item for item in program_rows() if item["id"] == program_id), None)
+    if not program:
+        raise HTTPException(404, "节目不存在")
     with db() as conn:
-        if not conn.execute("SELECT 1 FROM programs WHERE id = ?", (program_id,)).fetchone():
-            raise HTTPException(404, "节目不存在")
+        materialized_count = materialize_generated_occurrences(conn, program) if not auto_generate else 0
         conn.execute(
             "UPDATE programs SET auto_generate = ?, updated_at = ? WHERE id = ?",
             (int(auto_generate), datetime.now(timezone.utc).isoformat(), program_id),
         )
-    return {"auto_generate": auto_generate}
+    return {"auto_generate": auto_generate, "materialized_count": materialized_count}
 
 
 @app.get("/api/admin/programs/{program_id}/occurrences")
@@ -2065,10 +2141,15 @@ async def api_update_occurrence(program_id: str, occurrence_id: int, request: Re
 async def api_delete_occurrence(program_id: str, occurrence_id: int, request: Request) -> dict[str, str]:
     require_api_admin(request)
     with db() as conn:
-        result = conn.execute("DELETE FROM program_occurrences WHERE id = ? AND program_id = ?", (occurrence_id, program_id))
+        result = conn.execute(
+            """UPDATE program_occurrences
+               SET status = 'deleted', adjusted_date = '', adjusted_time = '', updated_at = ?
+               WHERE id = ? AND program_id = ?""",
+            (datetime.now(timezone.utc).isoformat(), occurrence_id, program_id),
+        )
     if result.rowcount == 0:
         raise HTTPException(404, "单集排期不存在")
-    return {"message": "单集排期已恢复为默认规则"}
+    return {"message": "单集已删除"}
 
 
 @app.get("/rainbow.svg", include_in_schema=False)

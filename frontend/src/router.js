@@ -1,19 +1,17 @@
 import { createRouter, createWebHistory } from "vue-router";
 import { api } from "./api";
-import HomeView from "./views/HomeView.vue";
-import ReleaseView from "./views/ReleaseView.vue";
-import LoginView from "./views/LoginView.vue";
-import AdminView from "./views/AdminView.vue";
 
 const appTitle = "Nijigasaki DB";
 
 const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: "/", component: HomeView, meta: { title: "虹咲音乐档案" } },
-    { path: "/release/:releaseId", component: ReleaseView, meta: { title: "发行详情" } },
-    { path: "/admin/login", component: LoginView, meta: { title: "管理员登录" } },
-    { path: "/admin", component: AdminView, meta: { requiresAuth: true, title: "设置" } },
+    { path: "/", component: () => import("./views/HomeView.vue"), meta: { title: "虹咲音乐档案" } },
+    { path: "/release/:releaseId", component: () => import("./views/ReleaseView.vue"), meta: { title: "发行详情" } },
+    { path: "/programs", component: () => import("./views/ProgramsView.vue"), meta: { title: "节目档案" } },
+    { path: "/admin/login", component: () => import("./views/LoginView.vue"), meta: { title: "管理员登录" } },
+    { path: "/admin", component: () => import("./views/AdminView.vue"), meta: { requiresAuth: true, title: "设置" } },
+    { path: "/admin/programs", component: () => import("./views/ProgramAdminView.vue"), meta: { requiresAuth: true, title: "节目档案管理" } },
     { path: "/:pathMatch(.*)*", redirect: "/" },
   ],
   scrollBehavior: () => ({ top: 0 }),

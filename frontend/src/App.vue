@@ -73,7 +73,7 @@ onBeforeUnmount(() => {
         </RouterLink>
         <nav class="section-nav" aria-label="内容分类">
           <RouterLink class="music-link" to="/">音乐</RouterLink>
-          <span class="planned" aria-disabled="true" title="即将推出">个人节目</span>
+          <RouterLink class="program-link" to="/programs">节目档案</RouterLink>
           <span class="planned" aria-disabled="true" title="即将推出">联动立绘</span>
         </nav>
       </div>
@@ -88,14 +88,19 @@ onBeforeUnmount(() => {
     <footer>
       <span class="footer-source">数据源：<a href="https://www.lovelive-anime.jp/nijigasaki/cd.php" target="_blank" rel="noopener noreferrer">lovelive-anime.jp</a></span>
       <span class="footer-divider" aria-hidden="true"></span>
-      <span class="footer-title">友链</span>
-      <span class="footer-links">
-        <a href="https://events.nijigaku.fans/" target="_blank" rel="noopener noreferrer">Nijigaku Events</a>
-        <a href="https://ll-fans.jp/" target="_blank" rel="noopener noreferrer">LL-Fans</a>
-        <a href="https://anilive.nekoss.cn/" target="_blank" rel="noopener noreferrer">AniLive</a>
-        <a href="https://anilive-library.nekoss.cn/" target="_blank" rel="noopener noreferrer">AniLive Library</a>
-        <a href="https://github.com/AlanWanco/nijidb-web" target="_blank" rel="noopener noreferrer">github.com/AlanWanco/nijidb-web</a>
-      </span>
-    </footer>
+        <span class="footer-title">友链</span>
+        <span class="footer-links">
+          <a href="https://events.nijigaku.fans/" target="_blank" rel="noopener noreferrer">Nijigaku Events</a>
+          <a href="https://ll-fans.jp/" target="_blank" rel="noopener noreferrer">LL-Fans</a>
+          <a href="https://anilive.nekoss.cn/" target="_blank" rel="noopener noreferrer">AniLive</a>
+          <a href="https://anilive-library.nekoss.cn/" target="_blank" rel="noopener noreferrer">AniLive Library</a>
+        </span>
+        <span class="footer-divider footer-project-divider" aria-hidden="true"></span>
+        <span class="footer-title">项目地址：</span>
+        <a class="footer-repo-link" href="https://github.com/AlanWanco/nijidb-web" target="_blank" rel="noopener noreferrer">
+          <svg class="footer-github-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .5a12 12 0 0 0-3.79 23.39c.6.11.82-.26.82-.58v-2.04c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.74.08-.74 1.2.09 1.84 1.23 1.84 1.23 1.07 1.83 2.8 1.3 3.48.99.11-.77.42-1.3.76-1.6-2.67-.3-5.47-1.34-5.47-5.93 0-1.31.47-2.38 1.23-3.22-.12-.3-.53-1.52.12-3.17 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.3-1.55 3.3-1.23 3.3-1.23.65 1.65.24 2.87.12 3.17.77.84 1.23 1.91 1.23 3.22 0 4.6-2.8 5.62-5.48 5.92.43.37.82 1.1.82 2.22v3.29c0 .32.22.7.83.58A12 12 0 0 0 12 .5Z"/></svg>
+          <span>github.com/AlanWanco/nijidb-web</span>
+        </a>
+      </footer>
   </div>
 </template>

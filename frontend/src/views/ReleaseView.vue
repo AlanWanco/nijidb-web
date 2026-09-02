@@ -15,7 +15,12 @@ const release = computed(() => data.value?.release || null);
 const tracks = computed(() => release.value?.tracks || []);
 const specs = computed(() => Object.entries(release.value?.specs || {}).filter(([key]) => !hiddenSpecs.has(key)));
 const extras = computed(() => release.value?.extras || []);
-const safeDetailHtml = computed(() => DOMPurify.sanitize(release.value?.detail_html || ""));
+const safeDetailHtml = computed(() => {
+  const sanitized = DOMPurify.sanitize(release.value?.detail_html || "", { ADD_ATTR: ["loading"] });
+  const parsed = new DOMParser().parseFromString(`<body>${sanitized}</body>`, "text/html");
+  parsed.body.querySelectorAll("img").forEach(image => image.setAttribute("loading", "lazy"));
+  return parsed.body.innerHTML;
+});
 
 async function loadRelease() {
   loading.value = true;
@@ -69,7 +74,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", handleKeydown));
       <article class="release">
         <div class="release-cover">
           <div class="release-cover-art">
-            <img v-if="release.cover_url" :src="release.cover_url" :alt="release.title">
+            <img v-if="release.cover_url" :src="release.cover_url" loading="lazy" :alt="release.title">
             <div v-else class="missing">NO<br>COVER</div>
           </div>
           <div class="release-cover-meta"><span>NIJIGASAKI / RELEASE</span><strong>{{ release.id }}</strong></div>

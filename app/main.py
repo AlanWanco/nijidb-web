@@ -1,34 +1,51 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
 import hashlib
 import hmac
 import json
+import mimetypes
 import re
 import os
 import secrets
 import sqlite3
+import tempfile
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
+from zoneinfo import ZoneInfo
 
+import boto3
 import httpx
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
+from starlette.middleware.gzip import GZipMiddleware
 
 SOURCE_URL = "https://www.lovelive-anime.jp/nijigasaki/cd.php"
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = Path(os.getenv("DATA_DIR", "/data")) / "nijidb.sqlite3"
 MEDIA_DIR = DB_PATH.parent / "images"
+COVER_CACHE_VERSION = "source-url-refresh-v1"
+COVER_CACHE_VERSION_PATH = DB_PATH.parent / ".cover-cache-version"
 FRONTEND_DIST = ROOT / "frontend" / "dist"
 PASSWORD_ITERATIONS = 310_000
+BACKUP_MAX_BYTES = 32 * 1024 * 1024
+R2_ENDPOINT = os.getenv("R2_ENDPOINT", "").strip()
+R2_BUCKET = os.getenv("R2_BUCKET", "nijidb").strip()
+R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "").strip()
+R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "").strip()
+R2_PUBLIC_BASE_URL = os.getenv("R2_PUBLIC_BASE_URL", "").strip().rstrip("/")
+R2_IMAGE_PREFIX = os.getenv("R2_IMAGE_PREFIX", "images").strip("/")
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 stop_event = asyncio.Event()
 sync_lock = asyncio.Lock()
+_r2_client: Any | None = None
 
 
 def db() -> sqlite3.Connection:
@@ -36,6 +53,77 @@ def db() -> sqlite3.Connection:
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     return connection
+
+
+def remove_file(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def create_database_backup() -> Path:
+    handle, raw_path = tempfile.mkstemp(prefix=".nijidb-backup-", suffix=".sqlite3", dir=DB_PATH.parent)
+    os.close(handle)
+    backup_path = Path(raw_path)
+    source = db()
+    destination = sqlite3.connect(backup_path)
+    try:
+        source.backup(destination)
+        destination.commit()
+    except Exception:
+        remove_file(backup_path)
+        raise
+    finally:
+        destination.close()
+        source.close()
+    return backup_path
+
+
+def validate_database_backup(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    finally:
+        connection.close()
+    required_tables = {"settings", "releases", "sync_log"}
+    if integrity != "ok":
+        raise ValueError("数据库完整性校验失败")
+    if not required_tables.issubset(tables):
+        raise ValueError("备份文件不是 Nijidb 数据库")
+
+
+def remove_database_sidecars() -> None:
+    remove_file(Path(f"{DB_PATH}-wal"))
+    remove_file(Path(f"{DB_PATH}-shm"))
+
+
+async def save_backup_upload(request: Request) -> Path:
+    content_length = request.headers.get("content-length", "")
+    try:
+        if content_length and int(content_length) > BACKUP_MAX_BYTES:
+            raise HTTPException(413, "备份文件不能超过 32 MB")
+    except ValueError:
+        pass
+
+    handle, raw_path = tempfile.mkstemp(prefix=".nijidb-upload-", suffix=".sqlite3", dir=DB_PATH.parent)
+    os.close(handle)
+    upload_path = Path(raw_path)
+    total = 0
+    try:
+        with upload_path.open("wb") as target:
+            async for chunk in request.stream():
+                total += len(chunk)
+                if total > BACKUP_MAX_BYTES:
+                    raise HTTPException(413, "备份文件不能超过 32 MB")
+                target.write(chunk)
+        if total == 0:
+            raise HTTPException(400, "请选择有效的数据库备份文件")
+        return upload_path
+    except BaseException:
+        remove_file(upload_path)
+        raise
 
 
 def hash_password(password: str) -> str:
@@ -76,7 +164,88 @@ def init_db() -> None:
           id INTEGER PRIMARY KEY AUTOINCREMENT, checked_at TEXT NOT NULL,
           changed_count INTEGER NOT NULL, error TEXT
         );
+        CREATE TABLE IF NOT EXISTS programs (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'ongoing',
+          category TEXT NOT NULL DEFAULT 'personal',
+           format TEXT NOT NULL DEFAULT 'video',
+           platform TEXT NOT NULL DEFAULT 'network',
+           delivery TEXT NOT NULL DEFAULT 'recorded',
+           auto_generate INTEGER NOT NULL DEFAULT 1,
+           people TEXT NOT NULL DEFAULT '',
+          official_url TEXT NOT NULL DEFAULT '',
+          description TEXT NOT NULL DEFAULT '',
+          frequency TEXT NOT NULL DEFAULT 'weekly',
+          week_interval INTEGER NOT NULL DEFAULT 1,
+          monthly_mode TEXT NOT NULL DEFAULT 'week',
+          week_index INTEGER NOT NULL DEFAULT 0,
+          weekday INTEGER NOT NULL DEFAULT 0,
+           schedule_time TEXT NOT NULL DEFAULT '',
+           start_date TEXT NOT NULL DEFAULT '',
+           end_date TEXT NOT NULL DEFAULT '',
+           parent_id TEXT NOT NULL DEFAULT '',
+           subprogram_name TEXT NOT NULL DEFAULT '主节目',
+           created_at TEXT NOT NULL,
+           updated_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS program_periods (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           program_id TEXT NOT NULL,
+           start_date TEXT NOT NULL,
+           end_date TEXT NOT NULL DEFAULT '',
+           frequency TEXT NOT NULL DEFAULT 'weekly',
+           week_interval INTEGER NOT NULL DEFAULT 1,
+           week_index INTEGER NOT NULL DEFAULT 0,
+           weekday INTEGER NOT NULL DEFAULT 0,
+           schedule_time TEXT NOT NULL DEFAULT '',
+           timezone TEXT NOT NULL DEFAULT 'Asia/Tokyo',
+           created_at TEXT NOT NULL,
+           updated_at TEXT NOT NULL,
+           UNIQUE(program_id, start_date)
+         );
+         CREATE INDEX IF NOT EXISTS idx_program_periods_program ON program_periods(program_id, start_date);
+         CREATE TABLE IF NOT EXISTS program_occurrences (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           program_id TEXT NOT NULL,
+           original_date TEXT NOT NULL,
+           generated_date TEXT NOT NULL DEFAULT '',
+           original_time TEXT NOT NULL DEFAULT '',
+           status TEXT NOT NULL DEFAULT 'scheduled',
+           adjusted_date TEXT NOT NULL DEFAULT '',
+           adjusted_time TEXT NOT NULL DEFAULT '',
+           note TEXT NOT NULL DEFAULT '',
+           guests TEXT NOT NULL DEFAULT '[]',
+           created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(program_id, original_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_program_occurrences_program ON program_occurrences(program_id, original_date);
         """)
+        program_columns = {row["name"] for row in conn.execute("PRAGMA table_info(programs)")}
+        program_migrations = {
+            "status": "TEXT NOT NULL DEFAULT 'ongoing'",
+            "week_interval": "INTEGER NOT NULL DEFAULT 1",
+            "monthly_mode": "TEXT NOT NULL DEFAULT 'week'",
+            "auto_generate": "INTEGER NOT NULL DEFAULT 1",
+            "parent_id": "TEXT NOT NULL DEFAULT ''",
+            "subprogram_name": "TEXT NOT NULL DEFAULT '主节目'",
+        }
+        for name, definition in program_migrations.items():
+            if name not in program_columns:
+                conn.execute(f"ALTER TABLE programs ADD COLUMN {name} {definition}")
+        conn.execute("UPDATE programs SET parent_id = '' WHERE parent_id IS NULL")
+        conn.execute("UPDATE programs SET subprogram_name = '主节目' WHERE trim(coalesce(subprogram_name, '')) = ''")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_programs_parent ON programs(parent_id, title)")
+        period_columns = {row["name"] for row in conn.execute("PRAGMA table_info(program_periods)")}
+        if "timezone" not in period_columns:
+            conn.execute("ALTER TABLE program_periods ADD COLUMN timezone TEXT NOT NULL DEFAULT 'Asia/Tokyo'")
+        occurrence_columns = {row["name"] for row in conn.execute("PRAGMA table_info(program_occurrences)")}
+        if "generated_date" not in occurrence_columns:
+            conn.execute("ALTER TABLE program_occurrences ADD COLUMN generated_date TEXT NOT NULL DEFAULT ''")
+        if "guests" not in occurrence_columns:
+            conn.execute("ALTER TABLE program_occurrences ADD COLUMN guests TEXT NOT NULL DEFAULT '[]'")
+        seed_program_periods(conn)
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(releases)")}
         if "position" not in columns:
             conn.execute("ALTER TABLE releases ADD COLUMN position INTEGER NOT NULL DEFAULT 999999")
@@ -138,6 +307,760 @@ def release_summary(row: sqlite3.Row) -> dict[str, Any]:
     payload.pop("specs", None)
     payload.pop("extras", None)
     return payload
+
+
+JAPAN_TZ = ZoneInfo("Asia/Tokyo")
+PROGRAM_CATEGORIES = {"official", "personal"}
+PROGRAM_FORMATS = {"video", "radio"}
+PROGRAM_PLATFORMS = {"tv", "network"}
+PROGRAM_DELIVERIES = {"live", "recorded"}
+PROGRAM_FREQUENCIES = {"weekly", "monthly", "individual", "single"}
+OCCURRENCE_STATUSES = {"scheduled", "rescheduled", "cancelled"}
+PROGRAM_FORECAST_DAYS = 183
+PROGRAM_TIMEZONES = {
+    "Asia/Tokyo": "东京时间",
+    "Asia/Shanghai": "中国标准时间",
+    "Asia/Seoul": "韩国时间",
+    "UTC": "协调世界时",
+    "America/Los_Angeles": "美国太平洋时间",
+    "America/New_York": "美国东部时间",
+}
+
+
+def boolean_value(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return bool(value)
+
+
+def integer_value(value: Any, label: str, minimum: int, maximum: int) -> int:
+    if value in (None, ""):
+        return 0
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label}必须是数字") from exc
+    if not minimum <= result <= maximum:
+        raise ValueError(f"{label}范围为 {minimum}–{maximum}")
+    return result
+
+
+def normalized_people(value: Any) -> str:
+    source = value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            source = parsed if isinstance(parsed, list) else value
+        except json.JSONDecodeError:
+            pass
+    if not isinstance(source, list):
+        source = re.split(r"[,，、\n]+", str(source or ""))
+    people: list[str] = []
+    for item in source:
+        name = str(item or "").strip()
+        if name and name not in people:
+            people.append(name)
+    return json.dumps(people, ensure_ascii=False)
+
+
+def program_people(value: Any) -> list[str]:
+    try:
+        parsed = json.loads(value or "[]") if isinstance(value, str) else value
+    except json.JSONDecodeError:
+        parsed = value
+    if not isinstance(parsed, list):
+        parsed = re.split(r"[,，、\n]+", str(parsed or ""))
+    return [str(item).strip() for item in parsed if str(item).strip()]
+
+
+def occurrence_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    payload = dict(row)
+    payload["guests"] = program_people(payload.get("guests", "[]"))
+    if payload.get("status") == "scheduled" and payload.get("adjusted_date"):
+        payload["status"] = "rescheduled"
+    return payload
+
+
+def period_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    payload = dict(row)
+    payload["week_interval"] = int(payload.get("week_interval") or 1)
+    payload["week_index"] = int(payload.get("week_index") or 0)
+    payload["weekday"] = int(payload.get("weekday") or 0)
+    payload["timezone"] = payload.get("timezone") or "Asia/Tokyo"
+    return payload
+
+
+def occurrence_timezone(value: Any) -> ZoneInfo:
+    timezone = str(value or "Asia/Tokyo")
+    return ZoneInfo(timezone if timezone in PROGRAM_TIMEZONES else "Asia/Tokyo")
+
+
+def legacy_period(values: dict[str, Any]) -> dict[str, Any]:
+    frequency = str(values.get("frequency") or "weekly").strip()
+    if frequency == "irregular" or (frequency == "monthly" and values.get("monthly_mode") == "irregular"):
+        frequency = "single"
+    week_index = int(values.get("week_index") or 0)
+    start_date = str(values.get("start_date") or "").strip()
+    end_date = str(values.get("end_date") or "").strip()
+    if frequency == "single":
+        end_date = start_date
+        week_index = 0
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "frequency": frequency,
+        "week_interval": int(values.get("week_interval") or 1),
+        "week_index": week_index,
+        "weekday": int(values.get("weekday") or 0),
+        "schedule_time": str(values.get("schedule_time") or "").strip(),
+        "timezone": str(values.get("timezone") or "Asia/Tokyo").strip(),
+    }
+
+
+def program_payload(
+    row: sqlite3.Row | dict[str, Any],
+    occurrences: list[dict[str, Any]] | None = None,
+    periods: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    payload = dict(row)
+    payload.pop("duration_minutes", None)
+    payload.pop("episode_count", None)
+    payload["people"] = program_people(payload.get("people", ""))
+    payload["auto_generate"] = boolean_value(payload.get("auto_generate"), True)
+    payload["week_interval"] = int(payload.get("week_interval") or 1)
+    payload["week_index"] = int(payload.get("week_index") or 0)
+    payload["weekday"] = int(payload.get("weekday") or 0)
+    payload["parent_id"] = str(payload.get("parent_id") or "").strip()
+    payload["subprogram_name"] = str(payload.get("subprogram_name") or "主节目").strip() or "主节目"
+    payload["occurrences"] = occurrences or []
+    payload["periods"] = periods if periods else ([legacy_period(payload)] if payload.get("start_date") else [])
+    payload["timezone"] = payload["periods"][0].get("timezone", "Asia/Tokyo") if payload["periods"] else "Asia/Tokyo"
+    payload["status"] = inferred_program_status(payload)
+    payload["episode_count"] = program_episode_count(payload)
+    payload["update_status"] = program_update_status(payload)
+    return payload
+
+
+def inferred_program_status(program: dict[str, Any]) -> str:
+    if program.get("end_date"):
+        return "completed"
+    periods = program.get("periods", [])
+    single_periods = [period for period in periods if period.get("frequency") == "single" and period.get("start_date")]
+    if periods and len(single_periods) == len(periods):
+        latest_period = max(single_periods, key=lambda period: period["start_date"])
+        latest = date.fromisoformat(latest_period["start_date"])
+        return "completed" if latest < datetime.now(occurrence_timezone(latest_period.get("timezone"))).date() else "ongoing"
+    return "ongoing"
+
+
+def program_display_name(program: dict[str, Any]) -> str:
+    if not program.get("parent_id"):
+        return program["title"]
+    subprogram_name = str(program.get("subprogram_name") or "").strip()
+    return f"{program['title']} · {subprogram_name}" if subprogram_name else program["title"]
+
+
+def normalized_period(values: dict[str, Any], program_start: date, program_end: date | None) -> dict[str, Any]:
+    start_date = str(values.get("start_date") or "").strip()
+    if not start_date:
+        raise ValueError("每个时期都需要填写开始日期")
+    frequency = str(values.get("frequency") or "weekly").strip()
+    if frequency == "irregular":
+        frequency = "single"
+    if frequency not in PROGRAM_FREQUENCIES:
+        raise ValueError("时期更新方式无效")
+    try:
+        parsed_start = date.fromisoformat(start_date)
+        parsed_end = date.fromisoformat(str(values.get("end_date") or "").strip()) if values.get("end_date") else None
+    except ValueError as exc:
+        raise ValueError("时期日期格式无效") from exc
+    if parsed_start < program_start:
+        raise ValueError("时期开始日期不能早于节目开始日期")
+    if program_end and parsed_start > program_end:
+        raise ValueError("时期开始日期不能晚于节目结束日期")
+    if frequency == "single":
+        parsed_end = parsed_start
+    if parsed_end and parsed_start > parsed_end:
+        raise ValueError("时期开始日期不能晚于时期结束日期")
+    if program_end and parsed_end and parsed_end > program_end:
+        raise ValueError("时期结束日期不能晚于节目结束日期")
+    weekday = integer_value(values.get("weekday"), "星期", 0, 6)
+    week_interval = integer_value(values.get("week_interval"), "每隔几周", 1, 52)
+    week_index = integer_value(values.get("week_index"), "第几周", -5, 5)
+    if frequency == "monthly" and week_index == 0:
+        raise ValueError("固定月更需要填写第几周，支持 1–5 或 -1–-5")
+    if frequency != "weekly":
+        week_interval = 1
+    if frequency != "monthly":
+        week_index = 0
+    schedule_time = str(values.get("schedule_time") or "").strip()
+    if schedule_time and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", schedule_time):
+        raise ValueError("播出时间格式应为 HH:MM")
+    timezone = str(values.get("timezone") or "Asia/Tokyo").strip()
+    if timezone not in PROGRAM_TIMEZONES:
+        raise ValueError("更新时间时区无效")
+    return {
+        "start_date": parsed_start.isoformat(),
+        "end_date": parsed_end.isoformat() if parsed_end else "",
+        "frequency": frequency,
+        "week_interval": week_interval,
+        "week_index": week_index,
+        "weekday": weekday,
+        "schedule_time": schedule_time,
+        "timezone": timezone,
+    }
+
+
+def normalized_periods(values: dict[str, Any], program_start: date, program_end: date | None) -> list[dict[str, Any]]:
+    raw_periods = values.get("periods")
+    if not isinstance(raw_periods, list) or not raw_periods:
+        raw_periods = [legacy_period(values)]
+    if not all(isinstance(item, dict) for item in raw_periods):
+        raise ValueError("时期格式无效")
+    periods = [normalized_period(item, program_start, program_end) for item in raw_periods]
+    periods.sort(key=lambda item: item["start_date"])
+    if len({item["start_date"] for item in periods}) != len(periods):
+        raise ValueError("时期开始日期不能相同")
+    for index, period in enumerate(periods):
+        next_period = periods[index + 1] if index + 1 < len(periods) else None
+        if next_period:
+            next_start = date.fromisoformat(next_period["start_date"])
+            if not period["end_date"]:
+                period["end_date"] = (next_start - timedelta(days=1)).isoformat()
+            if date.fromisoformat(period["end_date"]) >= next_start:
+                raise ValueError("时期之间不能重叠")
+        elif not period["end_date"] and program_end:
+            period["end_date"] = program_end.isoformat()
+    return periods
+
+
+def normalized_program(values: dict[str, Any]) -> dict[str, Any]:
+    title = str(values.get("title") or "").strip()
+    if not title:
+        raise ValueError("节目名称不能为空")
+    category = str(values.get("category") or "personal").strip()
+    if category not in PROGRAM_CATEGORIES:
+        raise ValueError("节目类型无效")
+    program_format = str(values.get("format") or "video").strip()
+    if program_format not in PROGRAM_FORMATS:
+        raise ValueError("节目形式无效")
+    platform = str(values.get("platform") or "network").strip()
+    if platform not in PROGRAM_PLATFORMS:
+        raise ValueError("播出平台无效")
+    delivery = str(values.get("delivery") or "recorded").strip()
+    if delivery not in PROGRAM_DELIVERIES:
+        raise ValueError("播放方式无效")
+    auto_generate = boolean_value(values.get("auto_generate"), True)
+    start_date = str(values.get("start_date") or "").strip()
+    end_date = str(values.get("end_date") or "").strip()
+    parent_id = str(values.get("parent_id") or "").strip()
+    subprogram_name = str(values.get("subprogram_name") or "").strip()
+    if not parent_id:
+        subprogram_name = "主节目"
+    elif not subprogram_name or subprogram_name == "主节目":
+        raise ValueError("子节目名称不能为空且不能使用“主节目”")
+    raw_periods = values.get("periods")
+    if not start_date and isinstance(raw_periods, list) and raw_periods and isinstance(raw_periods[0], dict):
+        start_date = str(raw_periods[0].get("start_date") or "").strip()
+    if not start_date:
+        raise ValueError("开始日期不能为空")
+    try:
+        parsed_start = date.fromisoformat(start_date)
+        parsed_end = date.fromisoformat(end_date) if end_date else None
+    except ValueError as exc:
+        raise ValueError("开始日期或结束日期格式无效") from exc
+    single_period_set = isinstance(raw_periods, list) and bool(raw_periods) and all(
+        isinstance(item, dict) and str(item.get("frequency") or "") in {"single", "irregular"}
+        for item in raw_periods
+    )
+    if single_period_set:
+        end_date = ""
+        parsed_end = None
+    elif not end_date and isinstance(raw_periods, list) and raw_periods and isinstance(raw_periods[-1], dict):
+        candidate_end = str(raw_periods[-1].get("end_date") or "").strip()
+        if candidate_end:
+            try:
+                parsed_end = date.fromisoformat(candidate_end)
+            except ValueError as exc:
+                raise ValueError("时期日期格式无效") from exc
+            end_date = candidate_end
+    if parsed_end and parsed_start > parsed_end:
+        raise ValueError("开始日期不能晚于结束日期")
+    periods = normalized_periods(values, parsed_start, parsed_end)
+    first_period = periods[0]
+    all_single = all(period["frequency"] == "single" for period in periods)
+    normalized_end = "" if all_single else periods[-1]["end_date"]
+    status = inferred_program_status({"end_date": normalized_end, "periods": periods})
+    return {
+        "title": title,
+        "status": status,
+        "category": category,
+        "format": program_format,
+        "platform": platform,
+        "delivery": delivery,
+        "auto_generate": auto_generate,
+        "people": normalized_people(values.get("people")),
+        "official_url": str(values.get("official_url") or "").strip(),
+        "description": str(values.get("description") or "").strip(),
+        "frequency": first_period["frequency"],
+        "week_interval": first_period["week_interval"],
+        "monthly_mode": "week",
+        "week_index": first_period["week_index"],
+        "weekday": first_period["weekday"],
+        "schedule_time": first_period["schedule_time"],
+        "start_date": periods[0]["start_date"],
+        "end_date": normalized_end,
+        "parent_id": parent_id,
+        "subprogram_name": subprogram_name,
+        "periods": periods,
+    }
+
+
+def validate_program_group(conn: sqlite3.Connection, values: dict[str, Any], current_id: str = "") -> dict[str, Any]:
+    parent_id = values["parent_id"]
+    if current_id:
+        current = conn.execute("SELECT parent_id FROM programs WHERE id = ?", (current_id,)).fetchone()
+        if current and (current["parent_id"] or "") != parent_id:
+            raise ValueError("不能修改节目所属关系，请新建子节目")
+    if not parent_id:
+        values["subprogram_name"] = "主节目"
+        return values
+    if parent_id == current_id:
+        raise ValueError("子节目不能挂在自己下面")
+    parent = conn.execute("SELECT id, title, parent_id FROM programs WHERE id = ?", (parent_id,)).fetchone()
+    if not parent:
+        raise ValueError("所属主节目不存在")
+    if parent["parent_id"]:
+        raise ValueError("子节目只能挂在主节目下")
+    values["title"] = parent["title"]
+    sibling = conn.execute(
+        "SELECT id FROM programs WHERE parent_id = ? AND subprogram_name = ? AND id != ?",
+        (parent_id, values["subprogram_name"], current_id),
+    ).fetchone()
+    if sibling:
+        raise ValueError("同一个主节目下不能重复使用子节目名称")
+    return values
+
+
+def seed_program_periods(conn: sqlite3.Connection) -> None:
+    rows = conn.execute("SELECT * FROM programs").fetchall()
+    now = datetime.now(timezone.utc).isoformat()
+    for row in rows:
+        if not row["start_date"]:
+            continue
+        if conn.execute("SELECT 1 FROM program_periods WHERE program_id = ? LIMIT 1", (row["id"],)).fetchone():
+            continue
+        period = legacy_period(dict(row))
+        if row["frequency"] == "monthly" and row["monthly_mode"] == "irregular":
+            period["frequency"] = "single"
+            period["end_date"] = period["start_date"]
+            period["week_index"] = 0
+        if period["frequency"] not in PROGRAM_FREQUENCIES:
+            period["frequency"] = "weekly"
+        conn.execute("""INSERT INTO program_periods (
+            program_id, start_date, end_date, frequency, week_interval, week_index, weekday, schedule_time, timezone, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+            row["id"], period["start_date"], period["end_date"], period["frequency"], period["week_interval"],
+            period["week_index"], period["weekday"], period["schedule_time"], period["timezone"], row["created_at"] or now, row["updated_at"] or now,
+        ))
+
+
+def normalized_occurrence(values: dict[str, Any]) -> dict[str, Any]:
+    original_date = str(values.get("original_date") or "").strip()
+    if not original_date:
+        raise ValueError("原定日期不能为空")
+    generated_date = str(values.get("generated_date") or "").strip()
+    adjusted_date = str(values.get("adjusted_date") or "").strip()
+    for label, value in (("原定日期", original_date), ("生成日期", generated_date), ("调整日期", str(values.get("adjusted_date") or "").strip())):
+        if value:
+            try:
+                date.fromisoformat(value)
+            except ValueError as exc:
+                raise ValueError(f"{label}格式无效") from exc
+    status = str(values.get("status") or "scheduled").strip()
+    if status not in OCCURRENCE_STATUSES:
+        raise ValueError("排期状态无效")
+    if status == "scheduled" and adjusted_date:
+        status = "rescheduled"
+    if status == "rescheduled" and not adjusted_date:
+        raise ValueError("已改期单集需要填写调整日期")
+    original_time = str(values.get("original_time") or "").strip()
+    adjusted_time = str(values.get("adjusted_time") or "").strip()
+    for label, value in (("原定时间", original_time), ("调整时间", adjusted_time)):
+        if value and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+            raise ValueError(f"{label}格式应为 HH:MM")
+    return {
+        "original_date": original_date,
+        "generated_date": generated_date,
+        "original_time": original_time,
+        "status": status,
+        "adjusted_date": adjusted_date if status == "rescheduled" else "",
+        "adjusted_time": adjusted_time if status == "rescheduled" else "",
+        "note": str(values.get("note") or "").strip(),
+        "guests": normalized_people(values.get("guests")),
+    }
+
+
+def calendar_date(value: str, fallback: date) -> date:
+    try:
+        return date.fromisoformat(value.split("T", 1)[0]) if value else fallback
+    except ValueError as exc:
+        raise HTTPException(400, "日历日期格式无效") from exc
+
+
+def monthly_weekday(year: int, month: int, week_index: int, weekday: int) -> date | None:
+    last_day = calendar.monthrange(year, month)[1]
+    if week_index > 0:
+        first = date(year, month, 1)
+        day = 1 + (weekday - first.weekday()) % 7 + (week_index - 1) * 7
+        return date(year, month, day) if day <= last_day else None
+    last = date(year, month, last_day)
+    day = last_day - (last.weekday() - weekday) % 7 + (week_index + 1) * 7
+    return date(year, month, day) if day >= 1 else None
+
+
+def period_recurring_dates(period: dict[str, Any], range_end: date) -> list[date]:
+    if not period.get("start_date"):
+        return []
+    period_start = date.fromisoformat(period["start_date"])
+    if period["frequency"] == "single":
+        return [period_start] if period_start <= range_end else []
+    if period["frequency"] == "weekly":
+        current = period_start + timedelta(days=(period["weekday"] - period_start.weekday()) % 7)
+        step = timedelta(days=7 * period["week_interval"])
+        dates: list[date] = []
+        while current <= range_end:
+            dates.append(current)
+            current += step
+        return dates
+    if period["frequency"] == "individual":
+        dates = []
+        current = date(period_start.year, period_start.month, 1)
+        while current <= range_end:
+            if period_start <= current:
+                dates.append(current)
+            current = date(current.year + (current.month == 12), current.month % 12 + 1, 1)
+        return dates
+    if period["frequency"] != "monthly" or not period.get("week_index"):
+        return []
+    dates = []
+    current = date(period_start.year, period_start.month, 1)
+    while current <= range_end:
+        occurrence = monthly_weekday(current.year, current.month, period["week_index"], period["weekday"])
+        if occurrence and period_start <= occurrence <= range_end:
+            dates.append(occurrence)
+        current = date(current.year + (current.month == 12), current.month % 12 + 1, 1)
+    return dates
+
+
+def occurrence_record(
+    program: dict[str, Any],
+    original: date,
+    override: dict[str, Any] | None = None,
+    schedule_time: str = "",
+    timezone: str = "Asia/Tokyo",
+    frequency: str = "",
+) -> dict[str, Any]:
+    has_override = bool(override)
+    override = override or {}
+    individual = frequency == "individual"
+    generated_date = str(override.get("generated_date") or "").strip() if individual else ""
+    base_original_date = original.isoformat()
+    effective_original_date = str(override.get("original_date") or base_original_date).strip() if has_override else base_original_date
+    default_time = schedule_time or program.get("schedule_time", "")
+    effective_original_time = str(override.get("original_time") or default_time) if has_override else default_time
+    event_date = override.get("adjusted_date") or effective_original_date
+    event_time = override.get("adjusted_time") or effective_original_time
+    status = override.get("status", "scheduled")
+    if status == "scheduled" and override.get("adjusted_date"):
+        status = "rescheduled"
+    record = {
+        "id": override.get("id"),
+        "generated": not has_override,
+        "individual": individual,
+        "original_date": effective_original_date,
+        "generated_date": generated_date or (base_original_date if individual else ""),
+        "original_time": effective_original_time,
+        "date": date.fromisoformat(event_date),
+        "time": event_time,
+        "timezone": timezone or program.get("timezone", "Asia/Tokyo"),
+        "status": status,
+        "adjusted_date": override.get("adjusted_date", ""),
+        "adjusted_time": override.get("adjusted_time", ""),
+        "note": override.get("note", ""),
+        "guests": program_people(override.get("guests", [])),
+    }
+    record["aired"] = record["status"] != "cancelled" and occurrence_has_passed(record)
+    return record
+
+
+def program_occurrence_records(program: dict[str, Any], range_start: date, range_end: date) -> list[dict[str, Any]]:
+    program_start = date.fromisoformat(program["start_date"]) if program.get("start_date") else range_start
+    program_end = date.fromisoformat(program["end_date"]) if program.get("end_date") else None
+    forecast_end = datetime.now(occurrence_timezone(program.get("timezone"))).date() + timedelta(days=PROGRAM_FORECAST_DAYS)
+    generation_end = min(range_end, program_end) if program_end else min(range_end, forecast_end)
+    override_rows = program.get("occurrences", [])
+    overrides = {str(row.get("generated_date") or row["original_date"]): row for row in override_rows}
+    periods = program.get("periods") or ([legacy_period(program)] if program.get("start_date") else [])
+    records: list[dict[str, Any]] = []
+    base_date_keys: set[str] = set()
+    if boolean_value(program.get("auto_generate"), True):
+        for period in periods:
+            period_start = date.fromisoformat(period["start_date"])
+            period_end = date.fromisoformat(period["end_date"]) if period.get("end_date") else program_end
+            period_generation_end = min(generation_end, period_end) if period_end else generation_end
+            if period_generation_end < period_start:
+                continue
+            base_dates = period_recurring_dates(period, period_generation_end)
+            base_date_keys.update(item.isoformat() for item in base_dates)
+            for original in base_dates:
+                records.append(
+                    occurrence_record(
+                        program,
+                        original,
+                        overrides.get(original.isoformat()),
+                        period.get("schedule_time", ""),
+                        period.get("timezone", "Asia/Tokyo"),
+                        period.get("frequency", "weekly"),
+                    )
+                )
+    for row in override_rows:
+        generated_date = str(row.get("generated_date") or row["original_date"])
+        if generated_date in base_date_keys:
+            continue
+        original = date.fromisoformat(row["original_date"])
+        anchor = date.fromisoformat(generated_date)
+        period = next(
+            (
+                item
+                for item in periods
+                if date.fromisoformat(item["start_date"]) <= anchor
+                and (not item.get("end_date") or anchor <= date.fromisoformat(item["end_date"]))
+            ),
+            periods[0] if periods else {},
+        )
+        records.append(occurrence_record(program, original, row, period.get("schedule_time", ""), period.get("timezone", "Asia/Tokyo"), period.get("frequency", "weekly")))
+    return records
+
+
+def effective_program_occurrences(program: dict[str, Any], range_start: date, range_end: date) -> list[dict[str, Any]]:
+    records = program_occurrence_records(program, range_start, range_end)
+    return sorted(
+        [record for record in records if record["status"] != "cancelled" and range_start <= record["date"] <= range_end],
+        key=lambda record: (record["date"], record["time"], record["original_date"]),
+    )
+
+
+def occurrence_episode_numbers(records: list[dict[str, Any]]) -> list[int]:
+    episode = 0
+    numbers = []
+    for record in records:
+        if record["status"] == "cancelled":
+            numbers.append(episode + 1)
+            continue
+        episode += 1
+        numbers.append(episode)
+    return numbers
+
+
+def program_update_status(program: dict[str, Any]) -> str:
+    if program.get("status") == "completed" or not program.get("start_date"):
+        return "completed" if program.get("status") == "completed" else "not_updated"
+    today = datetime.now(occurrence_timezone(program.get("timezone"))).date()
+    start = date.fromisoformat(program["start_date"])
+    if today < start:
+        return "not_updated"
+    occurrences = effective_program_occurrences(program, start, today)
+    if not occurrences:
+        return "not_updated"
+    latest = max(occurrences, key=lambda item: item["date"])
+    original_date = date.fromisoformat(latest.get("generated_date") or latest["original_date"])
+    periods = program.get("periods") or []
+    period = next(
+        (
+            item
+            for item in periods
+            if date.fromisoformat(item["start_date"]) <= original_date
+            and (not item.get("end_date") or original_date <= date.fromisoformat(item["end_date"]))
+        ),
+        {},
+    )
+    if period.get("frequency") == "weekly":
+        cadence_days = 7 * max(int(period.get("week_interval") or 1), 1)
+    elif period.get("frequency") in {"monthly", "individual"}:
+        cadence_days = 31
+    else:
+        cadence_days = 1
+    return "not_updated" if today > latest["date"] + timedelta(days=cadence_days * 2) else "updated"
+
+
+def occurrence_has_passed(occurrence: dict[str, Any]) -> bool:
+    current = datetime.now(occurrence_timezone(occurrence["timezone"]))
+    return occurrence["date"] < current.date() or (
+        occurrence["date"] == current.date() and (not occurrence["time"] or occurrence["time"] <= current.strftime("%H:%M"))
+    )
+
+
+def program_episode_count(program: dict[str, Any]) -> int:
+    if not program.get("start_date"):
+        return 0
+    program_start = date.fromisoformat(program["start_date"])
+    today = datetime.now(occurrence_timezone(program.get("timezone"))).date()
+    program_end = date.fromisoformat(program["end_date"]) if program.get("end_date") else None
+    limit = program_end if program.get("status") == "completed" and program_end else today
+    if program_end:
+        limit = min(limit, program_end)
+    if limit < program_start:
+        return 0
+    occurrences = effective_program_occurrences(program, program_start, limit)
+    if program.get("status") == "completed":
+        return len(occurrences)
+    return sum(
+        1
+        for item in occurrences
+        if occurrence_has_passed(item)
+    )
+
+
+def backfill_individual_occurrence_anchors(
+    conn: sqlite3.Connection,
+    program_id: str,
+    old_periods: list[dict[str, Any]],
+    new_periods: list[dict[str, Any]],
+) -> None:
+    converted_periods = {
+        period["start_date"]: period
+        for period in new_periods
+        if period.get("frequency") == "individual"
+    }
+    monthly_periods = [
+        period
+        for period in old_periods
+        if period.get("frequency") == "monthly" and period.get("start_date") in converted_periods
+    ]
+    if not monthly_periods:
+        return
+
+    rows = conn.execute(
+        "SELECT id, original_date, generated_date FROM program_occurrences WHERE program_id = ? ORDER BY original_date, id",
+        (program_id,),
+    ).fetchall()
+    used_anchors = {
+        str(row["generated_date"]).strip()
+        for row in rows
+        if str(row["generated_date"] or "").strip()
+    }
+    for row in rows:
+        if str(row["generated_date"] or "").strip():
+            continue
+        original = date.fromisoformat(row["original_date"])
+        old_period = next(
+            (
+                period
+                for period in monthly_periods
+                if date.fromisoformat(period["start_date"]) <= original
+                and (not period.get("end_date") or original <= date.fromisoformat(period["end_date"]))
+            ),
+            None,
+        )
+        if not old_period:
+            continue
+        anchor = date(original.year, original.month, 1)
+        period_start = date.fromisoformat(old_period["start_date"])
+        period_end = date.fromisoformat(old_period["end_date"]) if old_period.get("end_date") else None
+        anchor_value = anchor.isoformat()
+        if anchor < period_start or (period_end and anchor > period_end) or anchor_value in used_anchors:
+            anchor_value = original.isoformat()
+        if anchor_value in used_anchors:
+            continue
+        conn.execute(
+            "UPDATE program_occurrences SET generated_date = ? WHERE id = ? AND program_id = ?",
+            (anchor_value, row["id"], program_id),
+        )
+        used_anchors.add(anchor_value)
+
+
+def replace_program_periods(conn: sqlite3.Connection, program_id: str, periods: list[dict[str, Any]], timestamp: str) -> None:
+    conn.execute("DELETE FROM program_periods WHERE program_id = ?", (program_id,))
+    conn.executemany("""INSERT INTO program_periods (
+        program_id, start_date, end_date, frequency, week_interval, week_index, weekday, schedule_time, timezone, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", [
+        (
+            program_id,
+            period["start_date"],
+            period["end_date"],
+            period["frequency"],
+            period["week_interval"],
+            period["week_index"],
+            period["weekday"],
+            period["schedule_time"],
+            period["timezone"],
+            timestamp,
+            timestamp,
+        )
+        for period in periods
+    ])
+
+
+def program_rows() -> list[dict[str, Any]]:
+    with db() as conn:
+        program_rows = conn.execute("SELECT * FROM programs ORDER BY category, title COLLATE NOCASE, CASE WHEN parent_id = '' THEN 0 ELSE 1 END, subprogram_name COLLATE NOCASE").fetchall()
+        period_rows = conn.execute("SELECT * FROM program_periods ORDER BY start_date, id").fetchall()
+        occurrence_rows = conn.execute("SELECT * FROM program_occurrences ORDER BY original_date, id").fetchall()
+    periods_grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in period_rows:
+        periods_grouped.setdefault(row["program_id"], []).append(period_payload(row))
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in occurrence_rows:
+        grouped.setdefault(row["program_id"], []).append(occurrence_payload(row))
+    return [program_payload(row, grouped.get(row["id"], []), periods_grouped.get(row["id"])) for row in program_rows]
+
+
+def program_calendar_events(program: dict[str, Any], range_start: date, range_end: date) -> list[dict[str, Any]]:
+    program_start = date.fromisoformat(program["start_date"]) if program.get("start_date") else range_start
+    records = sorted(program_occurrence_records(program, program_start, range_end), key=lambda record: record["original_date"])
+    episode_numbers = occurrence_episode_numbers(records)
+    events = []
+    for index, record in enumerate(records):
+        if not range_start <= record["date"] <= range_end:
+            continue
+        episode_number = episode_numbers[index]
+        update_suffix = " · 未更新" if program.get("update_status") == "not_updated" else ""
+        episode_label = f"原定第{episode_number}期" if record["status"] == "cancelled" else f"第{episode_number}期"
+        event: dict[str, Any] = {
+            "id": f"{program['id']}-{record['original_date']}",
+            "title": f"{program_display_name(program)} · {episode_label}" + (" · 已取消" if record["status"] == "cancelled" else update_suffix),
+            "start": record["date"].isoformat(),
+            "allDay": not bool(record["time"]),
+            "extendedProps": {
+                "programId": program["id"],
+                "programTitle": program["title"],
+                "subprogramName": program.get("subprogram_name") or "主节目",
+                "episode": episode_number,
+                "category": program["category"],
+                "status": program["status"],
+                "format": program["format"],
+                "delivery": program.get("delivery", "recorded"),
+                "occurrenceId": record["id"],
+                "originalDate": record["original_date"],
+                "originalTime": record["original_time"],
+                "adjustedDate": record["adjusted_date"],
+                "adjustedTime": record["adjusted_time"],
+                "timezone": record["timezone"],
+                "occurrenceStatus": record["status"],
+                "aired": record["aired"],
+                "updateStatus": program.get("update_status", "updated"),
+                "note": record["note"],
+                "guests": record["guests"],
+                "people": program_people(program.get("people", [])),
+            },
+        }
+        if record["time"]:
+            event["start"] = f"{record['date'].isoformat()}T{record['time']}"
+        events.append(event)
+    return events
 
 
 def admin_cookie(request: Request) -> bool:
@@ -276,6 +1199,7 @@ def parse_release(release_id: str, content, entry_image=None) -> dict[str, str]:
     detail_copy = BeautifulSoup(str(content or ""), "html.parser") if content else BeautifulSoup("", "html.parser")
     for detail_image in detail_copy.select("img[src]"):
         detail_image["src"] = urljoin(SOURCE_URL, detail_image["src"])
+        detail_image["loading"] = "lazy"
     detail_html = str(detail_copy) if content else ""
     extras = parse_extras(content) if content else []
     record = {
@@ -366,44 +1290,198 @@ async def send_onebot(message: str, config: dict[str, str]) -> None:
         response.raise_for_status()
 
 
-async def notify(changed: list[dict[str, str]], config: dict[str, str], category: str) -> None:
+def release_change_details(item: dict[str, Any]) -> list[str]:
+    previous = item.get("_previous")
+    if previous is None:
+        details = ["新增 CD/资料"]
+    else:
+        details = []
+
+    if item.get("_cover_changed"):
+        details.append("封面已更新" if previous is not None else "封面已添加")
+
+    basic_labels = {
+        "title": "标题",
+        "subtitle": "副标题",
+        "artist": "艺人",
+        "release_date": "发售日",
+        "price": "价格",
+    }
+    if previous is None:
+        changed_basic = [key for key in basic_labels if item.get(key, "")]
+    else:
+        changed_basic = [key for key in basic_labels if previous.get(key, "") != item.get(key, "")]
+    if changed_basic:
+        basic_values = [f"{basic_labels[key]} {str(item.get(key, '')).strip()[:80]}" for key in changed_basic if item.get(key, "")]
+        summary = f"基本信息已更新：{'、'.join(basic_labels[key] for key in changed_basic)}"
+        if basic_values:
+            summary += f"（{'；'.join(basic_values)}）"
+        details.append(summary)
+
+    old_tracks = decode_json(previous.get("tracks_json"), []) if previous else []
+    new_tracks = decode_json(item.get("tracks_json"), [])
+    if not isinstance(old_tracks, list):
+        old_tracks = []
+    if not isinstance(new_tracks, list):
+        new_tracks = []
+    if (previous is None and new_tracks) or (previous is not None and old_tracks != new_tracks):
+        titles = [str(track.get("title", "")).strip() for track in new_tracks if isinstance(track, dict) and track.get("title")]
+        track_summary = f"曲目（{len(new_tracks)} 首）"
+        if titles:
+            track_summary += f"：{' / '.join(titles[:6])}"
+            if len(titles) > 6:
+                track_summary += f" 等 {len(titles)} 首"
+        details.append(track_summary)
+
+    old_specs = decode_json(previous.get("spec_json"), {}) if previous else {}
+    new_specs = decode_json(item.get("spec_json"), {})
+    if not isinstance(old_specs, dict):
+        old_specs = {}
+    if not isinstance(new_specs, dict):
+        new_specs = {}
+    changed_specs = [key for key in new_specs if old_specs.get(key) != new_specs.get(key)]
+    if previous is None or changed_specs:
+        spec_labels = {
+            "仕様": "收录/规格",
+            "収録内容": "收录内容",
+            "収録曲": "收录曲目",
+        }
+        detail_keys = [spec_labels.get(key, key) for key in changed_specs if key not in {"アーティスト", "発売日", "一般発売日", "劇場先行発売日", "価格"}]
+        if previous is None:
+            detail_keys = [spec_labels.get(key, key) for key in new_specs if key not in {"アーティスト", "発売日", "一般発売日", "劇場先行発売日", "価格"}]
+        if detail_keys:
+            details.append(f"资料字段已更新：{'、'.join(detail_keys[:6])}")
+
+    old_extras = decode_json(previous.get("extras_json"), []) if previous else []
+    new_extras = decode_json(item.get("extras_json"), [])
+    if not isinstance(old_extras, list):
+        old_extras = []
+    if not isinstance(new_extras, list):
+        new_extras = []
+    if (previous is None and new_extras) or (previous is not None and old_extras != new_extras):
+        details.append(f"特典/相关链接已更新（{len(new_extras)} 项）")
+
+    if previous is not None and previous.get("detail_html", "") != item.get("detail_html", "") and len(details) == 0:
+        details.append("详情页面内容已更新")
+    return details[:6]
+
+
+async def notify(changed: list[dict[str, Any]], config: dict[str, str], category: str) -> None:
     if not changed or not config.get("onebot_url") or not config.get("onebot_target"):
         return
     lines = [f"[{category}]", f"虹咲音乐资料有 {len(changed)} 项更新："]
-    lines.extend(f"• {item['title']}" for item in changed[:10])
+    for item in changed[:10]:
+        lines.append(f"• {item['title']}")
+        lines.extend(f"  - {detail}" for detail in release_change_details(item))
     if len(changed) > 10:
         lines.append(f"以及其他 {len(changed) - 10} 项")
     await send_onebot("\n".join(lines), config)
 
 
-async def cache_cover(item: dict[str, str], client: httpx.AsyncClient) -> None:
+def cover_cache_is_current() -> bool:
+    try:
+        return COVER_CACHE_VERSION_PATH.read_text(encoding="utf-8").strip() == COVER_CACHE_VERSION
+    except OSError:
+        return False
+
+
+def mark_cover_cache_current() -> None:
+    temporary = COVER_CACHE_VERSION_PATH.with_name(f".{COVER_CACHE_VERSION_PATH.name}.{secrets.token_hex(6)}.tmp")
+    try:
+        temporary.write_text(f"{COVER_CACHE_VERSION}\n", encoding="utf-8")
+        temporary.replace(COVER_CACHE_VERSION_PATH)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def cover_refresh_ids(records: list[dict[str, str]]) -> set[str]:
+    if not records:
+        return set()
+    with db() as conn:
+        existing = {row["id"]: row["fingerprint"] for row in conn.execute("SELECT id, fingerprint FROM releases")}
+    return {item["id"] for item in records if existing.get(item["id"]) != item["fingerprint"]}
+
+
+def r2_upload_is_configured() -> bool:
+    return bool(R2_ENDPOINT and R2_BUCKET and R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY)
+
+
+def r2_is_configured() -> bool:
+    return bool(r2_upload_is_configured() and R2_PUBLIC_BASE_URL)
+
+
+def r2_object_key(filename: str) -> str:
+    return f"{R2_IMAGE_PREFIX}/{filename}" if R2_IMAGE_PREFIX else filename
+
+
+def public_image_url(filename: str) -> str:
+    if not r2_is_configured():
+        return f"/media/{filename}"
+    return f"{R2_PUBLIC_BASE_URL}/{quote(r2_object_key(filename), safe='/')}"
+
+
+def upload_cover_to_r2(path: Path) -> None:
+    global _r2_client
+    if _r2_client is None:
+        _r2_client = boto3.client(
+            "s3",
+            endpoint_url=R2_ENDPOINT,
+            aws_access_key_id=R2_ACCESS_KEY_ID,
+            aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+            region_name=os.getenv("R2_REGION", "auto"),
+        )
+    content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    _r2_client.upload_file(
+        str(path),
+        R2_BUCKET,
+        r2_object_key(path.name),
+        ExtraArgs={"ContentType": content_type, "CacheControl": "no-cache"},
+    )
+
+
+async def cache_cover(item: dict[str, str], client: httpx.AsyncClient, force_refresh: bool = False) -> bool:
     if not item["cover_url"]:
-        return
+        return False
     extension = Path(urlparse(item["cover_url"]).path).suffix.lower()
     if extension not in {".jpg", ".jpeg", ".png", ".webp"}:
         extension = ".jpg"
     target = MEDIA_DIR / f"{item['id']}{extension}"
-    if not target.exists():
+    cover_changed = not target.exists()
+    if force_refresh or not target.exists():
         response = await client.get(item["cover_url"])
         response.raise_for_status()
-        target.write_bytes(response.content)
+        cover_changed = not target.exists() or target.read_bytes() != response.content
+        temporary = target.with_name(f".{target.name}.{secrets.token_hex(6)}.tmp")
+        try:
+            temporary.write_bytes(response.content)
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        if r2_upload_is_configured():
+            await asyncio.to_thread(upload_cover_to_r2, target)
     source_url = item["cover_url"]
-    item["cover_url"] = f"/media/{target.name}"
+    item["cover_url"] = public_image_url(target.name)
     item["detail_html"] = item["detail_html"].replace(source_url, item["cover_url"])
+    return cover_changed
 
 
-async def store_records(records: list[dict[str, str]], assign_positions: bool = False) -> list[dict[str, str]]:
-    changed: list[dict[str, str]] = []
+async def store_records(
+    records: list[dict[str, str]],
+    assign_positions: bool = False,
+    refreshed_cover_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    changed: list[dict[str, Any]] = []
+    refreshed_cover_ids = refreshed_cover_ids or set()
     with db() as conn:
         existing_count = conn.execute("SELECT COUNT(*) FROM releases").fetchone()[0]
         for position, item in enumerate(records):
             if assign_positions:
                 item["position"] = position
-            old = conn.execute("SELECT fingerprint FROM releases WHERE id = ?", (item["id"],)).fetchone()
+            old = conn.execute("SELECT * FROM releases WHERE id = ?", (item["id"],)).fetchone()
             if old and old["fingerprint"] != item["fingerprint"]:
-                changed.append(item)
+                changed.append({**item, "_previous": dict(old), "_cover_changed": item["id"] in refreshed_cover_ids})
             elif not old and existing_count > 0:
-                changed.append(item)
+                changed.append({**item, "_previous": None, "_cover_changed": item["id"] in refreshed_cover_ids})
             conn.execute("""INSERT INTO releases (id,title,subtitle,artist,release_date,price,cover_url,detail_html,source_url,fingerprint,updated_at,position,tracks_json,spec_json,extras_json)
                 VALUES (:id,:title,:subtitle,:artist,:release_date,:price,:cover_url,:detail_html,:source_url,:fingerprint,:updated_at,:position,:tracks_json,:spec_json,:extras_json)
                 ON CONFLICT(id) DO UPDATE SET title=excluded.title, subtitle=excluded.subtitle, artist=excluded.artist, release_date=excluded.release_date, price=excluded.price, cover_url=excluded.cover_url, detail_html=excluded.detail_html, source_url=excluded.source_url, fingerprint=excluded.fingerprint, updated_at=excluded.updated_at, position=excluded.position, tracks_json=excluded.tracks_json, spec_json=excluded.spec_json, extras_json=excluded.extras_json""", {**item, "updated_at": datetime.now(timezone.utc).isoformat()})
@@ -416,19 +1494,25 @@ async def sync_once() -> tuple[int, str | None]:
     async with sync_lock:
         try:
             records = await scrape()
+            refresh_ids = cover_refresh_ids(records)
+            refresh_all = not cover_cache_is_current()
             image_headers = {
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
                 "Referer": SOURCE_URL,
             }
             image_errors = 0
+            refreshed_cover_ids: set[str] = set()
             async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=image_headers) as image_client:
                 for item in records:
                     try:
-                        await cache_cover(item, image_client)
+                        if await cache_cover(item, image_client, force_refresh=refresh_all or item["id"] in refresh_ids):
+                            refreshed_cover_ids.add(item["id"])
                     except Exception as exc:
                         image_errors += 1
                         print(f"[sync] cover failed {item['id']}: {exc}", flush=True)
-            changed = await store_records(records, assign_positions=True)
+            changed = await store_records(records, assign_positions=True, refreshed_cover_ids=refreshed_cover_ids)
+            if records and not image_errors:
+                mark_cover_cache_current()
             config = settings()
             await notify([item for item in changed if "_" not in item["id"]], config, "目录更新")
             await notify([item for item in changed if "_" in item["id"]], config, "异步详情更新")
@@ -464,15 +1548,19 @@ async def refresh_deferred_once() -> tuple[int, str | None]:
                     item["position"] = row["position"]
                     records.append(item)
             image_errors = 0
+            refreshed_cover_ids: set[str] = set()
+            refresh_ids = cover_refresh_ids(records)
+            refresh_all = not cover_cache_is_current()
             image_headers = {"User-Agent": headers["User-Agent"], "Referer": SOURCE_URL}
             async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=image_headers) as image_client:
                 for item in records:
                     try:
-                        await cache_cover(item, image_client)
+                        if await cache_cover(item, image_client, force_refresh=refresh_all or item["id"] in refresh_ids):
+                            refreshed_cover_ids.add(item["id"])
                     except Exception as exc:
                         image_errors += 1
                         print(f"[detail-sync] cover failed {item['id']}: {exc}", flush=True)
-            changed = await store_records(records)
+            changed = await store_records(records, refreshed_cover_ids=refreshed_cover_ids)
             await notify(changed, settings(), "异步详情更新")
             print(f"[detail-sync] completed: {len(changed)} changed, {len(records) - image_errors} checked", flush=True)
             return len(changed), None
@@ -522,6 +1610,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Nijigasaki DB", lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=6)
 app.mount("/media", StaticFiles(directory=str(MEDIA_DIR)), name="media")
 if FRONTEND_DIST.is_dir():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="frontend-assets")
@@ -549,6 +1638,34 @@ async def api_release_detail(release_id: str) -> dict[str, Any]:
         "following": dict(following) if following else None,
         "source_url": SOURCE_URL,
     }
+
+
+@app.get("/api/programs")
+async def api_programs() -> dict[str, Any]:
+    return {"programs": program_rows()}
+
+
+@app.get("/api/programs/calendar")
+async def api_program_calendar(start: str = "", end: str = "") -> dict[str, Any]:
+    today = datetime.now(JAPAN_TZ).date()
+    default_start = date(today.year, today.month, 1)
+    range_start = calendar_date(start, default_start)
+    range_end = calendar_date(end, range_start + timedelta(days=42))
+    if end:
+        range_end -= timedelta(days=1)
+    if range_end < range_start:
+        raise HTTPException(400, "日历结束日期不能早于开始日期")
+    programs = program_rows()
+    events = [event for program in programs for event in program_calendar_events(program, range_start, range_end)]
+    return {"events": events, "programs": programs, "start": range_start.isoformat(), "end": range_end.isoformat()}
+
+
+@app.get("/api/programs/{program_id}")
+async def api_program_detail(program_id: str) -> dict[str, Any]:
+    program = next((item for item in program_rows() if item["id"] == program_id), None)
+    if not program:
+        raise HTTPException(404, "节目不存在")
+    return {"program": program}
 
 
 @app.get("/api/auth/session")
@@ -598,6 +1715,53 @@ async def api_save_settings(request: Request) -> dict[str, dict[str, str]]:
     values = normalized_settings({**settings(), **payload})
     save_settings(values)
     return {"settings": values}
+
+
+@app.get("/api/admin/backup")
+async def api_download_backup(request: Request) -> FileResponse:
+    require_api_admin(request)
+    async with sync_lock:
+        backup_path = create_database_backup()
+    filename = f"nijidb-backup-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.sqlite3"
+    return FileResponse(
+        backup_path,
+        media_type="application/vnd.sqlite3",
+        filename=filename,
+        background=BackgroundTask(remove_file, backup_path),
+    )
+
+
+@app.post("/api/admin/backup/restore")
+async def api_restore_backup(request: Request) -> dict[str, str]:
+    require_api_admin(request)
+    upload_path = await save_backup_upload(request)
+    try:
+        try:
+            validate_database_backup(upload_path)
+        except (OSError, sqlite3.DatabaseError, ValueError) as exc:
+            raise HTTPException(400, "数据库备份文件无效") from exc
+
+        async with sync_lock:
+            rollback_path = create_database_backup()
+            try:
+                remove_database_sidecars()
+                os.replace(upload_path, DB_PATH)
+                init_db()
+                remove_file(COVER_CACHE_VERSION_PATH)
+            except Exception as exc:
+                remove_database_sidecars()
+                try:
+                    os.replace(rollback_path, DB_PATH)
+                    init_db()
+                except Exception as rollback_error:
+                    print(f"[backup] rollback failed: {type(rollback_error).__name__}", flush=True)
+                raise HTTPException(500, "数据库还原失败，原数据库已保留") from exc
+            finally:
+                remove_file(rollback_path)
+        print("[backup] database restored", flush=True)
+        return {"message": "数据库还原成功，下一次同步会重新检查封面缓存"}
+    finally:
+        remove_file(upload_path)
 
 
 @app.post("/api/admin/test-onebot")
@@ -655,6 +1819,256 @@ async def api_manual_sync(request: Request) -> dict[str, Any]:
     require_api_admin(request)
     changed, error = await sync_once()
     return {"changed_count": changed, "error": error}
+
+
+@app.post("/api/admin/programs")
+async def api_create_program(request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "请求格式无效") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "请求格式无效")
+    try:
+        values = normalized_program(payload)
+        with db() as conn:
+            values = validate_program_group(conn, values)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    now = datetime.now(timezone.utc).isoformat()
+    values.update({"id": f"program-{secrets.token_hex(6)}", "created_at": now, "updated_at": now})
+    with db() as conn:
+        conn.execute("""INSERT INTO programs (
+            id, title, status, category, format, platform, delivery, auto_generate, people, official_url, description,
+            frequency, week_interval, monthly_mode, week_index, weekday, schedule_time,
+            start_date, end_date, parent_id, subprogram_name, created_at, updated_at
+        ) VALUES (
+            :id, :title, :status, :category, :format, :platform, :delivery, :auto_generate, :people, :official_url, :description,
+            :frequency, :week_interval, :monthly_mode, :week_index, :weekday, :schedule_time,
+            :start_date, :end_date, :parent_id, :subprogram_name, :created_at, :updated_at
+        )""", values)
+        replace_program_periods(conn, values["id"], values["periods"], now)
+    program = next(item for item in program_rows() if item["id"] == values["id"])
+    return {"program": program}
+
+
+@app.patch("/api/admin/programs/{program_id}")
+async def api_update_program(program_id: str, request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "请求格式无效") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "请求格式无效")
+    with db() as conn:
+        existing = conn.execute("SELECT * FROM programs WHERE id = ?", (program_id,)).fetchone()
+    if not existing:
+        raise HTTPException(404, "节目不存在")
+    try:
+        values = normalized_program({**dict(existing), **payload})
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    values.update({"id": program_id, "updated_at": datetime.now(timezone.utc).isoformat()})
+    with db() as conn:
+        try:
+            values = validate_program_group(conn, values, program_id)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        old_periods = [
+            period_payload(row)
+            for row in conn.execute("SELECT * FROM program_periods WHERE program_id = ? ORDER BY start_date, id", (program_id,)).fetchall()
+        ]
+        conn.execute("""UPDATE programs SET
+            title=:title, status=:status, category=:category, format=:format, platform=:platform, delivery=:delivery, auto_generate=:auto_generate,
+            people=:people, official_url=:official_url, description=:description,
+            frequency=:frequency, week_interval=:week_interval, monthly_mode=:monthly_mode,
+            week_index=:week_index, weekday=:weekday, schedule_time=:schedule_time,
+            start_date=:start_date, end_date=:end_date, parent_id=:parent_id, subprogram_name=:subprogram_name, updated_at=:updated_at
+            WHERE id=:id""", values)
+        if not values["parent_id"]:
+            conn.execute(
+                "UPDATE programs SET title = ?, updated_at = ? WHERE parent_id = ?",
+                (values["title"], values["updated_at"], program_id),
+            )
+        backfill_individual_occurrence_anchors(conn, program_id, old_periods, values["periods"])
+        replace_program_periods(conn, program_id, values["periods"], values["updated_at"])
+    program = next(item for item in program_rows() if item["id"] == program_id)
+    return {"program": program}
+
+
+@app.delete("/api/admin/programs/{program_id}")
+async def api_delete_program(program_id: str, request: Request) -> dict[str, str]:
+    require_api_admin(request)
+    with db() as conn:
+        program = conn.execute("SELECT id, parent_id FROM programs WHERE id = ?", (program_id,)).fetchone()
+        if not program:
+            raise HTTPException(404, "节目不存在")
+        if not program["parent_id"] and conn.execute("SELECT 1 FROM programs WHERE parent_id = ? LIMIT 1", (program_id,)).fetchone():
+            raise HTTPException(409, "请先删除该主节目下的子节目")
+        conn.execute("DELETE FROM program_periods WHERE program_id = ?", (program_id,))
+        conn.execute("DELETE FROM program_occurrences WHERE program_id = ?", (program_id,))
+        result = conn.execute("DELETE FROM programs WHERE id = ?", (program_id,))
+    if result.rowcount == 0:
+        raise HTTPException(404, "节目不存在")
+    return {"message": "节目已删除"}
+
+
+@app.patch("/api/admin/programs/{program_id}/auto-generation")
+async def api_update_auto_generation(program_id: str, request: Request) -> dict[str, bool]:
+    require_api_admin(request)
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "请求格式无效") from exc
+    if not isinstance(payload, dict) or "auto_generate" not in payload:
+        raise HTTPException(400, "自动生成设置无效")
+    auto_generate = boolean_value(payload["auto_generate"], True)
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM programs WHERE id = ?", (program_id,)).fetchone():
+            raise HTTPException(404, "节目不存在")
+        conn.execute(
+            "UPDATE programs SET auto_generate = ?, updated_at = ? WHERE id = ?",
+            (int(auto_generate), datetime.now(timezone.utc).isoformat(), program_id),
+        )
+    return {"auto_generate": auto_generate}
+
+
+@app.get("/api/admin/programs/{program_id}/occurrences")
+async def api_program_occurrences(program_id: str, request: Request, start: str = "", end: str = "") -> dict[str, Any]:
+    require_api_admin(request)
+    program = next((item for item in program_rows() if item["id"] == program_id), None)
+    if not program:
+        raise HTTPException(404, "节目不存在")
+    today = datetime.now(JAPAN_TZ).date()
+    program_start = calendar_date(program.get("start_date", ""), today)
+    default_start = program_start
+    default_end = calendar_date(program.get("end_date", ""), today + timedelta(days=PROGRAM_FORECAST_DAYS))
+    if default_start > default_end:
+        default_end = default_start + timedelta(days=PROGRAM_FORECAST_DAYS)
+    range_start = calendar_date(start, default_start)
+    range_end = calendar_date(end, default_end)
+    if range_end < range_start:
+        raise HTTPException(400, "排期结束日期不能早于开始日期")
+    records = sorted(program_occurrence_records(program, program_start, range_end), key=lambda item: item["original_date"])
+    episode_numbers = occurrence_episode_numbers(records)
+    visible_records = [
+        (episode_numbers[index], record)
+        for index, record in enumerate(records)
+        if range_start <= record["date"] <= range_end or record["id"]
+    ]
+    return {
+        "occurrences": [
+            {
+                **record,
+                "date": record["date"].isoformat(),
+                "episode": episode_number,
+            }
+            for episode_number, record in sorted(visible_records, key=lambda item: (item[1]["date"], item[1]["time"], item[1]["original_date"]))
+        ],
+        "start": range_start.isoformat(),
+        "end": range_end.isoformat(),
+    }
+
+
+@app.post("/api/admin/programs/{program_id}/occurrences")
+async def api_create_occurrence(program_id: str, request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "请求格式无效") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "请求格式无效")
+    try:
+        values = normalized_occurrence(payload)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    now = datetime.now(timezone.utc).isoformat()
+    values.update({"program_id": program_id, "created_at": now, "updated_at": now})
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM programs WHERE id = ?", (program_id,)).fetchone():
+            raise HTTPException(404, "节目不存在")
+        try:
+            cursor = conn.execute("""INSERT INTO program_occurrences (
+                program_id, original_date, generated_date, original_time, status, adjusted_date, adjusted_time, note, guests, created_at, updated_at
+            ) VALUES (
+                :program_id, :original_date, :generated_date, :original_time, :status, :adjusted_date, :adjusted_time, :note, :guests, :created_at, :updated_at
+            )""", values)
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(409, "该原定日期已经有单集调整") from exc
+        row = conn.execute("SELECT * FROM program_occurrences WHERE id = ?", (cursor.lastrowid,)).fetchone()
+    return {"occurrence": occurrence_payload(row)}
+
+
+@app.post("/api/admin/programs/{program_id}/occurrences/restore-rescheduled")
+async def api_restore_rescheduled_occurrences(program_id: str, request: Request) -> dict[str, int]:
+    require_api_admin(request)
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM programs WHERE id = ?", (program_id,)).fetchone():
+            raise HTTPException(404, "节目不存在")
+        try:
+            # Keep the old date as the generation key so monthly schedules do not duplicate the row.
+            conn.execute(
+                """UPDATE program_occurrences
+                   SET generated_date = original_date
+                   WHERE program_id = ? AND generated_date = ''
+                     AND (status = 'rescheduled' OR adjusted_date != '' OR adjusted_time != '')""",
+                (program_id,),
+            )
+            result = conn.execute(
+                """UPDATE program_occurrences
+                   SET original_date = CASE WHEN adjusted_date != '' THEN adjusted_date ELSE original_date END,
+                       original_time = CASE WHEN adjusted_time != '' THEN adjusted_time ELSE original_time END,
+                       status = 'scheduled', adjusted_date = '', adjusted_time = '', updated_at = ?
+                   WHERE program_id = ?
+                     AND (status = 'rescheduled' OR adjusted_date != '' OR adjusted_time != '')""",
+                (datetime.now(timezone.utc).isoformat(), program_id),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(409, "改期时间覆盖后出现重复的原定日期") from exc
+    return {"count": result.rowcount}
+
+
+@app.patch("/api/admin/programs/{program_id}/occurrences/{occurrence_id}")
+async def api_update_occurrence(program_id: str, occurrence_id: int, request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "请求格式无效") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "请求格式无效")
+    with db() as conn:
+        existing = conn.execute("SELECT * FROM program_occurrences WHERE id = ? AND program_id = ?", (occurrence_id, program_id)).fetchone()
+    if not existing:
+        raise HTTPException(404, "单集排期不存在")
+    try:
+        values = normalized_occurrence({**dict(existing), **payload})
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    values.update({"id": occurrence_id, "program_id": program_id, "updated_at": datetime.now(timezone.utc).isoformat()})
+    with db() as conn:
+        try:
+            conn.execute("""UPDATE program_occurrences SET
+                original_date=:original_date, generated_date=:generated_date, original_time=:original_time, status=:status,
+                adjusted_date=:adjusted_date, adjusted_time=:adjusted_time, note=:note, guests=:guests, updated_at=:updated_at
+                WHERE id=:id AND program_id=:program_id""", values)
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(409, "该原定日期已经有单集调整") from exc
+        row = conn.execute("SELECT * FROM program_occurrences WHERE id = ?", (occurrence_id,)).fetchone()
+    return {"occurrence": occurrence_payload(row)}
+
+
+@app.delete("/api/admin/programs/{program_id}/occurrences/{occurrence_id}")
+async def api_delete_occurrence(program_id: str, occurrence_id: int, request: Request) -> dict[str, str]:
+    require_api_admin(request)
+    with db() as conn:
+        result = conn.execute("DELETE FROM program_occurrences WHERE id = ? AND program_id = ?", (occurrence_id, program_id))
+    if result.rowcount == 0:
+        raise HTTPException(404, "单集排期不存在")
+    return {"message": "单集排期已恢复为默认规则"}
 
 
 @app.get("/rainbow.svg", include_in_schema=False)

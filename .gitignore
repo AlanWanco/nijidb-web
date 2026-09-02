@@ -7,3 +7,4 @@ data/
 *.sqlite3
 .env
 .env.*
+/AGENTS.md

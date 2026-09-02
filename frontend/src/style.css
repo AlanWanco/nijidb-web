@@ -817,6 +817,11 @@ footer a {
 
   .site-nav .site-settings-link {
     display: inline-flex;
+    padding: 8px;
+  }
+
+  .site-nav .site-settings-link span {
+    display: none;
   }
 
   .page {

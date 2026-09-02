@@ -37,6 +37,11 @@ const occurrenceListRef = ref(null);
 const occurrenceEditorRef = ref(null);
 const customPerson = ref("");
 const occurrenceGuestInput = ref("");
+const importFileInput = ref(null);
+const importPayload = ref(null);
+const importPreview = ref(null);
+const importFileName = ref("");
+const importSubmitting = ref(false);
 const message = ref("");
 const error = ref("");
 let toastTimer = 0;
@@ -278,6 +283,133 @@ function showError(requestError) {
     return;
   }
   error.value = requestError.message || "请求失败";
+}
+
+function downloadJson(fileName, payload) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function safeJsonFileName(value, fallback) {
+  const name = String(value || fallback).trim().replace(/[\\/:*?"<>|]+/g, "-").slice(0, 80);
+  return `${name || fallback}.json`;
+}
+
+async function exportProgramJson() {
+  message.value = "";
+  error.value = "";
+  try {
+    const template = !editingId.value;
+    const payload = await api(template ? "/api/admin/program-json-template" : `/api/admin/programs/${editingId.value}/export`);
+    downloadJson(safeJsonFileName(template ? "nijidb-program-template" : payload.program?.title, "nijidb-program"), payload);
+    message.value = template ? "JSON 模板已下载" : "节目 JSON 已导出";
+  } catch (requestError) {
+    showError(requestError);
+  }
+}
+
+function openImportPicker() {
+  importFileInput.value?.click();
+}
+
+function stripJsonComments(source) {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const current = source[index];
+    const next = source[index + 1];
+    if (inString) {
+      result += current;
+      if (escaped) escaped = false;
+      else if (current === "\\") escaped = true;
+      else if (current === '"') inString = false;
+      continue;
+    }
+    if (current === '"') {
+      inString = true;
+      result += current;
+    } else if (current === "/" && next === "/") {
+      while (index < source.length && source[index] !== "\n") index += 1;
+      result += "\n";
+    } else if (current === "/" && next === "*") {
+      index += 2;
+      while (index < source.length && !(source[index] === "*" && source[index + 1] === "/")) index += 1;
+      index += 1;
+      result += " ";
+    } else {
+      result += current;
+    }
+  }
+  return result.replace(/^\uFEFF/, "");
+}
+
+async function handleImportFile(event) {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file) return;
+  message.value = "";
+  error.value = "";
+  try {
+    const payload = JSON.parse(stripJsonComments(await file.text()));
+    const preview = await api("/api/admin/programs/import/preview", { method: "POST", body: payload });
+    importPayload.value = payload;
+    importPreview.value = preview;
+    importFileName.value = file.name;
+  } catch (requestError) {
+    showError(requestError instanceof SyntaxError ? new Error("JSON 格式无效，请检查括号、逗号或字符串") : requestError);
+  }
+}
+
+function closeImportPreview() {
+  importPayload.value = null;
+  importPreview.value = null;
+  importFileName.value = "";
+}
+
+function importDeliveryLabel(value) {
+  if (value === "live") return "直播";
+  if (value === "recorded") return "录播";
+  return "跟随节目默认";
+}
+
+function importStatusLabel(value) {
+  return value === "cancelled" ? "因故取消" : "正常播出";
+}
+
+function importSpecialLabel(value) {
+  return value === "EX" ? "EX 特别节目" : "普通单集";
+}
+
+async function submitImport() {
+  if (!importPayload.value || importSubmitting.value) return;
+  importSubmitting.value = true;
+  message.value = "";
+  error.value = "";
+  try {
+    const data = await api("/api/admin/programs/import", { method: "POST", body: importPayload.value });
+    const saved = data.program;
+    closeImportPreview();
+    await loadPrograms();
+    editingId.value = saved.id;
+    editorOpen.value = true;
+    activePanel.value = "edit";
+    applyProgram(saved);
+    await loadOccurrences(saved.id);
+    message.value = `已导入「${saved.title}」${data.imported_occurrences ? `，${data.imported_occurrences} 期单集` : ""}`;
+    if (data.warnings?.length) message.value += `；${data.warnings.length} 条字段说明已忽略`;
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  } catch (requestError) {
+    showError(requestError);
+  } finally {
+    importSubmitting.value = false;
+  }
 }
 
 function showPanel(panel) {
@@ -1070,11 +1202,13 @@ onUnmounted(() => {
          <button type="button" class="secondary add-period-button program-action-button" @click="addPeriod">＋ 添加排期时期</button>
       </div>
 
-      <div class="actions">
-         <button class="program-action-button" :disabled="saving">{{ saving ? "保存中……" : editingId ? "保存修改" : "添加节目" }}</button>
-         <button v-if="editingId" type="button" class="secondary program-action-button" @click="startNewProgram">新建节目</button>
-      </div>
-    </form>
+       <div class="actions">
+          <button class="program-action-button" :disabled="saving">{{ saving ? "保存中……" : editingId ? "保存修改" : "添加节目" }}</button>
+          <button type="button" class="secondary program-action-button" title="已有节目时导出节目和已保存单集资料；未保存节目时下载带字段说明的模板" @click="exportProgramJson">导出 JSON</button>
+          <button type="button" class="secondary program-action-button" title="选择一个节目 JSON，先预览节目、排期和全部单集，再确认导入" @click="openImportPicker">导入 JSON</button>
+          <input ref="importFileInput" class="program-json-file-input" type="file" accept=".json,application/json" @change="handleImportFile">
+       </div>
+     </form>
 
     <section ref="occurrenceEditorRef" v-if="activePanel === 'occurrences' && editorOpen && editingId" class="settings-card program-occurrence-editor program-panel-content">
          <div class="section-heading">
@@ -1179,5 +1313,46 @@ onUnmounted(() => {
       </div>
     </section>
 
- </main>
+    <div v-if="importPreview" class="program-json-modal" role="dialog" aria-modal="true" aria-labelledby="program-json-preview-title" @click.self="closeImportPreview">
+      <section class="program-json-dialog">
+        <div class="program-json-dialog-heading">
+          <div><p class="eyebrow">JSON IMPORT / PREVIEW</p><h2 id="program-json-preview-title">导入预览</h2><small>{{ importFileName }} · 导入会新建节目，不会覆盖当前节目</small></div>
+          <button type="button" class="secondary program-action-button" :disabled="importSubmitting" @click="closeImportPreview">关闭</button>
+        </div>
+        <div class="program-json-summary">
+          <div><span class="program-field-label">节目名称</span><strong>{{ importPreview.program.title }}</strong></div>
+          <div><span class="program-field-label">类型</span><strong>{{ importPreview.program.category === "official" ? "官方节目" : "个人节目" }}</strong></div>
+          <div><span class="program-field-label">形式</span><strong>{{ formatLabel(importPreview.program) }}</strong></div>
+          <div><span class="program-field-label">成员</span><strong>{{ importPreview.program.people?.join("、") || "未填写" }}</strong></div>
+        </div>
+        <section class="program-json-preview-section">
+          <div class="program-json-preview-heading"><div><p class="form-kicker">BROADCAST PERIODS</p><h3>排期时期</h3></div><span class="section-count">{{ importPreview.counts.periods }}</span></div>
+          <div class="program-json-period-list">
+            <article v-for="(period, index) in importPreview.program.periods" :key="`${period.start_date}-${index}`" class="program-json-period-item">
+              <strong>时期 {{ index + 1 }}</strong><span>{{ periodScheduleLabel(period) }}</span><small>{{ period.start_date }} → {{ period.end_date || "进行中" }}</small>
+            </article>
+          </div>
+        </section>
+        <section class="program-json-preview-section">
+          <div class="program-json-preview-heading"><div><p class="form-kicker">EPISODE CONTENT</p><h3>单集内容</h3></div><span class="section-count">{{ importPreview.counts.occurrences }}</span></div>
+          <div v-if="importPreview.occurrences.length" class="program-json-occurrence-list">
+            <article v-for="(occurrence, index) in importPreview.occurrences" :key="`${occurrence.original_date}-${index}`" class="program-json-occurrence-item">
+              <div class="program-json-occurrence-topline"><strong>{{ occurrence.original_date }}</strong><span>{{ occurrence.original_time || "全天" }}</span><span>{{ importDeliveryLabel(occurrence.delivery) }}</span><span>{{ importSpecialLabel(occurrence.special) }}</span><span :class="{ cancelled: occurrence.status === 'cancelled' }">{{ importStatusLabel(occurrence.status) }}</span></div>
+              <p v-if="occurrence.guests?.length || occurrence.note">{{ occurrence.guests?.length ? `嘉宾：${occurrence.guests.join("、")}` : "" }}{{ occurrence.guests?.length && occurrence.note ? " · " : "" }}{{ occurrence.note }}</p>
+              <small v-if="occurrence.source_url || occurrence.mirror_url || occurrence.subtitle_url">{{ [occurrence.source_url, occurrence.mirror_url, occurrence.subtitle_url].filter(Boolean).join(" · ") }}</small>
+            </article>
+          </div>
+          <p v-else class="muted">没有单集覆盖资料；导入后将只按排期规则生成。</p>
+        </section>
+        <div v-if="importPreview.warnings?.length" class="program-json-warnings">
+          <strong>导入提示</strong>
+          <p v-for="warning in importPreview.warnings" :key="warning">{{ warning }}</p>
+        </div>
+        <div class="actions program-json-dialog-actions">
+          <button type="button" class="secondary program-action-button" :disabled="importSubmitting" @click="closeImportPreview">取消</button>
+          <button type="button" class="program-action-button" :disabled="importSubmitting" @click="submitImport">{{ importSubmitting ? "导入中……" : "确认提交导入" }}</button>
+        </div>
+      </section>
+    </div>
+  </main>
 </template>

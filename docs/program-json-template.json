@@ -1,0 +1,87 @@
+{
+  "_format": "nijidb-program",
+  "_version": 1,
+  "_description": "Nijidb 单独节目导入导出格式；一个 JSON 文件只描述一个节目及其单集资料。",
+  "_field_notes": {
+    "program": "节目基本资料和排期时期；periods 可以有多个，按 start_date 分段。",
+    "program.delivery": "默认播出方式：live 或 recorded。",
+    "program.periods[].frequency": "weekly、monthly、individual 或 single。",
+    "program.periods[].week_interval": "周更间隔；填写 2 表示隔周。",
+    "program.periods[].week_index": "固定月更的第几周，1–5 表示顺数，-1–-5 表示倒数。",
+    "occurrences[].original_date": "单集原定日期，必填；支持 YYYY-MM-DD。",
+    "occurrences[].delivery": "本期播出方式：live、recorded 或空字符串表示跟随节目默认。",
+    "occurrences[].special": "普通单集使用空字符串，EX 单集使用 EX。",
+    "occurrences[].status": "scheduled 或 cancelled；导入不处理改期、延期和删除状态。",
+    "occurrences[].guests": "本期临时嘉宾数组，不会修改节目固定成员。"
+  },
+  "_import_notes": [
+    "导入会新建节目，不会覆盖当前正在编辑的节目。",
+    "导入支持多个排期时期和多个单集；自动生成的未来单集由 periods 重新生成。",
+    "导入不接受 adjusted_date、adjusted_time、shift_following_days 等改期/延期字段。",
+    "JSON 可以保留这些说明字段；导入器也兼容 // 和 /* */ 注释。"
+  ],
+  "program": {
+    "title": "示例节目",
+    "category": "personal",
+    "format": "video",
+    "platform": "network",
+    "delivery": "recorded",
+    "auto_generate": true,
+    "episode_start": 1,
+    "people": [
+      "成员姓名"
+    ],
+    "official_url": "https://example.com/program",
+    "description": "节目简介。",
+    "periods": [
+      {
+        "start_date": "2026-01-01",
+        "end_date": "2026-06-30",
+        "frequency": "weekly",
+        "week_interval": 2,
+        "week_index": 0,
+        "weekday": 2,
+        "schedule_time": "20:00",
+        "timezone": "Asia/Tokyo"
+      },
+      {
+        "start_date": "2026-07-01",
+        "end_date": "",
+        "frequency": "monthly",
+        "week_interval": 1,
+        "week_index": 1,
+        "weekday": 2,
+        "schedule_time": "20:00",
+        "timezone": "Asia/Tokyo"
+      }
+    ]
+  },
+  "occurrences": [
+    {
+      "original_date": "2026-01-07",
+      "original_time": "20:00",
+      "delivery": "live",
+      "status": "scheduled",
+      "special": "",
+      "source_url": "https://example.com/episode-1",
+      "mirror_url": "",
+      "subtitle_url": "",
+      "note": "普通单集示例。",
+      "guests": [
+        "本期嘉宾"
+      ]
+    },
+    {
+      "original_date": "2026-01-21",
+      "original_time": "20:00",
+      "delivery": "recorded",
+      "status": "scheduled",
+      "special": "EX",
+      "source_url": "https://example.com/episode-ex",
+      "mirror_url": "",
+      "subtitle_url": "",
+      "note": "EX 特别单集示例。",
+      "guests": []
+    }
+  ]
+}

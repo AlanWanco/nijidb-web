@@ -4251,6 +4251,187 @@ html[data-theme="mocha"] .dp__theme_dark {
   text-decoration: none;
 }
 
+.program-json-file-input {
+  display: none;
+}
+
+.program-json-modal {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: #151827b8;
+  backdrop-filter: blur(6px);
+}
+
+.program-json-dialog {
+  width: min(980px, 100%);
+  max-height: min(900px, 92vh);
+  overflow: auto;
+  padding: clamp(20px, 4vw, 34px);
+  border: 1px solid color-mix(in srgb, var(--line) 75%, var(--accent));
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow: 0 24px 80px #10122566;
+}
+
+.program-json-dialog-heading,
+.program-json-preview-heading,
+.program-json-occurrence-topline {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.program-json-dialog-heading {
+  justify-content: space-between;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.program-json-dialog-heading h2,
+.program-json-preview-heading h3 {
+  margin: 0;
+  font-family: var(--display-font);
+}
+
+.program-json-dialog-heading small {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.program-json-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 20px 0;
+}
+
+.program-json-summary > div,
+.program-json-period-item,
+.program-json-occurrence-item {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--surface) 76%, var(--accent-soft));
+}
+
+.program-json-summary .program-field-label {
+  display: block;
+  margin-bottom: 5px;
+}
+
+.program-json-summary strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.program-json-preview-section {
+  margin-top: 22px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.program-json-preview-heading {
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.program-json-preview-heading .form-kicker {
+  margin-bottom: 4px;
+}
+
+.program-json-period-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.program-json-period-item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 5px 10px;
+}
+
+.program-json-period-item small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font: 11px var(--mono);
+}
+
+.program-json-occurrence-list {
+  display: grid;
+  gap: 9px;
+  max-height: 330px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.program-json-occurrence-item {
+  display: grid;
+  gap: 7px;
+}
+
+.program-json-occurrence-topline {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.program-json-occurrence-topline strong {
+  margin-right: auto;
+  font: 600 13px var(--mono);
+}
+
+.program-json-occurrence-topline span {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: var(--surface-alt);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.program-json-occurrence-topline span.cancelled {
+  color: var(--pink);
+}
+
+.program-json-occurrence-item p,
+.program-json-occurrence-item small {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.program-json-warnings {
+  margin-top: 20px;
+  padding: 14px 16px;
+  border-left: 3px solid var(--pink);
+  background: color-mix(in srgb, var(--pink) 9%, var(--surface));
+}
+
+.program-json-warnings strong {
+  font-size: 12px;
+}
+
+.program-json-warnings p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.program-json-dialog-actions {
+  justify-content: flex-end;
+}
+
 .archive-landing-page {
   width: min(1240px, 100%);
 }
@@ -5244,6 +5425,22 @@ html[data-theme="mocha"] .dp__theme_dark {
 
   .occurrence-bulk-actions {
     justify-content: flex-start;
+  }
+
+  .program-json-modal {
+    place-items: end center;
+    padding: 10px;
+  }
+
+  .program-json-dialog {
+    max-height: 94vh;
+    padding: 18px;
+    border-radius: 17px;
+  }
+
+  .program-json-summary,
+  .program-json-period-list {
+    grid-template-columns: 1fr;
   }
 
   .program-drawer {

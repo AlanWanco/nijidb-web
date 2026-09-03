@@ -2960,6 +2960,10 @@ footer {
   --fc-neutral-bg-color: color-mix(in srgb, var(--surface-alt) 58%, transparent);
 }
 
+.program-calendar-touch-zone {
+  min-width: 0;
+}
+
 .program-calendar .fc {
   color: var(--ink);
   font-family: var(--display-font);
@@ -5133,10 +5137,13 @@ html[data-theme="mocha"] .dp__theme_dark {
 
 .program-admin-page.occurrence-focused > .program-occurrence-editor .occurrence-editor-layout {
   grid-template-columns: minmax(230px, .85fr) minmax(0, 1.15fr);
+  align-items: stretch;
 }
 
 .program-admin-page.occurrence-focused .occurrence-list {
-  max-height: min(680px, calc(100vh - 270px));
+  min-height: 0;
+  height: 100%;
+  max-height: none;
 }
 
 .program-occurrence-editor .section-heading {
@@ -5542,6 +5549,10 @@ html[data-theme="mocha"] .dp__theme_dark {
     min-height: 61px;
   }
 
+  .program-calendar-touch-zone {
+    touch-action: pan-y;
+  }
+
   .program-calendar .fc-daygrid-event {
     height: 7px;
     min-height: 7px;
@@ -5782,6 +5793,7 @@ html[data-theme="mocha"] .dp__theme_dark {
   }
 
   .occurrence-list {
+    height: auto;
     max-height: 270px;
   }
 

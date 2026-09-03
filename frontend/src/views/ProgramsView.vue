@@ -33,6 +33,7 @@ const adminAuthenticated = ref(false);
 const editAccessNotice = ref("");
 const router = useRouter();
 const route = useRoute();
+let calendarTouchStart = null;
 const requestedMonth = computed(() => routeMonth(route.params.month));
 const initialMonth = requestedMonth.value || monthKey(today);
 const visibleMonth = ref(initialMonth);
@@ -351,6 +352,29 @@ function nextMonth() {
   calendarRef.value?.getApi?.().next();
 }
 
+function handleCalendarTouchStart(event) {
+  const touch = event.touches?.[0];
+  if (!touch) return;
+  calendarTouchStart = { x: touch.clientX, y: touch.clientY };
+}
+
+function handleCalendarTouchEnd(event) {
+  if (!calendarTouchStart) return;
+  const start = calendarTouchStart;
+  calendarTouchStart = null;
+  const touch = event.changedTouches?.[0];
+  if (!touch) return;
+  const horizontalDistance = touch.clientX - start.x;
+  const verticalDistance = touch.clientY - start.y;
+  if (Math.abs(horizontalDistance) < 48 || Math.abs(horizontalDistance) <= Math.abs(verticalDistance)) return;
+  if (horizontalDistance < 0) nextMonth();
+  else previousMonth();
+}
+
+function handleCalendarTouchCancel() {
+  calendarTouchStart = null;
+}
+
 function goToToday() {
   calendarRef.value?.getApi?.().today();
 }
@@ -567,11 +591,13 @@ onUnmounted(() => document.removeEventListener("click", closeCastFilter));
            <div v-show="viewMode === 'calendar'" class="program-calendar-weekdays" aria-label="星期">
              <span v-for="weekday in weekdayNames" :key="weekday">{{ weekday }}</span>
            </div>
-         </div>
-         <div v-show="viewMode === 'calendar'">
-           <FullCalendar ref="calendarRef" class="program-calendar" :options="calendarOptions" />
-           <p v-if="!filteredEvents.length && !loading" class="muted program-empty">当前筛选没有匹配的节目。</p>
-         </div>
+          </div>
+          <div v-show="viewMode === 'calendar'">
+            <div class="program-calendar-touch-zone" @touchstart.passive="handleCalendarTouchStart" @touchend.passive="handleCalendarTouchEnd" @touchcancel.passive="handleCalendarTouchCancel">
+              <FullCalendar ref="calendarRef" class="program-calendar" :options="calendarOptions" />
+            </div>
+            <p v-if="!filteredEvents.length && !loading" class="muted program-empty">当前筛选没有匹配的节目。</p>
+          </div>
         <div v-if="viewMode === 'list'" class="program-list-view">
           <div class="program-list-heading">
             <div><p class="eyebrow">MONTHLY RUNNING ORDER</p><h3>{{ visibleMonthLabel }}节目列表</h3></div>

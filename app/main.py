@@ -1652,10 +1652,29 @@ def effective_program_occurrences(program: dict[str, Any], range_start: date, ra
 
 
 def occurrence_effective_slot(values: dict[str, Any]) -> tuple[str, str]:
+    if isinstance(values.get("date"), date):
+        return values["date"].isoformat(), str(values.get("time") or "").strip()
     return (
         str(values.get("adjusted_date") or values.get("original_date") or "").strip(),
         str(values.get("adjusted_time") or values.get("original_time") or "").strip(),
     )
+
+
+def occurrence_anchor_slot(values: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(values.get("original_date") or "").strip(),
+        str(values.get("original_time") or "").strip(),
+    )
+
+
+def validate_occurrence_anchors(occurrences: list[dict[str, Any]]) -> None:
+    seen_slots: set[tuple[str, str]] = set()
+    for occurrence in occurrences:
+        date_value, time_value = occurrence_anchor_slot(occurrence)
+        slot = (date_value, time_value)
+        if slot in seen_slots:
+            raise ValueError(f"同一节目同一天的单集必须使用不同的播出时间：{date_value} {time_value or '未设置时间'}")
+        seen_slots.add(slot)
 
 
 def occurrence_slots_conflict(left: dict[str, Any], right: dict[str, Any]) -> bool:
@@ -1711,11 +1730,18 @@ def validate_program_occurrence_slots(
     candidate: dict[str, Any] | None = None,
     exclude_id: int | None = None,
 ) -> None:
-    stored_occurrences = [dict(item) for item in program.get("occurrences") or []]
-    validate_occurrence_slots(stored_occurrences, candidate, exclude_id)
-    range_start, range_end = occurrence_validation_range(program, candidate)
-    records = program_occurrence_records(program, range_start, range_end)
-    validate_occurrence_slots(records, candidate, exclude_id)
+    occurrences = [
+        dict(item)
+        for item in program.get("occurrences") or []
+        if exclude_id is None or str(item.get("id") or "") != str(exclude_id)
+    ]
+    if candidate is not None:
+        occurrences.append(candidate)
+    validate_occurrence_anchors(occurrences)
+    validation_program = {**program, "occurrences": occurrences}
+    range_start, range_end = occurrence_validation_range(validation_program)
+    records = program_occurrence_records(validation_program, range_start, range_end)
+    validate_occurrence_slots(records)
 
 
 def occurrence_episode_numbers(records: list[dict[str, Any]], episode_start: int = 1) -> list[int]:

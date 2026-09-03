@@ -85,6 +85,7 @@ const calendarOptions = reactive({
   plugins: [dayGridPlugin, interactionPlugin],
   initialView: "dayGridMonth",
   timeZone: "local",
+  nextDayThreshold: "24:00:00",
   firstDay: 1,
   locale: zhCnLocale,
   height: "auto",

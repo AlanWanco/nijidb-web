@@ -1922,6 +1922,7 @@ button.secondary,
   min-height: 31px;
   padding: 6px 10px;
   font-size: 12px;
+  border-radius: 9px;
 }
 
 .backup-list {

@@ -9,6 +9,7 @@ import mimetypes
 import re
 import os
 import secrets
+import shutil
 import sqlite3
 import tempfile
 from contextlib import asynccontextmanager
@@ -24,13 +25,13 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.background import BackgroundTask
 from starlette.middleware.gzip import GZipMiddleware
 
 SOURCE_URL = "https://www.lovelive-anime.jp/nijigasaki/cd.php"
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = Path(os.getenv("DATA_DIR", "/data")) / "nijidb.sqlite3"
 MEDIA_DIR = DB_PATH.parent / "images"
+BACKUP_DIR = Path(os.getenv("DATABASE_BACKUP_DIR", str(DB_PATH.parent / "backups")))
 COVER_CACHE_VERSION = "source-url-refresh-v1"
 COVER_CACHE_VERSION_PATH = DB_PATH.parent / ".cover-cache-version"
 FRONTEND_DIST = ROOT / "frontend" / "dist"
@@ -46,6 +47,8 @@ R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "").strip()
 R2_PUBLIC_BASE_URL = os.getenv("R2_PUBLIC_BASE_URL", "").strip().rstrip("/")
 R2_IMAGE_PREFIX = os.getenv("R2_IMAGE_PREFIX", "images").strip("/")
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+os.chmod(BACKUP_DIR, 0o700)
 stop_event = asyncio.Event()
 sync_lock = asyncio.Lock()
 _r2_client: Any | None = None
@@ -65,22 +68,65 @@ def remove_file(path: Path) -> None:
         pass
 
 
-def create_database_backup() -> Path:
-    handle, raw_path = tempfile.mkstemp(prefix=".nijidb-backup-", suffix=".sqlite3", dir=DB_PATH.parent)
-    os.close(handle)
-    backup_path = Path(raw_path)
+def backup_database_to(destination: Path) -> None:
     source = db()
-    destination = sqlite3.connect(backup_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination_connection = sqlite3.connect(destination)
     try:
-        source.backup(destination)
-        destination.commit()
-    except Exception:
-        remove_file(backup_path)
-        raise
+        source.backup(destination_connection)
+        destination_connection.commit()
     finally:
-        destination.close()
+        destination_connection.close()
         source.close()
+
+
+def create_persistent_database_backup(reason: str) -> Path:
+    normalized_reason = re.sub(r"[^a-z0-9]+", "-", reason.lower()).strip("-") or "manual"
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    backup_path = BACKUP_DIR / f"nijidb-backup-{timestamp}-{normalized_reason}.sqlite3"
+    temporary_path = BACKUP_DIR / f".nijidb-backup-{secrets.token_hex(6)}.sqlite3"
+    try:
+        backup_database_to(temporary_path)
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, backup_path)
+    except Exception:
+        remove_file(temporary_path)
+        raise
     return backup_path
+
+
+def backup_reason(filename: str) -> str:
+    match = re.match(r"^nijidb-backup-\d{8}T\d{12}Z-(.+)\.sqlite3$", filename)
+    return match.group(1) if match else "manual"
+
+
+def list_database_backups() -> list[dict[str, Any]]:
+    backups = []
+    for path in BACKUP_DIR.glob("nijidb-backup-*.sqlite3"):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        backups.append({
+            "filename": path.name,
+            "size": stat.st_size,
+            "created_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            "reason": backup_reason(path.name),
+        })
+    return sorted(backups, key=lambda item: item["created_at"], reverse=True)
+
+
+def resolve_database_backup(filename: str) -> Path:
+    if Path(filename).name != filename or not filename.endswith(".sqlite3"):
+        raise ValueError("数据库备份文件名无效")
+    path = (BACKUP_DIR / filename).resolve()
+    try:
+        path.relative_to(BACKUP_DIR.resolve())
+    except ValueError as exc:
+        raise ValueError("数据库备份文件路径无效") from exc
+    if not path.is_file():
+        raise FileNotFoundError(filename)
+    return path
 
 
 def validate_database_backup(path: Path) -> None:
@@ -100,6 +146,19 @@ def validate_database_backup(path: Path) -> None:
 def remove_database_sidecars() -> None:
     remove_file(Path(f"{DB_PATH}-wal"))
     remove_file(Path(f"{DB_PATH}-shm"))
+
+
+def restore_database_file(source_path: Path) -> None:
+    handle, raw_path = tempfile.mkstemp(prefix=".nijidb-restore-", suffix=".sqlite3", dir=DB_PATH.parent)
+    os.close(handle)
+    restore_path = Path(raw_path)
+    try:
+        shutil.copyfile(source_path, restore_path)
+        os.chmod(restore_path, 0o600)
+        remove_database_sidecars()
+        os.replace(restore_path, DB_PATH)
+    finally:
+        remove_file(restore_path)
 
 
 async def save_backup_upload(request: Request) -> Path:
@@ -796,6 +855,8 @@ def program_json_metadata() -> dict[str, Any]:
             "occurrences[].adjusted_date": "改期后的实际日期；status 为 rescheduled 时必填。",
             "occurrences[].adjusted_time": "改期后的时间；留空表示沿用原定时间。",
             "occurrences[].shift_following_days": "改期后后续隔周排期的偏移，只能填写 -7、0 或 7；只有 rescheduled 单集可以填写。individual 模式不会再次级联。",
+            "occurrences[].generated": "导出标记；true 表示本期由 periods 自动生成，false 表示已有保存记录。generated 模式导入时，未补充内容的 generated=true 记录不会重复保存，仍由 periods 生成；补充内容后会保存为覆盖。",
+            "occurrences[].materialized": "true 表示自动生成单集曾被保存为数据库记录；仅作来源说明。",
             "occurrences[].delivery": "本期播出方式：live、recorded 或空字符串表示跟随节目默认。",
             "occurrences[].special": "普通单集使用空字符串，EX 单集使用 EX。",
             "occurrences[].status": "scheduled、rescheduled、cancelled 或 deleted。deleted 会保留为不显示的删除记录。",
@@ -804,7 +865,7 @@ def program_json_metadata() -> dict[str, Any]:
         "_import_notes": [
             "schedule_mode 缺省为 individual：导入的 occurrences 是准确的最终逐期数据，program.auto_generate 会被关闭，不会凭 periods 生成额外单集。",
             "需要继续按排期规则生成时，将 schedule_mode 设置为 generated；此时 program.auto_generate 会开启，occurrences 作为已保存覆盖和例外。",
-            "导出默认是 individual 完整逐期快照，适合交给 AI 优化内容后覆盖导回；也可以选择 generated 规则加例外导出。",
+            "导出默认是 individual 完整逐期快照，适合交给 AI 优化内容后覆盖导回；也可以选择 generated 规则加当前自动生成结果和例外导出。自动生成结果按系统现有约半年的生成窗口写入。",
             "target_mode 缺省为 new；覆盖导入必须指定 target_program_id，并在网页导入预览中明确选择覆盖目标。",
             "JSON 可以保留这些说明字段；导入器也兼容 // 和 /* */ 注释。",
         ],
@@ -859,6 +920,8 @@ def program_json_template() -> dict[str, Any]:
             "delivery": "live",
             "status": "scheduled",
             "special": "",
+            "generated": False,
+            "materialized": False,
             "source_url": "https://example.com/episode-1",
             "mirror_url": "",
             "subtitle_url": "",
@@ -874,6 +937,8 @@ def program_json_template() -> dict[str, Any]:
             "adjusted_time": "20:00",
             "shift_following_days": 7,
             "special": "",
+            "generated": False,
+            "materialized": False,
             "source_url": "https://example.com/episode-2",
             "mirror_url": "",
             "subtitle_url": "",
@@ -886,6 +951,8 @@ def program_json_template() -> dict[str, Any]:
             "delivery": "",
             "status": "cancelled",
             "special": "",
+            "generated": False,
+            "materialized": False,
             "source_url": "",
             "mirror_url": "",
             "subtitle_url": "",
@@ -898,6 +965,8 @@ def program_json_template() -> dict[str, Any]:
             "delivery": "",
             "status": "deleted",
             "special": "EX",
+            "generated": False,
+            "materialized": False,
             "source_url": "https://example.com/episode-ex",
             "mirror_url": "",
             "subtitle_url": "",
@@ -975,6 +1044,7 @@ def normalize_import_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], l
     occurrences: list[dict[str, Any]] = []
     warnings: list[str] = []
     seen_dates: set[str] = set()
+    skipped_generated = 0
     for index, raw_occurrence in enumerate(raw_occurrences, start=1):
         if not isinstance(raw_occurrence, dict):
             raise ValueError(f"第 {index} 期单集格式无效")
@@ -1001,6 +1071,25 @@ def normalize_import_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], l
         special_value = item.get("special") or item.get("type")
         if item.get("is_ex") is True:
             special_value = "EX"
+        generated_marker = boolean_value(item.get("generated"), False)
+        has_override_content = any((
+            item.get("delivery") not in (None, "", "跟随默认"),
+            item.get("source_url"),
+            item.get("mirror_url"),
+            item.get("subtitle_url"),
+            item.get("status") not in (None, "", "scheduled", "正常", "正常播出"),
+            item.get("special"),
+            item.get("type"),
+            item.get("is_ex") is True,
+            item.get("adjusted_date"),
+            item.get("adjusted_time"),
+            item.get("shift_following_days") not in (None, "", 0),
+            item.get("note"),
+            item.get("guests"),
+        ))
+        if options["schedule_mode"] == "generated" and generated_marker and not has_override_content:
+            skipped_generated += 1
+            continue
         occurrence_values = {
             "original_date": original_date,
             "generated_date": generated_date,
@@ -1016,8 +1105,11 @@ def normalize_import_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], l
             "adjusted_time": str(item.get("adjusted_time") or "").strip(),
             "note": item.get("note", ""),
             "guests": item.get("guests", []),
+            "materialized": item.get("materialized", False),
         }
         occurrences.append(normalized_occurrence(occurrence_values))
+    if skipped_generated:
+        warnings.append(f"已跳过 {skipped_generated} 条未补充内容的自动生成单集，导入后仍由 periods 自动生成。")
     if options["schedule_mode"] == "individual":
         warnings.append("已按逐期准确模式导入：不会根据 periods 自动生成额外单集，也不会再次级联提前或顺延。")
     else:
@@ -1178,16 +1270,18 @@ def normalized_occurrence(values: dict[str, Any]) -> dict[str, Any]:
         "adjusted_time": adjusted_time if status == "rescheduled" else "",
         "note": str(values.get("note") or "").strip(),
         "guests": normalized_people(values.get("guests")),
+        "materialized": boolean_value(values.get("materialized"), False),
     }
 
 
 def insert_occurrence_row(conn: sqlite3.Connection, values: dict[str, Any]) -> sqlite3.Cursor:
+    values = {"materialized": 0, **values}
     return conn.execute("""INSERT INTO program_occurrences (
         program_id, original_date, generated_date, original_time, delivery, shift_following_days, source_url, mirror_url, subtitle_url, status,
-        adjusted_date, adjusted_time, note, guests, special, created_at, updated_at
+        adjusted_date, adjusted_time, note, guests, special, materialized, created_at, updated_at
     ) VALUES (
         :program_id, :original_date, :generated_date, :original_time, :delivery, :shift_following_days, :source_url, :mirror_url, :subtitle_url, :status,
-        :adjusted_date, :adjusted_time, :note, :guests, :special, :created_at, :updated_at
+        :adjusted_date, :adjusted_time, :note, :guests, :special, :materialized, :created_at, :updated_at
     )""", values)
 
 
@@ -1650,6 +1744,8 @@ def program_json_occurrence_item(occurrence: dict[str, Any], freeze_effective_da
         "delivery": occurrence.get("delivery_override", occurrence.get("delivery", "")),
         "status": status,
         "special": occurrence.get("special", ""),
+        "generated": boolean_value(occurrence.get("generated"), False),
+        "materialized": boolean_value(occurrence.get("materialized"), False),
         "source_url": occurrence.get("source_url", ""),
         "mirror_url": occurrence.get("mirror_url", ""),
         "subtitle_url": occurrence.get("subtitle_url", ""),
@@ -1697,12 +1793,17 @@ def program_json_export(program: dict[str, Any], mode: str = "individual") -> di
     else:
         payload["program"]["auto_generate"] = True
         payload["_export_notes"] = [
-            "这是排期规则加已保存例外；未保存的自动生成单集不会写入 occurrences。",
-            "导入此文件后会按 periods 自动生成，occurrences 中的改期、取消、删除和内容资料作为覆盖保留。",
+            "这是排期规则加当前自动生成结果和已保存例外；自动生成单集会写入 occurrences，并标记 generated=true。",
+            "导入此文件后会按 periods 自动生成；没有补充内容的 generated=true 记录不会重复保存，有内容的记录会作为覆盖保留。",
+            "当前自动生成结果按系统现有约半年的生成窗口导出。",
         ]
+        today = datetime.now(JAPAN_TZ).date()
+        start = calendar_date(program.get("start_date", ""), today)
+        end = calendar_date(program.get("end_date", ""), today + timedelta(days=PROGRAM_FORECAST_DAYS))
+        records = program_occurrence_list({**program, "auto_generate": True}, start.isoformat(), end.isoformat())["occurrences"]
         payload["occurrences"] = [
             program_json_occurrence_item(occurrence, False)
-            for occurrence in program.get("occurrences", [])
+            for occurrence in records
         ]
     return payload
 
@@ -2440,18 +2541,64 @@ async def api_save_settings(request: Request) -> dict[str, dict[str, str]]:
     return {"settings": values}
 
 
+async def restore_validated_database(source_path: Path) -> dict[str, str]:
+    async with sync_lock:
+        rollback_path = create_persistent_database_backup("before-restore")
+        try:
+            restore_database_file(source_path)
+            init_db()
+            remove_file(COVER_CACHE_VERSION_PATH)
+        except Exception as exc:
+            try:
+                restore_database_file(rollback_path)
+                init_db()
+            except Exception as rollback_error:
+                print(f"[backup] rollback failed: {type(rollback_error).__name__}", flush=True)
+            raise HTTPException(500, "数据库还原失败，原数据库已保留") from exc
+    print("[backup] database restored", flush=True)
+    return {"message": "数据库还原成功，下一次同步会重新检查封面缓存"}
+
+
+@app.get("/api/admin/backups")
+async def api_list_backups(request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    return {"backups": list_database_backups()}
+
+
+@app.get("/api/admin/backups/{filename}/download")
+async def api_download_stored_backup(filename: str, request: Request) -> FileResponse:
+    require_api_admin(request)
+    try:
+        backup_path = resolve_database_backup(filename)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "数据库备份不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return FileResponse(backup_path, media_type="application/vnd.sqlite3", filename=backup_path.name)
+
+
+@app.post("/api/admin/backups/{filename}/restore")
+async def api_restore_stored_backup(filename: str, request: Request) -> dict[str, str]:
+    require_api_admin(request)
+    try:
+        backup_path = resolve_database_backup(filename)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "数据库备份不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    try:
+        validate_database_backup(backup_path)
+    except (OSError, sqlite3.DatabaseError, ValueError) as exc:
+        raise HTTPException(400, "数据库备份文件无效") from exc
+    return await restore_validated_database(backup_path)
+
+
 @app.get("/api/admin/backup")
 async def api_download_backup(request: Request) -> FileResponse:
     require_api_admin(request)
     async with sync_lock:
-        backup_path = create_database_backup()
-    filename = f"nijidb-backup-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.sqlite3"
-    return FileResponse(
-        backup_path,
-        media_type="application/vnd.sqlite3",
-        filename=filename,
-        background=BackgroundTask(remove_file, backup_path),
-    )
+        backup_path = create_persistent_database_backup("manual")
+    return FileResponse(backup_path, media_type="application/vnd.sqlite3", filename=backup_path.name)
 
 
 @app.post("/api/admin/backup/restore")
@@ -2464,25 +2611,7 @@ async def api_restore_backup(request: Request) -> dict[str, str]:
         except (OSError, sqlite3.DatabaseError, ValueError) as exc:
             raise HTTPException(400, "数据库备份文件无效") from exc
 
-        async with sync_lock:
-            rollback_path = create_database_backup()
-            try:
-                remove_database_sidecars()
-                os.replace(upload_path, DB_PATH)
-                init_db()
-                remove_file(COVER_CACHE_VERSION_PATH)
-            except Exception as exc:
-                remove_database_sidecars()
-                try:
-                    os.replace(rollback_path, DB_PATH)
-                    init_db()
-                except Exception as rollback_error:
-                    print(f"[backup] rollback failed: {type(rollback_error).__name__}", flush=True)
-                raise HTTPException(500, "数据库还原失败，原数据库已保留") from exc
-            finally:
-                remove_file(rollback_path)
-        print("[backup] database restored", flush=True)
-        return {"message": "数据库还原成功，下一次同步会重新检查封面缓存"}
+        return await restore_validated_database(upload_path)
     finally:
         remove_file(upload_path)
 
@@ -2605,27 +2734,36 @@ async def api_import_program(request: Request) -> dict[str, Any]:
     overwrite = options["target_mode"] == "overwrite"
     target_id = options["target_program_id"] if overwrite else f"program-{secrets.token_hex(6)}"
     program_values.update({"id": target_id, "created_at": existing["created_at"] if overwrite else now, "updated_at": now})
+    automatic_backup_path: Path | None = None
     try:
-        with db() as conn:
-            if overwrite:
-                replace_imported_program_row(conn, program_values, target_id, program_values["created_at"], now)
-            else:
-                insert_program_row(conn, program_values)
-            for occurrence in occurrence_values:
-                values = {
-                    **occurrence,
-                    "program_id": program_values["id"],
-                    "created_at": now,
-                    "updated_at": now,
-                }
-                insert_occurrence_row(conn, values)
+        async with sync_lock:
+            automatic_backup_path = create_persistent_database_backup("before-json-import")
+            with db() as conn:
+                if overwrite:
+                    replace_imported_program_row(conn, program_values, target_id, program_values["created_at"], now)
+                else:
+                    insert_program_row(conn, program_values)
+                for occurrence in occurrence_values:
+                    values = {
+                        **occurrence,
+                        "program_id": program_values["id"],
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                    insert_occurrence_row(conn, values)
     except sqlite3.IntegrityError as exc:
         raise HTTPException(409, "导入的单集存在重复原定日期") from exc
 
     action = "覆盖节目" if overwrite else "导入节目"
     log_database_activity("program", f"{action}：{program_values['title']}（{len(occurrence_values)} 期）")
     program = next(item for item in program_rows() if item["id"] == program_values["id"])
-    return {"program": program, "warnings": warnings, "imported_occurrences": len(occurrence_values), "overwritten": overwrite}
+    return {
+        "program": program,
+        "warnings": warnings,
+        "imported_occurrences": len(occurrence_values),
+        "overwritten": overwrite,
+        "automatic_backup": {"filename": automatic_backup_path.name} if automatic_backup_path else None,
+    }
 
 
 @app.post("/api/admin/programs")

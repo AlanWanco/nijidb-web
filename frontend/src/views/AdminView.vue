@@ -28,6 +28,9 @@ const backupInput = ref(null);
 const backupFile = ref(null);
 const backingUp = ref(false);
 const restoring = ref(false);
+const databaseBackups = ref([]);
+const backupsLoading = ref(false);
+const restoringBackupName = ref("");
 const backupMessage = ref("");
 const backupError = ref("");
 const deviceTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -54,11 +57,40 @@ async function loadSettings() {
     const data = await api("/api/admin/settings");
     setSettings(data.settings);
     activityLogs.value = data.activity_logs || [];
+    await loadBackups();
   } catch (requestError) {
     showError(requestError);
   } finally {
     loading.value = false;
   }
+}
+
+async function loadBackups() {
+  backupsLoading.value = true;
+  try {
+    const data = await api("/api/admin/backups");
+    databaseBackups.value = data.backups || [];
+  } catch (requestError) {
+    showError(requestError);
+  } finally {
+    backupsLoading.value = false;
+  }
+}
+
+function backupReasonLabel(reason) {
+  if (reason === "before-json-import") return "JSON 导入前自动备份";
+  if (reason === "before-restore") return "还原前自动备份";
+  return "手动备份";
+}
+
+function formatBackupSize(size) {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function backupDownloadPath(filename) {
+  return `/api/admin/backups/${encodeURIComponent(filename)}/download`;
 }
 
 async function saveSettings() {
@@ -154,6 +186,7 @@ async function downloadBackup() {
     link.remove();
     setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
     backupMessage.value = "数据库备份已下载";
+    await loadBackups();
   } catch (requestError) {
     backupError.value = requestError.message || "数据库备份下载失败";
   } finally {
@@ -166,7 +199,8 @@ async function restoreBackup() {
     backupError.value = "请先选择数据库备份文件";
     return;
   }
-  if (!window.confirm("还原会覆盖当前数据库中的设置、节目和资料，确定继续吗？")) return;
+  if (!window.confirm("第一次确认：还原会覆盖当前数据库中的设置、节目和资料，确定继续吗？")) return;
+  if (!window.confirm("第二次确认：还原后当前数据库会被替换，继续执行吗？")) return;
   restoring.value = true;
   backupMessage.value = "";
   backupError.value = "";
@@ -189,10 +223,30 @@ async function restoreBackup() {
     backupMessage.value = payload.message || "数据库还原成功";
     backupFile.value = null;
     if (backupInput.value) backupInput.value.value = "";
+    await loadSettings();
   } catch (requestError) {
     backupError.value = requestError.message || "数据库还原失败";
   } finally {
     restoring.value = false;
+  }
+}
+
+async function restoreStoredBackup(backup) {
+  if (restoringBackupName.value) return;
+  if (!window.confirm(`第一次确认：确定还原备份「${backup.filename}」吗？当前数据库会被替换。`)) return;
+  if (!window.confirm(`第二次确认：还原「${backup.filename}」不可自动撤销，继续执行吗？`)) return;
+  restoringBackupName.value = backup.filename;
+  backupMessage.value = "";
+  backupError.value = "";
+  try {
+    const data = await api(`/api/admin/backups/${encodeURIComponent(backup.filename)}/restore`, { method: "POST" });
+    backupMessage.value = data.message || "数据库还原成功";
+    await loadSettings();
+  } catch (requestError) {
+    if (requestError.status === 401) showError(requestError);
+    else backupError.value = requestError.message || "数据库还原失败";
+  } finally {
+    restoringBackupName.value = "";
   }
 }
 
@@ -259,18 +313,27 @@ onMounted(loadSettings);
             </ol>
             <p v-else class="muted">暂时没有数据库变化记录。</p>
           </section>
-          <section class="settings-card backup">
-            <div class="form-heading"><span class="form-number">06</span><div><p class="form-kicker">DATA SAFETY</p><h2>数据库备份与还原</h2></div></div>
-            <p class="muted">备份包含设置、节目档案、发行资料和同步记录，不包含封面图片。还原后会在下一次同步重新检查封面缓存。</p>
-            <p v-if="backupMessage" class="success">{{ backupMessage }}</p>
-            <p v-if="backupError" class="state error">{{ backupError }}</p>
-            <div class="backup-actions">
-              <button type="button" :disabled="backingUp" @click="downloadBackup">{{ backingUp ? "准备中……" : "下载数据库备份" }}</button>
-              <label class="backup-file">选择备份文件<input ref="backupInput" type="file" accept=".sqlite3,.sqlite,.db" @change="selectBackup"></label>
-              <button type="button" class="secondary" :disabled="restoring || !backupFile" @click="restoreBackup">{{ restoring ? "还原中……" : "还原所选备份" }}</button>
-            </div>
-            <small v-if="backupFile">已选择：{{ backupFile.name }}</small>
-          </section>
+           <section class="settings-card backup">
+             <div class="form-heading"><span class="form-number">06</span><div><p class="form-kicker">DATA SAFETY</p><h2>数据库备份与还原</h2></div></div>
+             <p class="muted">备份包含设置、节目档案、发行资料和同步记录，不包含封面图片。JSON 导入前和数据库还原前会自动保存备份到数据卷的 <code>/data/backups</code> 文件夹。</p>
+             <p v-if="backupMessage" class="success">{{ backupMessage }}</p>
+             <p v-if="backupError" class="state error">{{ backupError }}</p>
+             <div class="backup-actions">
+               <button type="button" :disabled="backingUp" @click="downloadBackup">{{ backingUp ? "准备中……" : "下载数据库备份" }}</button>
+               <label class="backup-file">选择备份文件<input ref="backupInput" type="file" accept=".sqlite3,.sqlite,.db" @change="selectBackup"></label>
+               <button type="button" class="secondary" :disabled="restoring || !backupFile" @click="restoreBackup">{{ restoring ? "还原中……" : "还原所选备份" }}</button>
+             </div>
+             <small v-if="backupFile">已选择：{{ backupFile.name }}</small>
+             <div class="backup-list-heading"><div><strong>已保存的数据库备份</strong><small>自动备份和手动备份都会保留在列表中。</small></div><button type="button" class="secondary backup-refresh-button" :disabled="backupsLoading" @click="loadBackups">{{ backupsLoading ? "读取中……" : "刷新列表" }}</button></div>
+             <p v-if="backupsLoading" class="muted">正在读取数据库备份……</p>
+             <p v-else-if="!databaseBackups.length" class="muted">还没有保存的数据库备份。</p>
+             <ol v-else class="backup-list">
+               <li v-for="backup in databaseBackups" :key="backup.filename">
+                 <div><strong>{{ backupReasonLabel(backup.reason) }}</strong><small>{{ formatLocalDateTime(backup.created_at) }} · {{ formatBackupSize(backup.size) }}</small><code>{{ backup.filename }}</code></div>
+                 <div class="backup-list-actions"><a class="secondary backup-list-button" :href="backupDownloadPath(backup.filename)">下载</a><button type="button" class="danger backup-list-button" :disabled="restoringBackupName === backup.filename" @click="restoreStoredBackup(backup)">{{ restoringBackupName === backup.filename ? "还原中……" : "还原" }}</button></div>
+               </li>
+             </ol>
+           </section>
         </div>
       </template>
     </section>

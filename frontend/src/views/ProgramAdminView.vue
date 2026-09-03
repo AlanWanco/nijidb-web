@@ -447,6 +447,7 @@ async function submitImport() {
     applyProgram(saved);
     await loadOccurrences(saved.id);
     message.value = `${data.overwritten ? "已覆盖" : "已导入"}「${saved.title}」${data.imported_occurrences ? `，${data.imported_occurrences} 期单集` : ""}`;
+    if (data.automatic_backup?.filename) message.value += "；导入前已自动备份当前数据库";
     if (data.warnings?.length) message.value += `；${data.warnings.length} 条导入提示`;
     window.scrollTo({ top: 0, behavior: "smooth" });
   } catch (requestError) {

@@ -1895,6 +1895,72 @@ button.secondary,
   margin-top: 12px;
 }
 
+.backup-list-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 30px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.backup-list-heading > div {
+  display: grid;
+  gap: 4px;
+}
+
+.backup-list-heading small,
+.backup-list li small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.backup-refresh-button,
+.backup-list-button {
+  min-height: 31px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.backup-list {
+  display: grid;
+  gap: 0;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.backup-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border-top: 1px solid var(--line);
+  padding: 13px 0;
+}
+
+.backup-list li > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.backup-list li code {
+  overflow: hidden;
+  color: var(--muted);
+  font: 10px var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backup-list-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
 .login-card {
   position: relative;
   max-width: 520px;
@@ -5539,6 +5605,26 @@ html[data-theme="mocha"] .dp__theme_dark {
   .sync-log-list li {
     grid-template-columns: 1fr;
     gap: 5px;
+  }
+
+  .backup-list-heading,
+  .backup-list li {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .backup-refresh-button,
+  .backup-list-actions,
+  .backup-list-button {
+    width: 100%;
+  }
+
+  .backup-list-actions {
+    display: flex;
+  }
+
+  .backup-list-button {
+    flex: 1;
   }
 
   .program-admin-actions,

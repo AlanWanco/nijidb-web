@@ -42,6 +42,9 @@ const importPayload = ref(null);
 const importPreview = ref(null);
 const importFileName = ref("");
 const importSubmitting = ref(false);
+const importTargetMode = ref("new");
+const importTargetProgramId = ref("");
+const exportModeDialog = ref(false);
 const message = ref("");
 const error = ref("");
 let toastTimer = 0;
@@ -301,14 +304,38 @@ function safeJsonFileName(value, fallback) {
   return `${name || fallback}.json`;
 }
 
-async function exportProgramJson() {
+async function downloadTemplateJson() {
   message.value = "";
   error.value = "";
   try {
-    const template = !editingId.value;
-    const payload = await api(template ? "/api/admin/program-json-template" : `/api/admin/programs/${editingId.value}/export`);
-    downloadJson(safeJsonFileName(template ? "nijidb-program-template" : payload.program?.title, "nijidb-program"), payload);
-    message.value = template ? "JSON 模板已下载" : "节目 JSON 已导出";
+    const payload = await api("/api/admin/program-json-template");
+    downloadJson(safeJsonFileName("nijidb-program-template", "nijidb-program-template"), payload);
+    message.value = "JSON 说明模板已下载";
+  } catch (requestError) {
+    showError(requestError);
+  }
+}
+
+function exportProgramJson() {
+  if (!editingId.value) {
+    downloadTemplateJson();
+    return;
+  }
+  exportModeDialog.value = true;
+}
+
+function closeExportModeDialog() {
+  exportModeDialog.value = false;
+}
+
+async function downloadProgramJson(mode) {
+  message.value = "";
+  error.value = "";
+  try {
+    const payload = await api(`/api/admin/programs/${editingId.value}/export?mode=${encodeURIComponent(mode)}`);
+    downloadJson(safeJsonFileName(payload.program?.title, "nijidb-program"), payload);
+    exportModeDialog.value = false;
+    message.value = mode === "individual" ? "完整逐期 JSON 已导出" : "排期规则 JSON 已导出";
   } catch (requestError) {
     showError(requestError);
   }
@@ -362,6 +389,8 @@ async function handleImportFile(event) {
     importPayload.value = payload;
     importPreview.value = preview;
     importFileName.value = file.name;
+    importTargetMode.value = "new";
+    importTargetProgramId.value = preview.matches?.[0]?.id || "";
   } catch (requestError) {
     showError(requestError instanceof SyntaxError ? new Error("JSON 格式无效，请检查括号、逗号或字符串") : requestError);
   }
@@ -371,6 +400,8 @@ function closeImportPreview() {
   importPayload.value = null;
   importPreview.value = null;
   importFileName.value = "";
+  importTargetMode.value = "new";
+  importTargetProgramId.value = "";
 }
 
 function importDeliveryLabel(value) {
@@ -379,8 +410,15 @@ function importDeliveryLabel(value) {
   return "跟随节目默认";
 }
 
+function importScheduleModeLabel(value) {
+  return value === "generated" ? "自动生成模式" : "逐期准确模式";
+}
+
 function importStatusLabel(value) {
-  return value === "cancelled" ? "因故取消" : "正常播出";
+  if (value === "cancelled") return "因故取消";
+  if (value === "rescheduled") return "已改期";
+  if (value === "deleted") return "已删除";
+  return "正常播出";
 }
 
 function importSpecialLabel(value) {
@@ -393,7 +431,13 @@ async function submitImport() {
   message.value = "";
   error.value = "";
   try {
-    const data = await api("/api/admin/programs/import", { method: "POST", body: importPayload.value });
+    const body = JSON.parse(JSON.stringify(importPayload.value));
+    body.import_options = {
+      ...(body.import_options || {}),
+      target_mode: importTargetMode.value,
+      target_program_id: importTargetMode.value === "overwrite" ? importTargetProgramId.value : "",
+    };
+    const data = await api("/api/admin/programs/import", { method: "POST", body });
     const saved = data.program;
     closeImportPreview();
     await loadPrograms();
@@ -402,8 +446,8 @@ async function submitImport() {
     activePanel.value = "edit";
     applyProgram(saved);
     await loadOccurrences(saved.id);
-    message.value = `已导入「${saved.title}」${data.imported_occurrences ? `，${data.imported_occurrences} 期单集` : ""}`;
-    if (data.warnings?.length) message.value += `；${data.warnings.length} 条字段说明已忽略`;
+    message.value = `${data.overwritten ? "已覆盖" : "已导入"}「${saved.title}」${data.imported_occurrences ? `，${data.imported_occurrences} 期单集` : ""}`;
+    if (data.warnings?.length) message.value += `；${data.warnings.length} 条导入提示`;
     window.scrollTo({ top: 0, behavior: "smooth" });
   } catch (requestError) {
     showError(requestError);
@@ -964,7 +1008,8 @@ async function toggleOccurrenceDeletion() {
 }
 
 async function deleteProgram(program) {
-  if (!window.confirm(`确定删除「${program.title}」吗？`)) return;
+  if (!window.confirm(`第一次确认：确定删除「${program.title}」吗？删除后节目及其排期、单集资料都会移除。`)) return;
+  if (!window.confirm(`第二次确认：删除「${program.title}」不可恢复，继续删除吗？`)) return;
   deletingId.value = program.id;
   message.value = "";
   error.value = "";
@@ -1202,12 +1247,16 @@ onUnmounted(() => {
          <button type="button" class="secondary add-period-button program-action-button" @click="addPeriod">＋ 添加排期时期</button>
       </div>
 
-       <div class="actions">
-          <button class="program-action-button" :disabled="saving">{{ saving ? "保存中……" : editingId ? "保存修改" : "添加节目" }}</button>
-          <button type="button" class="secondary program-action-button" title="已有节目时导出节目和已保存单集资料；未保存节目时下载带字段说明的模板" @click="exportProgramJson">导出 JSON</button>
-          <button type="button" class="secondary program-action-button" title="选择一个节目 JSON，先预览节目、排期和全部单集，再确认导入" @click="openImportPicker">导入 JSON</button>
-          <input ref="importFileInput" class="program-json-file-input" type="file" accept=".json,application/json" @change="handleImportFile">
-       </div>
+        <div class="actions program-editor-actions">
+           <button class="program-action-button" :disabled="saving">{{ saving ? "保存中……" : editingId ? "保存修改" : "添加节目" }}</button>
+           <button type="button" class="secondary program-action-button" title="已有节目时选择完整逐期快照或排期规则导出；未保存节目时下载说明模板" @click="exportProgramJson">导出 JSON</button>
+           <button type="button" class="secondary program-action-button" title="选择一个节目 JSON，先预览节目、排期和全部单集，再确认导入" @click="openImportPicker">导入 JSON</button>
+           <span class="program-editor-danger-actions">
+             <button type="button" class="secondary program-action-button" title="下载带字段说明和导入规则的 JSON 模板" @click="downloadTemplateJson">下载 JSON 说明模板</button>
+             <button v-if="editingId" type="button" class="danger program-action-button" :disabled="deletingId === editingId" @click="deleteProgram({ id: editingId, title: form.title })">{{ deletingId === editingId ? "删除中……" : "删除节目" }}</button>
+           </span>
+           <input ref="importFileInput" class="program-json-file-input" type="file" accept=".json,application/json" @change="handleImportFile">
+        </div>
      </form>
 
     <section ref="occurrenceEditorRef" v-if="activePanel === 'occurrences' && editorOpen && editingId" class="settings-card program-occurrence-editor program-panel-content">
@@ -1313,13 +1362,22 @@ onUnmounted(() => {
       </div>
     </section>
 
-    <div v-if="importPreview" class="program-json-modal" role="dialog" aria-modal="true" aria-labelledby="program-json-preview-title" @click.self="closeImportPreview">
-      <section class="program-json-dialog">
-        <div class="program-json-dialog-heading">
-          <div><p class="eyebrow">JSON IMPORT / PREVIEW</p><h2 id="program-json-preview-title">导入预览</h2><small>{{ importFileName }} · 导入会新建节目，不会覆盖当前节目</small></div>
-          <button type="button" class="secondary program-action-button" :disabled="importSubmitting" @click="closeImportPreview">关闭</button>
-        </div>
-        <div class="program-json-summary">
+     <div v-if="importPreview" class="program-json-modal" role="dialog" aria-modal="true" aria-labelledby="program-json-preview-title" @click.self="closeImportPreview">
+       <section class="program-json-dialog">
+         <div class="program-json-dialog-heading">
+           <div><p class="eyebrow">JSON IMPORT / PREVIEW</p><h2 id="program-json-preview-title">导入预览</h2><small>{{ importFileName }} · {{ importScheduleModeLabel(importPreview.import_options?.schedule_mode) }} · {{ importTargetMode === "overwrite" ? "将覆盖所选节目" : "将新建节目" }}</small></div>
+           <button type="button" class="secondary program-action-button" :disabled="importSubmitting" @click="closeImportPreview">关闭</button>
+         </div>
+         <section class="program-json-target-section">
+           <div class="program-json-preview-heading"><div><p class="form-kicker">IMPORT TARGET</p><h3>导入目标</h3></div></div>
+           <div class="program-json-target-options">
+             <label class="program-json-target-option" :class="{ selected: importTargetMode === 'new' }"><input v-model="importTargetMode" type="radio" value="new"><span><strong>新建节目</strong><small>保留原节目不变，创建一个新的节目记录。</small></span></label>
+             <label class="program-json-target-option" :class="{ selected: importTargetMode === 'overwrite' }"><input v-model="importTargetMode" type="radio" value="overwrite" :disabled="!importPreview.matches?.length"><span><strong>覆盖已有节目</strong><small>{{ importPreview.matches?.length ? "用当前 JSON 完整替换所选节目的资料、排期和单集。" : "没有找到同 ID 或同名称的已有节目。" }}</small></span></label>
+           </div>
+           <label v-if="importTargetMode === 'overwrite'" class="program-json-target-select">选择覆盖目标<select v-model="importTargetProgramId" required><option v-for="match in importPreview.matches" :key="match.id" :value="match.id">{{ match.display_name }} · {{ match.match === "id" ? "ID 匹配" : "名称匹配" }}</option></select></label>
+           <p v-if="importTargetMode === 'overwrite'" class="program-json-danger-note">覆盖会删除目标节目原有的排期和单集，再写入本次 JSON；此操作不可自动撤销，请确认目标无误。</p>
+         </section>
+         <div class="program-json-summary">
           <div><span class="program-field-label">节目名称</span><strong>{{ importPreview.program.title }}</strong></div>
           <div><span class="program-field-label">类型</span><strong>{{ importPreview.program.category === "official" ? "官方节目" : "个人节目" }}</strong></div>
           <div><span class="program-field-label">形式</span><strong>{{ formatLabel(importPreview.program) }}</strong></div>
@@ -1337,7 +1395,7 @@ onUnmounted(() => {
           <div class="program-json-preview-heading"><div><p class="form-kicker">EPISODE CONTENT</p><h3>单集内容</h3></div><span class="section-count">{{ importPreview.counts.occurrences }}</span></div>
           <div v-if="importPreview.occurrences.length" class="program-json-occurrence-list">
             <article v-for="(occurrence, index) in importPreview.occurrences" :key="`${occurrence.original_date}-${index}`" class="program-json-occurrence-item">
-              <div class="program-json-occurrence-topline"><strong>{{ occurrence.original_date }}</strong><span>{{ occurrence.original_time || "全天" }}</span><span>{{ importDeliveryLabel(occurrence.delivery) }}</span><span>{{ importSpecialLabel(occurrence.special) }}</span><span :class="{ cancelled: occurrence.status === 'cancelled' }">{{ importStatusLabel(occurrence.status) }}</span></div>
+               <div class="program-json-occurrence-topline"><strong>{{ occurrence.original_date }}</strong><span>{{ occurrence.original_time || "全天" }}</span><span v-if="occurrence.status === 'rescheduled'">→ {{ occurrence.adjusted_date }}{{ occurrence.adjusted_time ? ` ${occurrence.adjusted_time}` : "" }}</span><span>{{ importDeliveryLabel(occurrence.delivery) }}</span><span>{{ importSpecialLabel(occurrence.special) }}</span><span :class="{ cancelled: occurrence.status === 'cancelled', rescheduled: occurrence.status === 'rescheduled', deleted: occurrence.status === 'deleted' }">{{ importStatusLabel(occurrence.status) }}</span></div>
               <p v-if="occurrence.guests?.length || occurrence.note">{{ occurrence.guests?.length ? `嘉宾：${occurrence.guests.join("、")}` : "" }}{{ occurrence.guests?.length && occurrence.note ? " · " : "" }}{{ occurrence.note }}</p>
               <small v-if="occurrence.source_url || occurrence.mirror_url || occurrence.subtitle_url">{{ [occurrence.source_url, occurrence.mirror_url, occurrence.subtitle_url].filter(Boolean).join(" · ") }}</small>
             </article>
@@ -1350,9 +1408,22 @@ onUnmounted(() => {
         </div>
         <div class="actions program-json-dialog-actions">
           <button type="button" class="secondary program-action-button" :disabled="importSubmitting" @click="closeImportPreview">取消</button>
-          <button type="button" class="program-action-button" :disabled="importSubmitting" @click="submitImport">{{ importSubmitting ? "导入中……" : "确认提交导入" }}</button>
-        </div>
-      </section>
-    </div>
-  </main>
+           <button type="button" class="program-action-button" :disabled="importSubmitting || (importTargetMode === 'overwrite' && !importTargetProgramId)" @click="submitImport">{{ importSubmitting ? "导入中……" : importTargetMode === "overwrite" ? "确认覆盖导入" : "确认新建导入" }}</button>
+         </div>
+       </section>
+     </div>
+
+     <div v-if="exportModeDialog" class="program-json-modal" role="dialog" aria-modal="true" aria-labelledby="program-json-export-title" @click.self="closeExportModeDialog">
+       <section class="program-json-dialog program-json-mode-dialog">
+         <div class="program-json-dialog-heading">
+           <div><p class="eyebrow">JSON EXPORT / MODE</p><h2 id="program-json-export-title">选择导出方式</h2><small>两种文件都可以交给 AI 优化；导入时会根据 JSON 中的模式处理排期。</small></div>
+           <button type="button" class="secondary program-action-button" @click="closeExportModeDialog">关闭</button>
+         </div>
+         <div class="program-json-export-options">
+           <button type="button" class="program-json-export-option" @click="downloadProgramJson('individual')"><strong>完整逐期快照</strong><span>推荐用于交给 AI 优化内容后覆盖导回。展开当前有效单集，关闭自动生成，日期和状态按当前结果冻结。</span><small>individual · {{ form.title }}</small></button>
+           <button type="button" class="program-json-export-option" @click="downloadProgramJson('generated')"><strong>排期规则 + 例外</strong><span>推荐用于继续维护自动排期。保留 periods、改期、顺延、取消、删除和已保存的单集覆盖。</span><small>generated · {{ form.title }}</small></button>
+         </div>
+       </section>
+     </div>
+   </main>
 </template>

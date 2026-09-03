@@ -37,7 +37,7 @@ FRONTEND_DIST = ROOT / "frontend" / "dist"
 PASSWORD_ITERATIONS = 310_000
 BACKUP_MAX_BYTES = 32 * 1024 * 1024
 PROGRAM_JSON_FORMAT = "nijidb-program"
-PROGRAM_JSON_VERSION = 1
+PROGRAM_JSON_VERSION = 2
 PROGRAM_IMPORT_MAX_OCCURRENCES = 2000
 R2_ENDPOINT = os.getenv("R2_ENDPOINT", "").strip()
 R2_BUCKET = os.getenv("R2_BUCKET", "nijidb").strip()
@@ -742,27 +742,70 @@ def import_date(value: Any, label: str) -> str:
         raise ValueError(f"{label}格式无效：{raw}") from exc
 
 
+def import_payload_options(payload: dict[str, Any]) -> dict[str, str]:
+    raw_program = payload.get("program") if isinstance(payload.get("program"), dict) else payload
+    raw_options = payload.get("import_options")
+    if raw_options is None:
+        raw_options = {}
+    if not isinstance(raw_options, dict):
+        raise ValueError("import_options 必须是对象")
+
+    try:
+        version = int(payload.get("_version") or 1)
+    except (TypeError, ValueError):
+        version = 1
+    schedule_mode = import_choice(raw_options.get("schedule_mode"), {
+        "逐期准确": "individual", "逐期数据": "individual", "individual": "individual",
+        "自动生成": "generated", "规则生成": "generated", "generated": "generated",
+    })
+    if not schedule_mode:
+        schedule_mode = "generated" if version < 2 else "individual"
+    if schedule_mode not in {"individual", "generated"}:
+        raise ValueError("import_options.schedule_mode 必须是 individual 或 generated")
+
+    target_mode = import_choice(raw_options.get("target_mode"), {
+        "新建": "new", "new": "new", "覆盖": "overwrite", "覆盖已有": "overwrite", "overwrite": "overwrite",
+    }) or "new"
+    if target_mode not in {"new", "overwrite"}:
+        raise ValueError("import_options.target_mode 必须是 new 或 overwrite")
+    source_program_id = str(raw_program.get("id") or "").strip() if isinstance(raw_program, dict) else ""
+    target_program_id = str(raw_options.get("target_program_id") or "").strip()
+    return {
+        "schedule_mode": schedule_mode,
+        "target_mode": target_mode,
+        "target_program_id": target_program_id,
+        "source_program_id": source_program_id,
+    }
+
+
 def program_json_metadata() -> dict[str, Any]:
     return {
         "_format": PROGRAM_JSON_FORMAT,
         "_version": PROGRAM_JSON_VERSION,
         "_description": "Nijidb 单独节目导入导出格式；一个 JSON 文件只描述一个节目及其单集资料。",
         "_field_notes": {
+            "import_options.schedule_mode": "individual（默认）：以 occurrences 为最终逐期数据，不自动生成；generated：按 periods 自动生成，occurrences 只作为已保存的覆盖和例外。",
+            "import_options.target_mode": "new（默认）：新建节目；overwrite：覆盖 target_program_id 指定的已有节目。覆盖前必须在网页预览中再次确认。",
+            "program.id": "导出时保留的节目 ID，仅用于预览匹配覆盖目标；新建导入时会忽略。",
             "program": "节目基本资料和排期时期；periods 可以有多个，按 start_date 分段。",
             "program.delivery": "默认播出方式：live 或 recorded。",
             "program.periods[].frequency": "weekly、monthly、individual 或 single。",
             "program.periods[].week_interval": "周更间隔；填写 2 表示隔周。",
             "program.periods[].week_index": "固定月更的第几周，1–5 表示顺数，-1–-5 表示倒数。",
             "occurrences[].original_date": "单集原定日期，必填；支持 YYYY-MM-DD。",
+            "occurrences[].adjusted_date": "改期后的实际日期；status 为 rescheduled 时必填。",
+            "occurrences[].adjusted_time": "改期后的时间；留空表示沿用原定时间。",
+            "occurrences[].shift_following_days": "改期后后续隔周排期的偏移，只能填写 -7、0 或 7；只有 rescheduled 单集可以填写。individual 模式不会再次级联。",
             "occurrences[].delivery": "本期播出方式：live、recorded 或空字符串表示跟随节目默认。",
             "occurrences[].special": "普通单集使用空字符串，EX 单集使用 EX。",
-            "occurrences[].status": "scheduled 或 cancelled；导入不处理改期、延期和删除状态。",
+            "occurrences[].status": "scheduled、rescheduled、cancelled 或 deleted。deleted 会保留为不显示的删除记录。",
             "occurrences[].guests": "本期临时嘉宾数组，不会修改节目固定成员。",
         },
         "_import_notes": [
-            "导入会新建节目，不会覆盖当前正在编辑的节目。",
-            "导入支持多个排期时期和多个单集；自动生成的未来单集由 periods 重新生成。",
-            "导入不接受 adjusted_date、adjusted_time、shift_following_days 等改期/延期字段。",
+            "schedule_mode 缺省为 individual：导入的 occurrences 是准确的最终逐期数据，program.auto_generate 会被关闭，不会凭 periods 生成额外单集。",
+            "需要继续按排期规则生成时，将 schedule_mode 设置为 generated；此时 program.auto_generate 会开启，occurrences 作为已保存覆盖和例外。",
+            "导出默认是 individual 完整逐期快照，适合交给 AI 优化内容后覆盖导回；也可以选择 generated 规则加例外导出。",
+            "target_mode 缺省为 new；覆盖导入必须指定 target_program_id，并在网页导入预览中明确选择覆盖目标。",
             "JSON 可以保留这些说明字段；导入器也兼容 // 和 /* */ 注释。",
         ],
     }
@@ -770,13 +813,18 @@ def program_json_metadata() -> dict[str, Any]:
 
 def program_json_template() -> dict[str, Any]:
     payload = program_json_metadata()
+    payload["import_options"] = {
+        "schedule_mode": "individual",
+        "target_mode": "new",
+        "target_program_id": "",
+    }
     payload["program"] = {
         "title": "示例节目",
         "category": "personal",
         "format": "video",
         "platform": "network",
         "delivery": "recorded",
-        "auto_generate": True,
+        "auto_generate": False,
         "episode_start": 1,
         "people": ["成员姓名"],
         "official_url": "https://example.com/program",
@@ -818,10 +866,37 @@ def program_json_template() -> dict[str, Any]:
             "guests": ["本期嘉宾"],
         },
         {
-            "original_date": "2026-01-21",
+            "original_date": "2026-02-04",
             "original_time": "20:00",
             "delivery": "recorded",
-            "status": "scheduled",
+            "status": "rescheduled",
+            "adjusted_date": "2026-02-11",
+            "adjusted_time": "20:00",
+            "shift_following_days": 7,
+            "special": "",
+            "source_url": "https://example.com/episode-2",
+            "mirror_url": "",
+            "subtitle_url": "",
+            "note": "本期顺延一周，后续隔周排期同步顺延。",
+            "guests": [],
+        },
+        {
+            "original_date": "2026-02-18",
+            "original_time": "20:00",
+            "delivery": "",
+            "status": "cancelled",
+            "special": "",
+            "source_url": "",
+            "mirror_url": "",
+            "subtitle_url": "",
+            "note": "因故取消，保留记录。",
+            "guests": [],
+        },
+        {
+            "original_date": "2026-02-25",
+            "original_time": "20:00",
+            "delivery": "",
+            "status": "deleted",
             "special": "EX",
             "source_url": "https://example.com/episode-ex",
             "mirror_url": "",
@@ -855,6 +930,7 @@ def normalize_import_periods(values: dict[str, Any]) -> dict[str, Any]:
 def normalize_import_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
     if not isinstance(payload, dict):
         raise ValueError("JSON 根对象格式无效")
+    options = import_payload_options(payload)
     raw_program = payload.get("program") if isinstance(payload.get("program"), dict) else payload
     if not isinstance(raw_program, dict):
         raise ValueError("JSON 中缺少 program 对象")
@@ -868,6 +944,7 @@ def normalize_import_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], l
         raise ValueError(f"单次导入最多支持 {PROGRAM_IMPORT_MAX_OCCURRENCES} 期单集")
 
     program_source.pop("id", None)
+    program_source["auto_generate"] = options["schedule_mode"] == "generated"
     program_source["parent_id"] = ""
     program_source["subprogram_name"] = "主节目"
     program_source["category"] = import_choice(program_source.get("category"), {
@@ -902,9 +979,6 @@ def normalize_import_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], l
         if not isinstance(raw_occurrence, dict):
             raise ValueError(f"第 {index} 期单集格式无效")
         item = dict(raw_occurrence)
-        ignored = [field for field in ("adjusted_date", "adjusted_time", "shift_following_days") if item.get(field) not in (None, "", 0)]
-        if ignored:
-            warnings.append(f"第 {index} 期已忽略不支持的字段：{', '.join(ignored)}")
         original_date = import_date(item.get("original_date") or item.get("date"), f"第 {index} 期原定日期")
         if not original_date:
             raise ValueError(f"第 {index} 期原定日期不能为空")
@@ -924,12 +998,6 @@ def normalize_import_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], l
             original = date.fromisoformat(original_date)
             generated_date = date(original.year, original.month, 1).isoformat()
         status = import_choice(item.get("status") or "scheduled", status_aliases)
-        if status == "rescheduled":
-            warnings.append(f"第 {index} 期的改期状态已按正常播出导入")
-            status = "scheduled"
-        elif status == "deleted":
-            warnings.append(f"第 {index} 期的删除状态未导入")
-            continue
         special_value = item.get("special") or item.get("type")
         if item.get("is_ex") is True:
             special_value = "EX"
@@ -938,23 +1006,40 @@ def normalize_import_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], l
             "generated_date": generated_date,
             "original_time": str(item.get("original_time") or item.get("time") or "").strip(),
             "delivery": import_choice(item.get("delivery"), delivery_aliases),
-            "shift_following_days": 0,
+            "shift_following_days": item.get("shift_following_days", 0),
             "source_url": item.get("source_url", ""),
             "mirror_url": item.get("mirror_url", ""),
             "subtitle_url": item.get("subtitle_url", ""),
             "status": status,
             "special": import_choice(special_value, special_aliases),
-            "adjusted_date": "",
-            "adjusted_time": "",
+            "adjusted_date": import_date(item.get("adjusted_date"), f"第 {index} 期调整日期"),
+            "adjusted_time": str(item.get("adjusted_time") or "").strip(),
             "note": item.get("note", ""),
             "guests": item.get("guests", []),
         }
         occurrences.append(normalized_occurrence(occurrence_values))
+    if options["schedule_mode"] == "individual":
+        warnings.append("已按逐期准确模式导入：不会根据 periods 自动生成额外单集，也不会再次级联提前或顺延。")
+    else:
+        warnings.append("已按自动生成模式导入：periods 会生成排期，occurrences 中的记录作为覆盖或例外。")
     return program_values, occurrences, warnings
 
 
-def import_preview_payload(program: dict[str, Any], occurrences: list[dict[str, Any]], warnings: list[str]) -> dict[str, Any]:
+def import_preview_payload(
+    program: dict[str, Any],
+    occurrences: list[dict[str, Any]],
+    warnings: list[str],
+    options: dict[str, str],
+    matches: list[dict[str, Any]],
+) -> dict[str, Any]:
     payload = program_json_metadata()
+    payload["import_options"] = {
+        "schedule_mode": options["schedule_mode"],
+        "target_mode": "new",
+        "target_program_id": "",
+    }
+    payload["source_program_id"] = options["source_program_id"]
+    payload["matches"] = matches
     payload["program"] = {
         key: program[key]
         for key in ("title", "category", "format", "platform", "delivery", "auto_generate", "episode_start", "official_url", "description", "periods")
@@ -964,13 +1049,34 @@ def import_preview_payload(program: dict[str, Any], occurrences: list[dict[str, 
     for occurrence in occurrences:
         item = {
             key: occurrence.get(key, "")
-            for key in ("original_date", "generated_date", "original_time", "delivery", "status", "special", "source_url", "mirror_url", "subtitle_url", "note")
+            for key in ("original_date", "generated_date", "original_time", "delivery", "status", "special", "adjusted_date", "adjusted_time", "shift_following_days", "source_url", "mirror_url", "subtitle_url", "note")
         }
         item["guests"] = program_people(occurrence.get("guests", []))
         payload["occurrences"].append(item)
     payload["warnings"] = warnings
     payload["counts"] = {"periods": len(program["periods"]), "occurrences": len(occurrences)}
     return payload
+
+
+def program_import_matches(source_program_id: str, title: str) -> list[dict[str, Any]]:
+    with db() as conn:
+        rows = conn.execute(
+            """SELECT id, title, subprogram_name, parent_id
+               FROM programs
+               WHERE (? != '' AND id = ?) OR title = ?
+               ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, title COLLATE NOCASE, subprogram_name COLLATE NOCASE""",
+            (source_program_id, source_program_id, title, source_program_id),
+        ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "title": row["title"],
+            "subprogram_name": row["subprogram_name"] or "主节目",
+            "display_name": f"{row['title']} · {row['subprogram_name']}" if row["parent_id"] else row["title"],
+            "match": "id" if source_program_id and row["id"] == source_program_id else "title",
+        }
+        for row in rows
+    ]
 
 
 def validate_program_group(conn: sqlite3.Connection, values: dict[str, Any], current_id: str = "") -> dict[str, Any]:
@@ -1489,6 +1595,30 @@ def insert_program_row(conn: sqlite3.Connection, values: dict[str, Any]) -> None
     replace_program_periods(conn, values["id"], values["periods"], values["updated_at"])
 
 
+def replace_imported_program_row(
+    conn: sqlite3.Connection,
+    values: dict[str, Any],
+    target_id: str,
+    created_at: str,
+    updated_at: str,
+) -> None:
+    values = {**values, "id": target_id, "created_at": created_at, "updated_at": updated_at}
+    conn.execute("""UPDATE programs SET
+        title=:title, status=:status, category=:category, format=:format, platform=:platform, delivery=:delivery, auto_generate=:auto_generate,
+        people=:people, official_url=:official_url, description=:description,
+        frequency=:frequency, week_interval=:week_interval, monthly_mode=:monthly_mode,
+        week_index=:week_index, weekday=:weekday, schedule_time=:schedule_time,
+        start_date=:start_date, end_date=:end_date, parent_id=:parent_id, subprogram_name=:subprogram_name, episode_start=:episode_start, updated_at=:updated_at
+        WHERE id=:id""", values)
+    if not values["parent_id"]:
+        conn.execute(
+            "UPDATE programs SET title = ?, updated_at = ? WHERE parent_id = ?",
+            (values["title"], updated_at, target_id),
+        )
+    conn.execute("DELETE FROM program_occurrences WHERE program_id = ?", (target_id,))
+    replace_program_periods(conn, target_id, values["periods"], updated_at)
+
+
 def program_rows() -> list[dict[str, Any]]:
     with db() as conn:
         program_rows = conn.execute("SELECT * FROM programs ORDER BY category, title COLLATE NOCASE, CASE WHEN parent_id = '' THEN 0 ELSE 1 END, subprogram_name COLLATE NOCASE").fetchall()
@@ -1503,37 +1633,77 @@ def program_rows() -> list[dict[str, Any]]:
     return [program_payload(row, grouped.get(row["id"], []), periods_grouped.get(row["id"])) for row in program_rows]
 
 
-def program_json_export(program: dict[str, Any]) -> dict[str, Any]:
+def program_json_occurrence_item(occurrence: dict[str, Any], freeze_effective_date: bool) -> dict[str, Any]:
+    original_date = occurrence.get("original_date", "")
+    effective_date = occurrence.get("date")
+    effective_date = effective_date.isoformat() if isinstance(effective_date, date) else str(effective_date or original_date)
+    status = occurrence.get("status", "scheduled")
+    adjusted_date = occurrence.get("adjusted_date", "")
+    adjusted_time = occurrence.get("adjusted_time", "")
+    if freeze_effective_date and status not in {"cancelled", "deleted"} and effective_date != original_date:
+        status = "rescheduled"
+        adjusted_date = effective_date
+        adjusted_time = occurrence.get("time", "") if occurrence.get("time", "") != occurrence.get("original_time", "") else ""
+    item = {
+        "original_date": original_date,
+        "original_time": occurrence.get("original_time", ""),
+        "delivery": occurrence.get("delivery_override", occurrence.get("delivery", "")),
+        "status": status,
+        "special": occurrence.get("special", ""),
+        "source_url": occurrence.get("source_url", ""),
+        "mirror_url": occurrence.get("mirror_url", ""),
+        "subtitle_url": occurrence.get("subtitle_url", ""),
+        "note": occurrence.get("note", ""),
+        "guests": occurrence.get("guests", []),
+    }
+    if occurrence.get("generated_date"):
+        item["generated_date"] = occurrence["generated_date"]
+    if status == "rescheduled":
+        item["adjusted_date"] = adjusted_date
+        item["adjusted_time"] = adjusted_time
+        item["shift_following_days"] = 0 if freeze_effective_date else occurrence.get("shift_following_days", 0)
+    elif not freeze_effective_date and occurrence.get("shift_following_days"):
+        item["shift_following_days"] = occurrence["shift_following_days"]
+    return item
+
+
+def program_json_export(program: dict[str, Any], mode: str = "individual") -> dict[str, Any]:
+    if mode not in {"individual", "generated"}:
+        raise ValueError("导出模式必须是 individual 或 generated")
     payload = program_json_metadata()
     payload["_exported_at"] = datetime.now(timezone.utc).isoformat()
-    payload["_export_notes"] = [
-        "未单独保存的自动生成单集不会重复写入；导入时会根据 periods 重新生成。",
-        "改期、延期和删除标记不会导出为可导入的排期状态；原定日期和内容资料会保留。",
-    ]
+    payload["import_options"] = {
+        "schedule_mode": mode,
+        "target_mode": "new",
+        "target_program_id": "",
+    }
     payload["program"] = {
         key: program.get(key)
         for key in ("title", "category", "format", "platform", "delivery", "auto_generate", "episode_start", "people", "official_url", "description", "periods")
     }
-    payload["occurrences"] = []
-    for occurrence in program.get("occurrences", []):
-        status = occurrence.get("status", "scheduled")
-        if status == "deleted":
-            continue
-        item = {
-            "original_date": occurrence.get("original_date", ""),
-            "original_time": occurrence.get("original_time", ""),
-            "delivery": occurrence.get("delivery", ""),
-            "status": "cancelled" if status == "cancelled" else "scheduled",
-            "special": occurrence.get("special", ""),
-            "source_url": occurrence.get("source_url", ""),
-            "mirror_url": occurrence.get("mirror_url", ""),
-            "subtitle_url": occurrence.get("subtitle_url", ""),
-            "note": occurrence.get("note", ""),
-            "guests": occurrence.get("guests", []),
-        }
-        if occurrence.get("generated_date"):
-            item["generated_date"] = occurrence["generated_date"]
-        payload["occurrences"].append(item)
+    payload["program"]["id"] = program.get("id", "")
+    if mode == "individual":
+        payload["program"]["auto_generate"] = False
+        payload["_export_notes"] = [
+            "这是完整逐期快照；自动生成的单集也会展开写入 occurrences。",
+            "快照按当前实际播出日期冻结；由前期改期级联产生的日期会转换为本期独立的 rescheduled 记录。",
+            "导入此文件后默认关闭自动生成，不会因 periods 重新生成或再次级联提前/顺延。",
+        ]
+        today = datetime.now(JAPAN_TZ).date()
+        start = calendar_date(program.get("start_date", ""), today)
+        end = calendar_date(program.get("end_date", ""), today + timedelta(days=PROGRAM_FORECAST_DAYS))
+        records = program_occurrence_list(program, start.isoformat(), end.isoformat())["occurrences"]
+        payload["occurrences"] = [program_json_occurrence_item(record, True) for record in records]
+    else:
+        payload["program"]["auto_generate"] = True
+        payload["_export_notes"] = [
+            "这是排期规则加已保存例外；未保存的自动生成单集不会写入 occurrences。",
+            "导入此文件后会按 periods 自动生成，occurrences 中的改期、取消、删除和内容资料作为覆盖保留。",
+        ]
+        payload["occurrences"] = [
+            program_json_occurrence_item(occurrence, False)
+            for occurrence in program.get("occurrences", [])
+        ]
     return payload
 
 
@@ -2381,12 +2551,15 @@ async def api_program_json_template(request: Request) -> dict[str, Any]:
 
 
 @app.get("/api/admin/programs/{program_id}/export")
-async def api_export_program(program_id: str, request: Request) -> dict[str, Any]:
+async def api_export_program(program_id: str, request: Request, mode: str = "individual") -> dict[str, Any]:
     require_api_admin(request)
     program = next((item for item in program_rows() if item["id"] == program_id), None)
     if not program:
         raise HTTPException(404, "节目不存在")
-    return program_json_export(program)
+    try:
+        return program_json_export(program, mode)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/api/admin/programs/import/preview")
@@ -2397,10 +2570,12 @@ async def api_preview_program_import(request: Request) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(400, "请求格式无效") from exc
     try:
+        options = import_payload_options(payload)
         program, occurrences, warnings = normalize_import_payload(payload)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    return import_preview_payload(program, occurrences, warnings)
+    matches = program_import_matches(options["source_program_id"], program["title"])
+    return import_preview_payload(program, occurrences, warnings, options, matches)
 
 
 @app.post("/api/admin/programs/import")
@@ -2411,17 +2586,27 @@ async def api_import_program(request: Request) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(400, "请求格式无效") from exc
     try:
+        options = import_payload_options(payload)
         program_values, occurrence_values, warnings = normalize_import_payload(payload)
         with db() as conn:
-            program_values = validate_program_group(conn, program_values)
+            target_id = options["target_program_id"] if options["target_mode"] == "overwrite" else ""
+            existing = conn.execute("SELECT id, created_at FROM programs WHERE id = ?", (target_id,)).fetchone() if target_id else None
+            if options["target_mode"] == "overwrite" and not existing:
+                raise ValueError("覆盖导入需要选择一个存在的目标节目")
+            program_values = validate_program_group(conn, program_values, target_id)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
     now = datetime.now(timezone.utc).isoformat()
-    program_values.update({"id": f"program-{secrets.token_hex(6)}", "created_at": now, "updated_at": now})
+    overwrite = options["target_mode"] == "overwrite"
+    target_id = options["target_program_id"] if overwrite else f"program-{secrets.token_hex(6)}"
+    program_values.update({"id": target_id, "created_at": existing["created_at"] if overwrite else now, "updated_at": now})
     try:
         with db() as conn:
-            insert_program_row(conn, program_values)
+            if overwrite:
+                replace_imported_program_row(conn, program_values, target_id, program_values["created_at"], now)
+            else:
+                insert_program_row(conn, program_values)
             for occurrence in occurrence_values:
                 values = {
                     **occurrence,
@@ -2433,9 +2618,10 @@ async def api_import_program(request: Request) -> dict[str, Any]:
     except sqlite3.IntegrityError as exc:
         raise HTTPException(409, "导入的单集存在重复原定日期") from exc
 
-    log_database_activity("program", f"导入节目：{program_values['title']}（{len(occurrence_values)} 期）")
+    action = "覆盖节目" if overwrite else "导入节目"
+    log_database_activity("program", f"{action}：{program_values['title']}（{len(occurrence_values)} 期）")
     program = next(item for item in program_rows() if item["id"] == program_values["id"])
-    return {"program": program, "warnings": warnings, "imported_occurrences": len(occurrence_values)}
+    return {"program": program, "warnings": warnings, "imported_occurrences": len(occurrence_values), "overwritten": overwrite}
 
 
 @app.post("/api/admin/programs")

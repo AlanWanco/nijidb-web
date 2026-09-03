@@ -1,32 +1,45 @@
 {
   "_format": "nijidb-program",
-  "_version": 1,
+  "_version": 2,
   "_description": "Nijidb 单独节目导入导出格式；一个 JSON 文件只描述一个节目及其单集资料。",
   "_field_notes": {
+    "import_options.schedule_mode": "individual（默认）：以 occurrences 为最终逐期数据，不自动生成；generated：按 periods 自动生成，occurrences 只作为已保存的覆盖和例外。",
+    "import_options.target_mode": "new（默认）：新建节目；overwrite：覆盖 target_program_id 指定的已有节目。覆盖前必须在网页预览中再次确认。",
+    "program.id": "导出时保留的节目 ID，仅用于预览匹配覆盖目标；新建导入时会忽略。",
     "program": "节目基本资料和排期时期；periods 可以有多个，按 start_date 分段。",
     "program.delivery": "默认播出方式：live 或 recorded。",
     "program.periods[].frequency": "weekly、monthly、individual 或 single。",
     "program.periods[].week_interval": "周更间隔；填写 2 表示隔周。",
     "program.periods[].week_index": "固定月更的第几周，1–5 表示顺数，-1–-5 表示倒数。",
     "occurrences[].original_date": "单集原定日期，必填；支持 YYYY-MM-DD。",
+    "occurrences[].adjusted_date": "改期后的实际日期；status 为 rescheduled 时必填。",
+    "occurrences[].adjusted_time": "改期后的时间；留空表示沿用原定时间。",
+    "occurrences[].shift_following_days": "改期后后续隔周排期的偏移，只能填写 -7、0 或 7；只有 rescheduled 单集可以填写。individual 模式不会再次级联。",
     "occurrences[].delivery": "本期播出方式：live、recorded 或空字符串表示跟随节目默认。",
     "occurrences[].special": "普通单集使用空字符串，EX 单集使用 EX。",
-    "occurrences[].status": "scheduled 或 cancelled；导入不处理改期、延期和删除状态。",
+    "occurrences[].status": "scheduled、rescheduled、cancelled 或 deleted。deleted 会保留为不显示的删除记录。",
     "occurrences[].guests": "本期临时嘉宾数组，不会修改节目固定成员。"
   },
   "_import_notes": [
-    "导入会新建节目，不会覆盖当前正在编辑的节目。",
-    "导入支持多个排期时期和多个单集；自动生成的未来单集由 periods 重新生成。",
-    "导入不接受 adjusted_date、adjusted_time、shift_following_days 等改期/延期字段。",
+    "schedule_mode 缺省为 individual：导入的 occurrences 是准确的最终逐期数据，program.auto_generate 会被关闭，不会凭 periods 生成额外单集。",
+    "需要继续按排期规则生成时，将 schedule_mode 设置为 generated；此时 program.auto_generate 会开启，occurrences 中的记录作为覆盖或例外。",
+    "导出默认是 individual 完整逐期快照，适合交给 AI 优化内容后覆盖导回；也可以选择 generated 规则加例外导出。",
+    "target_mode 缺省为 new；覆盖导入必须指定 target_program_id，并在网页导入预览中明确选择覆盖目标。",
     "JSON 可以保留这些说明字段；导入器也兼容 // 和 /* */ 注释。"
   ],
+  "import_options": {
+    "schedule_mode": "individual",
+    "target_mode": "new",
+    "target_program_id": ""
+  },
   "program": {
+    "id": "",
     "title": "示例节目",
     "category": "personal",
     "format": "video",
     "platform": "network",
     "delivery": "recorded",
-    "auto_generate": true,
+    "auto_generate": false,
     "episode_start": 1,
     "people": [
       "成员姓名"
@@ -72,10 +85,37 @@
       ]
     },
     {
-      "original_date": "2026-01-21",
+      "original_date": "2026-02-04",
       "original_time": "20:00",
       "delivery": "recorded",
-      "status": "scheduled",
+      "status": "rescheduled",
+      "adjusted_date": "2026-02-11",
+      "adjusted_time": "20:00",
+      "shift_following_days": 7,
+      "special": "",
+      "source_url": "https://example.com/episode-2",
+      "mirror_url": "",
+      "subtitle_url": "",
+      "note": "本期顺延一周，后续隔周排期同步顺延。",
+      "guests": []
+    },
+    {
+      "original_date": "2026-02-18",
+      "original_time": "20:00",
+      "delivery": "",
+      "status": "cancelled",
+      "special": "",
+      "source_url": "",
+      "mirror_url": "",
+      "subtitle_url": "",
+      "note": "因故取消，保留记录。",
+      "guests": []
+    },
+    {
+      "original_date": "2026-02-25",
+      "original_time": "20:00",
+      "delivery": "",
+      "status": "deleted",
       "special": "EX",
       "source_url": "https://example.com/episode-ex",
       "mirror_url": "",

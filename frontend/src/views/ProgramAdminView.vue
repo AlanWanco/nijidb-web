@@ -1420,8 +1420,8 @@ onUnmounted(() => {
            <button type="button" class="secondary program-action-button" @click="closeExportModeDialog">关闭</button>
          </div>
          <div class="program-json-export-options">
-           <button type="button" class="program-json-export-option" @click="downloadProgramJson('individual')"><strong>完整逐期快照</strong><span>推荐用于交给 AI 优化内容后覆盖导回。展开当前有效单集，关闭自动生成，日期和状态按当前结果冻结。</span><small>individual · {{ form.title }}</small></button>
-           <button type="button" class="program-json-export-option" @click="downloadProgramJson('generated')"><strong>排期规则 + 例外</strong><span>推荐用于继续维护自动排期。保留 periods、改期、顺延、取消、删除和已保存的单集覆盖。</span><small>generated · {{ form.title }}</small></button>
+           <button type="button" class="program-json-export-option" @click="downloadProgramJson('individual')"><strong>完整逐期快照</strong><small class="program-json-mode-note">【关闭自动生成后续节目、固化已播出节目日期】</small><span><strong>【推荐用于已完结节目】</strong> 推荐用于交给 AI 优化内容后覆盖导回。展开当前有效单集，关闭自动生成，日期和状态按当前结果冻结。</span><small>individual · {{ form.title }}</small></button>
+           <button type="button" class="program-json-export-option" @click="downloadProgramJson('generated')"><strong>排期规则 + 例外</strong><small class="program-json-mode-note">【打开自动生成、推荐用于继续维护自动排期】</small><span><strong>【推荐用于还在更新的节目】</strong> 推荐用于继续维护自动排期。保留 periods、改期、顺延、取消、删除和已保存的单集覆盖。</span><small>generated · {{ form.title }}</small></button>
          </div>
        </section>
      </div>

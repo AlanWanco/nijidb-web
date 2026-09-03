@@ -4458,6 +4458,11 @@ html[data-theme="mocha"] .dp__theme_dark {
   line-height: 1.6;
 }
 
+.program-json-export-option .program-json-mode-note {
+  color: var(--accent);
+  font-size: 11px;
+}
+
 .program-json-export-option small {
   font: 11px var(--mono);
 }

@@ -1,5 +1,7 @@
 import { createRouter, createWebHistory } from "vue-router";
+import { watch } from "vue";
 import { api } from "./api";
+import { locale, t } from "./i18n";
 
 const appTitle = "Nijigasaki DB";
 
@@ -21,9 +23,12 @@ const router = createRouter({
   scrollBehavior: () => ({ top: 0 }),
 });
 
-router.afterEach(to => {
-  document.title = to.meta.title ? `${to.meta.title} · ${appTitle}` : appTitle;
-});
+function updateDocumentTitle(to = router.currentRoute.value) {
+  document.title = to.meta.title ? `${t(to.meta.title)} · ${appTitle}` : appTitle;
+}
+
+router.afterEach(updateDocumentTitle);
+watch(locale, () => updateDocumentTitle());
 
 router.beforeEach(async (to) => {
   if (!to.meta.requiresAuth) return true;

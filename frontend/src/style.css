@@ -215,6 +215,76 @@ input:focus-visible {
   stroke-width: 1.8;
 }
 
+.language-picker {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.language-picker > summary {
+  list-style: none;
+}
+
+.language-picker > summary::-webkit-details-marker {
+  display: none;
+}
+
+.language-picker-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.language-picker-button:hover,
+.language-picker[open] .language-picker-button {
+  color: var(--accent);
+}
+
+.language-picker-icon {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
+}
+
+.language-picker-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 20;
+  display: grid;
+  min-width: 132px;
+  gap: 3px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 6px;
+  background: var(--surface);
+  box-shadow: 0 14px 32px var(--shadow);
+}
+
+.language-picker-menu button {
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--muted);
+  text-align: left;
+  font-size: 12px;
+  box-shadow: none;
+}
+
+.language-picker-menu button:hover,
+.language-picker-menu button.selected {
+  background: var(--accent-soft);
+  color: var(--accent);
+  transform: none;
+}
+
 .site-nav a.router-link-active {
   color: var(--accent);
 }
@@ -822,6 +892,18 @@ footer a {
 
   .site-nav .site-settings-link span {
     display: none;
+  }
+
+  .language-picker-button {
+    padding: 8px;
+  }
+
+  .language-picker-button span {
+    display: none;
+  }
+
+  .language-picker-menu {
+    right: -4px;
   }
 
   .page {

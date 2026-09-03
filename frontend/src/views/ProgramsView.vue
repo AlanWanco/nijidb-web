@@ -4,12 +4,17 @@ import FullCalendar from "@fullcalendar/vue3";
 import dayGridPlugin from "@fullcalendar/daygrid";
 import interactionPlugin from "@fullcalendar/interaction";
 import zhCnLocale from "@fullcalendar/core/locales/zh-cn";
+import enGbLocale from "@fullcalendar/core/locales/en-gb";
+import jaLocale from "@fullcalendar/core/locales/ja";
 import { useRoute, useRouter } from "vue-router";
 import { api } from "../api";
+import { locale, localeTag, t } from "../i18n";
 import { NIJIGASAKI_CAST, castColorSegments } from "../programCast";
 import { occurrenceLinkItems, programAdminPath, relatedLinkItem } from "../programLinks";
 
-const weekdayNames = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+const weekdayNames = computed(() => locale.value === "en"
+  ? ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+  : locale.value === "ja" ? ["月", "火", "水", "木", "金", "土", "日"] : ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]);
 const timezoneLabels = {
   "Asia/Tokyo": "东京时间",
   "Asia/Shanghai": "中国标准时间",
@@ -42,7 +47,7 @@ const initialMonth = requestedMonth.value || monthKey(today);
 const visibleMonth = ref(initialMonth);
 const jumpYear = ref(Number(initialMonth.slice(0, 4)));
 const jumpMonth = ref(Number(initialMonth.slice(5, 7)));
-const editAccessMessage = "需要登录管理员后才能编辑；未来将开放编辑审核。";
+const editAccessMessage = computed(() => t("需要登录管理员后才能编辑；未来将开放编辑审核。"));
 
 const monthOptions = Array.from({ length: 12 }, (_, index) => ({
   value: index + 1,
@@ -66,12 +71,12 @@ const filteredProgramCount = computed(() => new Set(monthEvents.value.map(event 
 const allCastSelected = computed(() => filters.cast.length === NIJIGASAKI_CAST.length);
 const activeFilterCount = computed(() => Number(filters.cast.length > 0 && !allCastSelected.value) + Number(Boolean(filters.delivery)));
 const castFilterLabel = computed(() => {
-  if (!filters.cast.length || allCastSelected.value) return "全部Cast";
-  return `已选 ${filters.cast.length} 位`;
+  if (!filters.cast.length || allCastSelected.value) return t("全部 Cast");
+  return t("已选 {count} 位", { count: filters.cast.length });
 });
 const visibleMonthLabel = computed(() => {
   const [year, month] = visibleMonth.value.split("-").map(Number);
-  return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long" }).format(new Date(year, month - 1, 1, 12));
+  return new Intl.DateTimeFormat(localeTag(), { year: "numeric", month: "long" }).format(new Date(year, month - 1, 1, 12));
 });
 const yearOptions = computed(() => {
   const years = new Set();
@@ -91,7 +96,7 @@ const calendarOptions = reactive({
   timeZone: "local",
   nextDayThreshold: "24:00:00",
   firstDay: 1,
-  locale: zhCnLocale,
+  locale: locale.value === "en" ? enGbLocale : locale.value === "ja" ? jaLocale : zhCnLocale,
   height: "auto",
   fixedWeekCount: false,
   dayMaxEvents: false,
@@ -122,6 +127,10 @@ watch(filteredEvents, events => {
   if (selectedEvent.value && !events.some(event => event.id === selectedEvent.value.eventId)) closeDrawer();
 }, { immediate: true });
 
+watch(locale, nextLocale => {
+  calendarOptions.locale = nextLocale === "en" ? enGbLocale : nextLocale === "ja" ? jaLocale : zhCnLocale;
+});
+
 watch(requestedMonth, month => {
   if (!month) return;
   visibleMonth.value = month;
@@ -143,60 +152,60 @@ const selectedAdminEditorPath = computed(() => selectedProgram.value && selected
   : "/admin/programs");
 
 function programType(program) {
-  return program.category === "official" ? "官方节目" : "个人节目";
+  return program.category === "official" ? t("官方节目") : t("个人节目");
 }
 
 function programStatus(program) {
-  return program.status === "completed" ? "已完结" : "进行中";
+  return program.status === "completed" ? t("已完结") : t("进行中");
 }
 
 function updateStatusLabel(program) {
-  return program.update_status === "not_updated" ? "未更新" : "近期有更新";
+  return program.update_status === "not_updated" ? t("未更新") : t("近期有更新");
 }
 
 function periodScheduleLabel(period) {
   const time = period.schedule_time ? ` ${period.schedule_time}` : "";
-  if (period.frequency === "single") return `单次${time}`;
-  if (period.frequency === "individual") return `月更 · 逐期设置${time}`;
-  const weekday = weekdayNames[period.weekday] || "";
+  if (period.frequency === "single") return `${t("单次")}${time}`;
+  if (period.frequency === "individual") return `${t("月更 · 逐期设置")}${time}`;
+  const weekday = weekdayNames.value[period.weekday] || "";
   if (period.frequency === "monthly") {
-    const week = period.week_index > 0 ? `第${period.week_index}周` : `倒数第${Math.abs(period.week_index)}周`;
-    return `每月${week}${weekday}${time}`;
+    const week = period.week_index > 0 ? t("第{count}周", { count: period.week_index }) : t("倒数第{count}周", { count: Math.abs(period.week_index) });
+    return `${t("每月")}${week}${weekday}${time}`;
   }
-  const interval = period.week_interval > 1 ? `每${period.week_interval}周` : "每周";
+  const interval = period.week_interval > 1 ? t("每{count}周", { count: period.week_interval }) : t("每周");
   return `${interval}${weekday}${time}`;
 }
 
 function periodRangeLabel(period) {
-  return `${period.start_date}${period.end_date ? ` → ${period.end_date}` : " → 至今"}`;
+  return `${period.start_date}${period.end_date ? ` → ${period.end_date}` : ` → ${t("至今")}`}`;
 }
 
 function timezoneLabel(value) {
-  return timezoneLabels[value] || value || "东京时间";
+  return value ? t(timezoneLabels[value] || value) : t("东京时间");
 }
 
 function occurrenceAirStatus(event) {
-  if (event.occurrenceStatus === "cancelled") return "已取消";
-  const airStatus = event.aired ? "已播出" : "未播出";
-  return event.occurrenceStatus === "rescheduled" ? `已改期 · ${airStatus}` : airStatus;
+  if (event.occurrenceStatus === "cancelled") return t("已取消");
+  const airStatus = event.aired ? t("已播出") : t("未播出");
+  return event.occurrenceStatus === "rescheduled" ? `${t("已改期")} · ${airStatus}` : airStatus;
 }
 
 function scheduleLabel(program) {
   const periods = program.periods || [];
   if (periods.length === 1) return periodScheduleLabel(periods[0]);
-  if (periods.length > 1) return `${periods.length} 个分段时期`;
-  return "未设置排期";
+  if (periods.length > 1) return t("{count} 个分段时期", { count: periods.length });
+  return t("未设置排期");
 }
 
 function formatLabel(program) {
-  return `${program.format === "radio" ? "广播" : "有画面"} · ${program.platform === "tv" ? "电视台" : "网络"} · ${program.delivery === "live" ? "直播" : "录播"}`;
+  return `${program.format === "radio" ? t("广播") : t("有画面")} · ${program.platform === "tv" ? t("电视台") : t("网络")} · ${program.delivery === "live" ? t("直播") : t("录播")}`;
 }
 
 function fullDateLabel(value) {
   if (!value) return "";
   const parsed = new Date(`${value}T12:00:00`);
   if (Number.isNaN(parsed.getTime())) return value;
-  return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric" }).format(parsed);
+  return new Intl.DateTimeFormat(localeTag(), { year: "numeric", month: "long", day: "numeric" }).format(parsed);
 }
 
 const deviceTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -288,16 +297,16 @@ function compareEvents(left, right) {
 
 function listDateLabel(value) {
   const parsed = new Date(`${value}T12:00:00`);
-  return new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric", weekday: "short" }).format(parsed);
+  return new Intl.DateTimeFormat(localeTag(), { month: "long", day: "numeric", weekday: "short" }).format(parsed);
 }
 
 function eventDeliveryLabel(event) {
-  return event.extendedProps?.delivery === "live" ? "直播" : "录播";
+  return event.extendedProps?.delivery === "live" ? t("直播") : t("录播");
 }
 
 function eventEpisodeLabel(event) {
   const props = event.extendedProps || {};
-  return props.special === "EX" ? "EX 特别节目" : `第 ${props.episode} 期`;
+  return props.special === "EX" ? t("EX 特别节目") : t("第 {count} 期", { count: props.episode });
 }
 
 function eventStateClass(event) {
@@ -410,7 +419,7 @@ function goToToday() {
 function renderEventContent(info) {
   const props = info.event.extendedProps;
   const cast = eventCast(info.event);
-  const deliveryLabel = props.delivery === "live" ? "直播" : "录播";
+  const deliveryLabel = props.delivery === "live" ? t("直播") : t("录播");
   const content = document.createElement("div");
   content.className = "program-event-content";
 
@@ -424,7 +433,7 @@ function renderEventContent(info) {
   deliveryDot.title = deliveryLabel;
   markerStack.append(deliveryDot);
 
-  const categoryLabel = props.category === "official" ? "官方节目" : "个人节目";
+  const categoryLabel = props.category === "official" ? t("官方节目") : t("个人节目");
   const categoryMarker = document.createElement("span");
   categoryMarker.className = `program-event-category-marker ${props.category === "official" ? "official" : "personal"}`;
   categoryMarker.setAttribute("role", "img");
@@ -439,7 +448,7 @@ function renderEventContent(info) {
   strip.className = `program-event-color-strip${cast.length ? "" : " empty"}`;
   if (cast.length) {
     strip.setAttribute("role", "img");
-    strip.setAttribute("aria-label", `出场成员：${cast.map(member => member.name).join("、")}`);
+    strip.setAttribute("aria-label", `${t("出场成员")}: ${cast.map(member => member.name).join(", ")}`);
     strip.title = cast.map(member => member.name).join("、");
     cast.forEach(member => {
       const segment = document.createElement("span");
@@ -478,7 +487,7 @@ async function loadCalendar(info) {
     allEvents.value = data.events;
     if (selectedEvent.value && !selectedProgram.value) closeDrawer();
   } catch (requestError) {
-    error.value = requestError.message || "节目日历加载失败";
+    error.value = requestError.message || t("节目日历加载失败");
   } finally {
     loading.value = false;
   }
@@ -527,7 +536,7 @@ async function openAdminEditor(path) {
     router.push(path);
     return;
   }
-  editAccessNotice.value = editAccessMessage;
+  editAccessNotice.value = editAccessMessage.value;
 }
 
 onMounted(() => {
@@ -544,37 +553,37 @@ onUnmounted(() => {
 <template>
   <main class="page programs-page" :class="{ 'programs-list-mode': viewMode === 'list' }">
     <div class="programs-topline">
-      <div>
-        <p class="eyebrow">PROGRAM ARCHIVE</p>
-        <h1>节目档案</h1>
-        <p class="programs-intro">整理虹咲官方节目与成员个人节目，按排期查看每周和每月更新。</p>
-      </div>
-      <RouterLink class="back" to="/music">← 返回音乐目录</RouterLink>
+       <div>
+         <p class="eyebrow">PROGRAM ARCHIVE</p>
+         <h1>{{ t("节目档案") }}</h1>
+         <p class="programs-intro">{{ t("整理虹咲官方节目与成员个人节目，按排期查看每周和每月更新。") }}</p>
+       </div>
+       <RouterLink class="back" to="/music">← {{ t("返回音乐目录") }}</RouterLink>
     </div>
 
       <p v-if="error" class="state error">{{ error }}</p>
       <div class="program-layout">
         <section class="program-calendar-card">
           <div class="section-heading">
-           <div><p class="eyebrow">SCHEDULE / CALENDAR</p><h2>播出日历</h2></div>
+            <div><p class="eyebrow">SCHEDULE / CALENDAR</p><h2>{{ t("播出日历") }}</h2></div>
            <div class="program-calendar-heading-actions">
-             <RouterLink class="secondary program-action-button" to="/programs/archive">已录入节目</RouterLink>
-             <div class="program-view-switch" role="tablist" aria-label="节目视图">
-               <button type="button" :class="{ selected: viewMode === 'calendar' }" role="tab" :aria-selected="viewMode === 'calendar'" @click="viewMode = 'calendar'">日历</button>
-               <button type="button" :class="{ selected: viewMode === 'list' }" role="tab" :aria-selected="viewMode === 'list'" @click="viewMode = 'list'">列表</button>
+             <RouterLink class="secondary program-action-button" to="/programs/archive">{{ t("已录入节目") }}</RouterLink>
+             <div class="program-view-switch" role="tablist" :aria-label="t('节目视图')">
+               <button type="button" :class="{ selected: viewMode === 'calendar' }" role="tab" :aria-selected="viewMode === 'calendar'" @click="viewMode = 'calendar'">{{ t("日历") }}</button>
+               <button type="button" :class="{ selected: viewMode === 'list' }" role="tab" :aria-selected="viewMode === 'list'" @click="viewMode = 'list'">{{ t("列表") }}</button>
              </div>
            </div>
           </div>
           <div class="program-calendar-tools">
             <div class="program-filter-group">
               <div class="program-calendar-filter program-cast-filter">
-                <span class="program-calendar-filter-label">筛选</span>
+               <span class="program-calendar-filter-label">{{ t("筛选") }}</span>
                 <details ref="castFilterDetails" class="program-cast-filter-details">
                   <summary class="program-cast-filter-summary"><strong>{{ castFilterLabel }}</strong><b>⌄</b></summary>
                   <div class="program-cast-filter-panel">
                     <div class="program-cast-filter-actions">
-                      <button type="button" class="secondary program-action-button" @click="selectAllCast">全选</button>
-                      <button type="button" class="secondary program-action-button" @click="clearCastFilter">清空</button>
+                      <button type="button" class="secondary program-action-button" @click="selectAllCast">{{ t("全选") }}</button>
+                      <button type="button" class="secondary program-action-button" @click="clearCastFilter">{{ t("清空") }}</button>
                     </div>
                     <div class="program-cast-tags">
                       <button v-for="member in NIJIGASAKI_CAST" :key="member.name" type="button" class="program-cast-tag" :class="{ selected: filters.cast.includes(member.name) }" :aria-pressed="filters.cast.includes(member.name)" @click="toggleCastFilter(member.name)"><i class="program-cast-dot" :style="{ backgroundColor: member.color }"></i>{{ member.name }}</button>
@@ -582,45 +591,45 @@ onUnmounted(() => {
                   </div>
                 </details>
               </div>
-              <label class="program-calendar-filter">播出方式
-                <select v-model="filters.delivery" aria-label="按播出方式筛选">
-                  <option value="">直播与录播</option>
-                  <option value="live">直播</option>
-                  <option value="recorded">录播</option>
-                </select>
-              </label>
-              <button v-if="activeFilterCount" type="button" class="secondary program-action-button program-clear-filter" @click="clearFilters">清除筛选</button>
+             <label class="program-calendar-filter">{{ t("播出方式") }}
+               <select v-model="filters.delivery" :aria-label="t('按播出方式筛选')">
+                 <option value="">{{ t("直播与录播") }}</option>
+                 <option value="live">{{ t("直播") }}</option>
+                 <option value="recorded">{{ t("录播") }}</option>
+               </select>
+             </label>
+             <button v-if="activeFilterCount" type="button" class="secondary program-action-button program-clear-filter" @click="clearFilters">{{ t("清除筛选") }}</button>
             </div>
             <div class="program-calendar-jump">
-              <label><span class="sr-only">年份</span><select v-model.number="jumpYear" aria-label="选择年份"><option v-for="year in yearOptions" :key="year" :value="year">{{ year }} 年</option></select></label>
-              <label><span class="sr-only">月份</span><select v-model.number="jumpMonth" aria-label="选择月份"><option v-for="month in monthOptions" :key="month.value" :value="month.value">{{ month.label }}</option></select></label>
-              <button type="button" class="program-action-button" @click="jumpToMonth">跳转</button>
+               <label><span class="sr-only">{{ t("年份") }}</span><select v-model.number="jumpYear" :aria-label="t('选择年份')"><option v-for="year in yearOptions" :key="year" :value="year">{{ year }} {{ t("年") }}</option></select></label>
+               <label><span class="sr-only">{{ t("月份") }}</span><select v-model.number="jumpMonth" :aria-label="t('选择月份')"><option v-for="month in monthOptions" :key="month.value" :value="month.value">{{ month.value }} {{ t("月") }}</option></select></label>
+               <button type="button" class="program-action-button" @click="jumpToMonth">{{ t("跳转") }}</button>
             </div>
           </div>
           <div class="program-calendar-summary">
-           <span>{{ filteredProgramCount }} 个节目 · {{ monthEvents.length }} 期</span>
-           <span v-if="activeFilterCount">已应用 {{ activeFilterCount }} 项筛选</span>
+            <span>{{ filteredProgramCount }} {{ t("个节目") }} · {{ monthEvents.length }} {{ t("期") }}</span>
+            <span v-if="activeFilterCount">{{ t("已应用 {count} 项筛选", { count: activeFilterCount }) }}</span>
         </div>
         <div class="program-calendar-note">
-          <span><i class="program-legend-dot official"></i>官方节目</span>
-          <span><i class="program-legend-dot personal"></i>个人节目</span>
-          <span><i class="program-legend-dot live"></i>直播</span>
-          <span><i class="program-legend-dot recorded"></i>录播</span>
-          <span><i class="program-legend-state aired"></i>已播出</span>
-          <span><i class="program-legend-state upcoming"></i>未播出</span>
-          <span><i class="program-legend-dot cancelled"></i>已取消</span>
-          <small>点击单集查看节目详情</small>
+          <span><i class="program-legend-dot official"></i>{{ t("官方节目") }}</span>
+          <span><i class="program-legend-dot personal"></i>{{ t("个人节目") }}</span>
+          <span><i class="program-legend-dot live"></i>{{ t("直播") }}</span>
+          <span><i class="program-legend-dot recorded"></i>{{ t("录播") }}</span>
+          <span><i class="program-legend-state aired"></i>{{ t("已播出") }}</span>
+          <span><i class="program-legend-state upcoming"></i>{{ t("未播出") }}</span>
+          <span><i class="program-legend-dot cancelled"></i>{{ t("已取消") }}</span>
+          <small>{{ t("点击单集查看节目详情") }}</small>
          </div>
-         <div class="program-calendar-sticky-header" aria-label="日历导航和星期">
+         <div class="program-calendar-sticky-header" :aria-label="t('日历导航和星期')">
            <div class="program-calendar-sticky-heading">
              <div class="program-calendar-sticky-nav">
-               <button type="button" aria-label="上个月" title="上个月" @click="previousMonth">←</button>
-               <button type="button" aria-label="今天" title="今天" @click="goToToday">今天</button>
-               <button type="button" aria-label="下个月" title="下个月" @click="nextMonth">→</button>
+                <button type="button" :aria-label="t('上个月')" :title="t('上个月')" @click="previousMonth">←</button>
+                <button type="button" :aria-label="t('今天')" :title="t('今天')" @click="goToToday">{{ t("今天") }}</button>
+                <button type="button" :aria-label="t('下个月')" :title="t('下个月')" @click="nextMonth">→</button>
              </div>
              <strong>{{ visibleMonthLabel }}</strong>
            </div>
-           <div v-show="viewMode === 'calendar'" class="program-calendar-weekdays" aria-label="星期">
+            <div v-show="viewMode === 'calendar'" class="program-calendar-weekdays" :aria-label="t('星期')">
              <span v-for="weekday in weekdayNames" :key="weekday">{{ weekday }}</span>
            </div>
           </div>
@@ -628,21 +637,21 @@ onUnmounted(() => {
             <div class="program-calendar-touch-zone" :class="calendarAnimationClass" @touchstart.passive="handleCalendarTouchStart" @touchend.passive="handleCalendarTouchEnd" @touchcancel.passive="handleCalendarTouchCancel">
               <FullCalendar ref="calendarRef" class="program-calendar" :options="calendarOptions" />
             </div>
-            <p v-if="!filteredEvents.length && !loading" class="muted program-empty">当前筛选没有匹配的节目。</p>
+             <p v-if="!filteredEvents.length && !loading" class="muted program-empty">{{ t("当前筛选没有匹配的节目。") }}</p>
           </div>
         <div v-if="viewMode === 'list'" class="program-list-view">
           <div class="program-list-heading">
-            <div><p class="eyebrow">MONTHLY RUNNING ORDER</p><h3>{{ visibleMonthLabel }}节目列表</h3></div>
+             <div><p class="eyebrow">MONTHLY RUNNING ORDER</p><h3>{{ visibleMonthLabel }}{{ t("节目列表") }}</h3></div>
             <span class="section-count">{{ monthEvents.length }} EVENTS</span>
           </div>
-          <p v-if="!listGroups.length" class="muted program-empty">这个月没有符合筛选条件的节目。</p>
+           <p v-if="!listGroups.length" class="muted program-empty">{{ t("这个月没有符合筛选条件的节目。") }}</p>
           <section v-for="group in listGroups" :key="group.date" class="program-list-date-group">
-            <div class="program-list-date"><strong>{{ listDateLabel(group.date) }}</strong><span>{{ group.events.length }} 期</span></div>
+             <div class="program-list-date"><strong>{{ listDateLabel(group.date) }}</strong><span>{{ group.events.length }} {{ t("期") }}</span></div>
              <button v-for="event in group.events" :key="event.id" type="button" class="program-list-event" :class="eventStateClass(event)" @click="openEvent(event)">
-               <span v-if="eventCast(event).length" class="program-list-cast-line" aria-label="出场成员"><i v-for="member in eventCast(event)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
-               <span class="program-list-time">{{ eventTime(event) || "全天" }}</span>
+               <span v-if="eventCast(event).length" class="program-list-cast-line" :aria-label="t('出场成员')"><i v-for="member in eventCast(event)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
+               <span class="program-list-time">{{ eventTime(event) || t("全天") }}</span>
               <span class="program-list-main"><strong>{{ event.title }}</strong><small>{{ eventDeliveryLabel(event) }} · {{ occurrenceAirStatus(event.extendedProps) }}</small></span>
-              <span v-if="eventCast(event).length" class="program-list-cast" aria-label="出场成员"><i v-for="member in eventCast(event)" :key="member.name" :style="{ '--cast-color': member.color }" :title="member.name"></i></span>
+               <span v-if="eventCast(event).length" class="program-list-cast" :aria-label="t('出场成员')"><i v-for="member in eventCast(event)" :key="member.name" :style="{ '--cast-color': member.color }" :title="member.name"></i></span>
               <span class="program-list-arrow" aria-hidden="true">→</span>
             </button>
           </section>
@@ -654,62 +663,62 @@ onUnmounted(() => {
       <div v-if="drawerOpen" class="program-drawer-backdrop" @click="closeDrawer"></div>
     </Transition>
     <Transition name="program-drawer-panel">
-      <aside v-if="drawerOpen && selectedEvent && selectedProgram" class="program-drawer" aria-label="节目详情">
-      <div class="program-drawer-header">
-        <span class="eyebrow">PROGRAM DETAILS</span>
-        <button type="button" class="icon-button" aria-label="关闭详情" title="关闭详情" @click="closeDrawer">×</button>
+       <aside v-if="drawerOpen && selectedEvent && selectedProgram" class="program-drawer" :aria-label="t('节目详情')">
+       <div class="program-drawer-header">
+         <span class="eyebrow">{{ t("节目详情") }}</span>
+         <button type="button" class="icon-button" :aria-label="t('关闭详情')" :title="t('关闭详情')" @click="closeDrawer">×</button>
       </div>
       <div class="program-drawer-body">
          <div class="program-drawer-tags">
             <span class="program-kind" :class="`program-kind-${selectedProgram.category}`">{{ programType(selectedProgram) }}</span>
-           <span class="program-subprogram-key">{{ selectedProgram.subprogram_name || "主节目" }}</span>
+            <span class="program-subprogram-key">{{ selectedProgram.subprogram_name || t("主节目") }}</span>
            <span class="program-status" :class="`status-${selectedProgram.status}`">{{ programStatus(selectedProgram) }}</span>
-           <span v-if="selectedProgram.update_status === 'updated'" class="program-update-status">{{ updateStatusLabel(selectedProgram) }}</span>
+            <span v-if="selectedProgram.update_status === 'updated'" class="program-update-status">{{ updateStatusLabel(selectedProgram) }}</span>
         </div>
           <h2>{{ selectedProgram.title }}</h2>
           <div class="program-occurrence-card" :class="{ cancelled: selectedEvent.occurrenceStatus === 'cancelled' }">
-            <span v-if="eventCast(selectedEvent).length" class="program-drawer-cast-line" role="img" :aria-label="`出场成员：${eventCast(selectedEvent).map(member => member.name).join('、')}`" :title="eventCast(selectedEvent).map(member => member.name).join('、')"><i v-for="member in eventCast(selectedEvent)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
-               <span>{{ eventEpisodeLabel({ extendedProps: selectedEvent }) }} · {{ selectedEvent.delivery === "live" ? "直播" : "录播" }} · {{ occurrenceAirStatus(selectedEvent) }}</span>
+             <span v-if="eventCast(selectedEvent).length" class="program-drawer-cast-line" role="img" :aria-label="`${t('出场成员')}：${eventCast(selectedEvent).map(member => member.name).join('、')}`" :title="eventCast(selectedEvent).map(member => member.name).join('、')"><i v-for="member in eventCast(selectedEvent)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
+                <span>{{ eventEpisodeLabel({ extendedProps: selectedEvent }) }} · {{ selectedEvent.delivery === "live" ? t("直播") : t("录播") }} · {{ occurrenceAirStatus(selectedEvent) }}</span>
            <strong v-if="selectedEvent.occurrenceTitle" class="program-occurrence-title">{{ selectedEvent.occurrenceTitle }}</strong>
            <strong>{{ fullDateLabel(selectedEvent.date) }}</strong>
           <b v-if="selectedEvent.time">{{ selectedEvent.time }}</b>
-           <small>显示时区：{{ deviceTimeZone }}；排期时区：{{ timezoneLabel(selectedEvent.timezone) }}</small>
-           <p v-if="selectedEvent.adjustedDate">原定 {{ fullDateLabel(selectedEvent.originalDate) }}，本期已改期</p>
-           <p v-if="selectedEvent.occurrenceStatus === 'cancelled'">本期已取消</p>
-            <template v-if="selectedEvent.guests?.length">
-              <p>本期嘉宾</p>
+            <small>{{ t("显示时区") }}：{{ deviceTimeZone }}；{{ t("排期时区") }}：{{ timezoneLabel(selectedEvent.timezone) }}</small>
+            <p v-if="selectedEvent.adjustedDate">{{ t("原定") }} {{ fullDateLabel(selectedEvent.originalDate) }}，{{ t("本期已改期") }}</p>
+            <p v-if="selectedEvent.occurrenceStatus === 'cancelled'">{{ t("本期已取消") }}</p>
+             <template v-if="selectedEvent.guests?.length">
+               <p>{{ t("本期嘉宾") }}</p>
               <div class="program-guest-tags">
                 <span v-for="guest in selectedEvent.guests" :key="guest">{{ guest }}</span>
               </div>
             </template>
-            <p v-if="selectedEvent.absentMembers?.length" class="program-occurrence-absence">本期缺席：{{ selectedEvent.absentMembers.join("、") }}</p>
+             <p v-if="selectedEvent.absentMembers?.length" class="program-occurrence-absence">{{ t("本期缺席：") }}{{ selectedEvent.absentMembers.join("、") }}</p>
             <p v-if="selectedEvent.note">{{ selectedEvent.note }}</p>
         </div>
         <p v-if="selectedProgram.description" class="program-description">{{ selectedProgram.description }}</p>
         <dl class="program-meta">
-           <dt>节目状态</dt><dd>{{ programStatus(selectedProgram) }}</dd>
+            <dt>{{ t("节目状态") }}</dt><dd>{{ programStatus(selectedProgram) }}</dd>
             <template v-if="selectedProgram.parent_id">
-              <dt>子节目名称</dt><dd>{{ selectedProgram.subprogram_name }}</dd>
+               <dt>{{ t("子节目名称") }}</dt><dd>{{ selectedProgram.subprogram_name }}</dd>
             </template>
-            <dt>节目属性</dt><dd>{{ formatLabel(selectedProgram) }}</dd>
-          <dt>更新排期</dt><dd>{{ scheduleLabel(selectedProgram) }}</dd>
-          <dt>已播期数</dt><dd>{{ selectedProgram.episode_count }} 期</dd>
-           <dt>参与成员</dt>
+             <dt>{{ t("节目属性") }}</dt><dd>{{ formatLabel(selectedProgram) }}</dd>
+           <dt>{{ t("更新排期") }}</dt><dd>{{ scheduleLabel(selectedProgram) }}</dd>
+           <dt>{{ t("已播期数") }}</dt><dd>{{ selectedProgram.episode_count }} {{ t("期") }}</dd>
+            <dt>{{ t("参与成员") }}</dt>
            <dd>
              <div v-if="selectedProgram.people.length" class="program-people-tags">
                <span v-for="person in selectedProgram.people" :key="person">{{ person }}</span>
              </div>
-             <span v-else class="muted">未填写</span>
+              <span v-else class="muted">{{ t("未填写") }}</span>
            </dd>
            <template v-if="relatedLinkItem(selectedProgram)">
-             <dt>相关链接</dt>
+              <dt>{{ t("相关链接") }}</dt>
              <dd><a class="program-meta-link" :href="relatedLinkItem(selectedProgram).href" target="_blank" rel="noopener noreferrer">{{ relatedLinkItem(selectedProgram).display }} ↗</a></dd>
            </template>
            <template v-for="link in occurrenceLinkItems(selectedEvent)" :key="link.key">
               <dt>{{ link.label }}</dt>
               <dd><a v-if="link.href" class="program-meta-link" :href="link.href" target="_blank" rel="noopener noreferrer">{{ link.display }} ↗</a><span v-else>{{ link.display }}</span></dd>
             </template>
-           <dt>排期时期</dt>
+            <dt>{{ t("排期时期") }}</dt>
           <dd>
             <ul class="program-period-summary">
               <li v-for="(period, index) in selectedProgram.periods" :key="period.id || `${period.start_date}-${index}`">
@@ -718,11 +727,11 @@ onUnmounted(() => {
               </li>
             </ul>
            </dd>
-           <dt>档案区间</dt><dd>{{ selectedProgram.start_date }}{{ selectedProgram.end_date ? ` → ${selectedProgram.end_date}` : " → 至今" }}</dd>
+            <dt>{{ t("档案区间") }}</dt><dd>{{ selectedProgram.start_date }}{{ selectedProgram.end_date ? ` → ${selectedProgram.end_date}` : ` → ${t("至今")}` }}</dd>
          </dl>
            <div class="program-drawer-links">
-             <button type="button" class="secondary program-action-button" @click="openAdminEditor(selectedAdminEditorPath)">编辑单集</button>
-             <RouterLink class="secondary program-action-button" :to="`/programs/archive/${encodeURIComponent(selectedProgram.id)}`">查看节目详情</RouterLink>
+              <button type="button" class="secondary program-action-button" @click="openAdminEditor(selectedAdminEditorPath)">{{ t("编辑单集") }}</button>
+              <RouterLink class="secondary program-action-button" :to="`/programs/archive/${encodeURIComponent(selectedProgram.id)}`">{{ t("查看节目详情") }}</RouterLink>
            </div>
            <p v-if="editAccessNotice" class="program-edit-access-notice" role="status">
              {{ editAccessNotice }}

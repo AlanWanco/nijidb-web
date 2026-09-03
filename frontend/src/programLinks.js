@@ -1,3 +1,5 @@
+import { t } from "./i18n";
+
 const BILIBILI_BV_PATTERN = /(?<![A-Za-z0-9])(BV[0-9A-Za-z]{10})(?![A-Za-z0-9])/i;
 
 function bilibiliId(value) {
@@ -17,14 +19,14 @@ function linkValue(item, source) {
 
 function linkItems(values) {
   return [
-    { key: "source", label: "源地址", value: linkValue("source_url", values), allowBilibili: false },
-    { key: "mirror", label: "搬运地址", value: linkValue("mirror_url", values), allowBilibili: true },
-    { key: "subtitle", label: "字幕地址", value: linkValue("subtitle_url", values), allowBilibili: true },
+    { key: "source", label: t("源地址"), value: linkValue("source_url", values), allowBilibili: false },
+    { key: "mirror", label: t("搬运地址"), value: linkValue("mirror_url", values), allowBilibili: true },
+    { key: "subtitle", label: t("字幕地址"), value: linkValue("subtitle_url", values), allowBilibili: true },
   ].filter(item => String(item.value || "").trim()).map(item => {
     const id = item.allowBilibili ? bilibiliId(item.value) : "";
     return {
       ...item,
-      display: id || "外部链接",
+      display: id || t("外部链接"),
       href: id ? `https://www.bilibili.com/video/${id}` : externalUrl(item.value),
       type: id ? "bilibili" : "external",
     };
@@ -37,7 +39,7 @@ export function occurrenceLinkItems(occurrence) {
 
 export function relatedLinkItem(program) {
   const href = externalUrl(program?.official_url);
-  return href ? { key: "related", label: "相关链接", display: "外部链接", href, type: "external" } : null;
+  return href ? { key: "related", label: t("相关链接"), display: t("外部链接"), href, type: "external" } : null;
 }
 
 export function programAdminPath(programId, { panel = "edit", occurrenceId = "", occurrenceDate = "" } = {}) {

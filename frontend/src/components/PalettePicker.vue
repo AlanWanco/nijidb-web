@@ -1,6 +1,7 @@
 <script setup>
 import { computed, ref } from "vue";
 import { PALETTES } from "../theme";
+import { t } from "../i18n";
 
 const props = defineProps({
   flavor: { type: String, required: true },
@@ -21,12 +22,12 @@ function choose(key) {
 
 <template>
   <details class="palette-picker" :open="open" @toggle="open = $event.currentTarget.open">
-    <summary class="icon-button" aria-label="选择 Catppuccin 主题色" title="选择 Catppuccin 主题色">
+    <summary class="icon-button" :aria-label="t('选择 Catppuccin 主题色')" :title="t('选择 Catppuccin 主题色')">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="7" cy="7" r="2.3"/><circle cx="17" cy="7" r="2.3"/><circle cx="7" cy="17" r="2.3"/><circle cx="17" cy="17" r="2.3"/></svg>
     </summary>
     <div class="palette-menu">
       <strong>{{ flavorName }} · {{ selectedColor[1] }}</strong>
-      <div class="palette-swatches" role="group" :aria-label="`${flavorName} 主题色`">
+      <div class="palette-swatches" role="group" :aria-label="`${flavorName} ${t('主题色')}`">
         <button
           v-for="[key, name, hex] in palette"
           :key="key"

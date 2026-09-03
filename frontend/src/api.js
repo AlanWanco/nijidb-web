@@ -1,3 +1,5 @@
+import { t } from "./i18n";
+
 export async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
   headers.set("Accept", "application/json");
@@ -10,7 +12,7 @@ export async function api(path, options = {}) {
   const contentType = response.headers.get("content-type") || "";
   const payload = contentType.includes("application/json") ? await response.json() : await response.text();
   if (!response.ok) {
-    const error = new Error(typeof payload === "object" ? payload.detail || "请求失败" : "请求失败");
+    const error = new Error(typeof payload === "object" ? payload.detail || t("请求失败") : t("请求失败"));
     error.status = response.status;
     throw error;
   }

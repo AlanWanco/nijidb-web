@@ -315,7 +315,7 @@ onMounted(loadSettings);
           </section>
            <section class="settings-card backup">
              <div class="form-heading"><span class="form-number">06</span><div><p class="form-kicker">DATA SAFETY</p><h2>数据库备份与还原</h2></div></div>
-             <p class="muted">备份包含设置、节目档案、发行资料和同步记录，不包含封面图片。JSON 导入前和数据库还原前会自动保存备份到数据卷的 <code>/data/backups</code> 文件夹。</p>
+              <p class="muted">备份包含设置、节目档案、发行资料和同步记录，不包含封面图片。JSON 导入前、数据库还原前和每天 00:00（Asia/Tokyo）会自动保存备份到数据卷的 <code>/data/backups</code> 文件夹，最多保留最近 30 份。</p>
              <p v-if="backupMessage" class="success">{{ backupMessage }}</p>
              <p v-if="backupError" class="state error">{{ backupError }}</p>
              <div class="backup-actions">
@@ -324,7 +324,7 @@ onMounted(loadSettings);
                <button type="button" class="secondary" :disabled="restoring || !backupFile" @click="restoreBackup">{{ restoring ? "还原中……" : "还原所选备份" }}</button>
              </div>
              <small v-if="backupFile">已选择：{{ backupFile.name }}</small>
-             <div class="backup-list-heading"><div><strong>已保存的数据库备份</strong><small>自动备份和手动备份都会保留在列表中。</small></div><button type="button" class="secondary backup-refresh-button" :disabled="backupsLoading" @click="loadBackups">{{ backupsLoading ? "读取中……" : "刷新列表" }}</button></div>
+              <div class="backup-list-heading"><div><strong>已保存的数据库备份</strong><small>自动备份和手动备份都会保留在列表中，最多保留最近 30 份。</small></div><button type="button" class="secondary backup-refresh-button" :disabled="backupsLoading" @click="loadBackups">{{ backupsLoading ? "读取中……" : "刷新列表" }}</button></div>
              <p v-if="backupsLoading" class="muted">正在读取数据库备份……</p>
              <p v-else-if="!databaseBackups.length" class="muted">还没有保存的数据库备份。</p>
              <ol v-else class="backup-list">

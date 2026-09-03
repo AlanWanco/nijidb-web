@@ -37,6 +37,7 @@ COVER_CACHE_VERSION_PATH = DB_PATH.parent / ".cover-cache-version"
 FRONTEND_DIST = ROOT / "frontend" / "dist"
 PASSWORD_ITERATIONS = 310_000
 BACKUP_MAX_BYTES = 32 * 1024 * 1024
+BACKUP_RETENTION_COUNT = 30
 PROGRAM_JSON_FORMAT = "nijidb-program"
 PROGRAM_JSON_VERSION = 2
 PROGRAM_IMPORT_MAX_OCCURRENCES = 2000
@@ -80,6 +81,28 @@ def backup_database_to(destination: Path) -> None:
         source.close()
 
 
+def prune_database_backups() -> int:
+    candidates = []
+    for path in BACKUP_DIR.glob("nijidb-backup-*.sqlite3"):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        candidates.append((stat.st_mtime_ns, path.name, path))
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    removed = 0
+    for _, _, path in candidates[BACKUP_RETENTION_COUNT:]:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            print(f"[backup] cleanup failed {path.name}: {type(exc).__name__}", flush=True)
+        else:
+            removed += 1
+    return removed
+
+
 def create_persistent_database_backup(reason: str) -> Path:
     normalized_reason = re.sub(r"[^a-z0-9]+", "-", reason.lower()).strip("-") or "manual"
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -92,6 +115,7 @@ def create_persistent_database_backup(reason: str) -> Path:
     except Exception:
         remove_file(temporary_path)
         raise
+    prune_database_backups()
     return backup_path
 
 
@@ -2436,14 +2460,35 @@ async def detail_scheduler() -> None:
         await wait_or_stop(seconds)
 
 
+def next_daily_backup_at(current: datetime) -> datetime:
+    return (current + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+async def database_backup_scheduler() -> None:
+    while not stop_event.is_set():
+        current = datetime.now(JAPAN_TZ)
+        next_run = next_daily_backup_at(current)
+        await wait_or_stop(max(1, int((next_run - current).total_seconds())))
+        if stop_event.is_set():
+            return
+        try:
+            async with sync_lock:
+                backup_path = create_persistent_database_backup("daily")
+            print(f"[backup] daily backup created: {backup_path.name}", flush=True)
+        except Exception as exc:
+            print(f"[backup] daily backup failed: {type(exc).__name__}: {exc}", flush=True)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    prune_database_backups()
     source_task = asyncio.create_task(source_scheduler())
     detail_task = asyncio.create_task(detail_scheduler())
+    backup_task = asyncio.create_task(database_backup_scheduler())
     yield
     stop_event.set()
-    await asyncio.gather(source_task, detail_task)
+    await asyncio.gather(source_task, detail_task, backup_task)
 
 
 app = FastAPI(title="Nijigasaki DB", lifespan=lifespan)

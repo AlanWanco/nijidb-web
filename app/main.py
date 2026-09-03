@@ -229,6 +229,63 @@ def verify_password(password: str, encoded: str) -> bool:
         return False
 
 
+def migrate_occurrence_date_time_constraint(conn: sqlite3.Connection) -> None:
+    unique_indexes = conn.execute("PRAGMA index_list(program_occurrences)").fetchall()
+    has_date_only_constraint = False
+    for index in unique_indexes:
+        if not index["unique"]:
+            continue
+        index_name = str(index["name"]).replace('"', '""')
+        columns = [row["name"] for row in conn.execute(f'PRAGMA index_info("{index_name}")')]
+        if columns == ["program_id", "original_date"]:
+            has_date_only_constraint = True
+            break
+    if not has_date_only_constraint:
+        return
+
+    conn.execute("DROP INDEX IF EXISTS idx_program_occurrences_program")
+    conn.execute("ALTER TABLE program_occurrences RENAME TO program_occurrences_legacy")
+    conn.execute("""
+        CREATE TABLE program_occurrences (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          program_id TEXT NOT NULL,
+          original_date TEXT NOT NULL,
+          title TEXT NOT NULL DEFAULT '',
+          generated_date TEXT NOT NULL DEFAULT '',
+          original_time TEXT NOT NULL DEFAULT '',
+          delivery TEXT NOT NULL DEFAULT '',
+          shift_following_days INTEGER NOT NULL DEFAULT 0,
+          source_url TEXT NOT NULL DEFAULT '',
+          mirror_url TEXT NOT NULL DEFAULT '',
+          subtitle_url TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'scheduled',
+          adjusted_date TEXT NOT NULL DEFAULT '',
+          adjusted_time TEXT NOT NULL DEFAULT '',
+          note TEXT NOT NULL DEFAULT '',
+          guests TEXT NOT NULL DEFAULT '[]',
+          special TEXT NOT NULL DEFAULT '',
+          materialized INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(program_id, original_date, original_time)
+        )
+    """)
+    conn.execute("""
+        INSERT INTO program_occurrences (
+          id, program_id, original_date, title, generated_date, original_time, delivery, shift_following_days,
+          source_url, mirror_url, subtitle_url, status, adjusted_date, adjusted_time, note, guests, special,
+          materialized, created_at, updated_at
+        )
+        SELECT
+          id, program_id, original_date, title, generated_date, original_time, delivery, shift_following_days,
+          source_url, mirror_url, subtitle_url, status, adjusted_date, adjusted_time, note, guests, special,
+          materialized, created_at, updated_at
+        FROM program_occurrences_legacy
+    """)
+    conn.execute("DROP TABLE program_occurrences_legacy")
+    conn.execute("CREATE INDEX idx_program_occurrences_program ON program_occurrences(program_id, original_date, original_time)")
+
+
 def init_db() -> None:
     if os.getenv("ADMIN_SECRET", "change-me") == "change-me":
         print("WARNING: ADMIN_SECRET is using the insecure default")
@@ -317,10 +374,10 @@ def init_db() -> None:
            materialized INTEGER NOT NULL DEFAULT 0,
            created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
-          UNIQUE(program_id, original_date)
-        );
-        CREATE INDEX IF NOT EXISTS idx_program_occurrences_program ON program_occurrences(program_id, original_date);
-        """)
+           UNIQUE(program_id, original_date, original_time)
+         );
+         CREATE INDEX IF NOT EXISTS idx_program_occurrences_program ON program_occurrences(program_id, original_date, original_time);
+         """)
         program_columns = {row["name"] for row in conn.execute("PRAGMA table_info(programs)")}
         program_migrations = {
             "status": "TEXT NOT NULL DEFAULT 'ongoing'",
@@ -361,6 +418,7 @@ def init_db() -> None:
             conn.execute("ALTER TABLE program_occurrences ADD COLUMN delivery TEXT NOT NULL DEFAULT ''")
         if "shift_following_days" not in occurrence_columns:
             conn.execute("ALTER TABLE program_occurrences ADD COLUMN shift_following_days INTEGER NOT NULL DEFAULT 0")
+        migrate_occurrence_date_time_constraint(conn)
         seed_program_periods(conn)
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(releases)")}
         if "position" not in columns:
@@ -1076,7 +1134,7 @@ def normalize_import_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], l
     weekday_periods = program_values["periods"]
     occurrences: list[dict[str, Any]] = []
     warnings: list[str] = []
-    seen_dates: set[str] = set()
+    seen_slots: set[tuple[str, str]] = set()
     skipped_generated = 0
     for index, raw_occurrence in enumerate(raw_occurrences, start=1):
         if not isinstance(raw_occurrence, dict):
@@ -1085,9 +1143,13 @@ def normalize_import_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], l
         original_date = import_date(item.get("original_date") or item.get("date"), f"第 {index} 期原定日期")
         if not original_date:
             raise ValueError(f"第 {index} 期原定日期不能为空")
-        if original_date in seen_dates:
-            raise ValueError(f"第 {index} 期与其他单集重复使用原定日期：{original_date}")
-        seen_dates.add(original_date)
+        original_time = str(item.get("original_time") or item.get("time") or "").strip()
+        slot = (original_date, original_time)
+        if slot in seen_slots or (not original_time and any(date_value == original_date for date_value, _ in seen_slots)) or any(
+            date_value == original_date and not time_value for date_value, time_value in seen_slots
+        ):
+            raise ValueError(f"第 {index} 期与其他单集重复使用播出日期和时间：{original_date} {original_time or '未设置时间'}")
+        seen_slots.add(slot)
         generated_date = import_date(item.get("generated_date"), f"第 {index} 期生成日期")
         matching_period = next(
             (
@@ -1128,7 +1190,7 @@ def normalize_import_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], l
             "original_date": original_date,
             "title": str(item.get("title") or "").strip(),
             "generated_date": generated_date,
-            "original_time": str(item.get("original_time") or item.get("time") or "").strip(),
+            "original_time": original_time,
             "delivery": import_choice(item.get("delivery"), delivery_aliases),
             "shift_following_days": item.get("shift_following_days", 0),
             "source_url": item.get("source_url", ""),
@@ -1444,10 +1506,13 @@ def program_occurrence_records(program: dict[str, Any], range_start: date, range
     forecast_end = datetime.now(occurrence_timezone(program.get("timezone"))).date() + timedelta(days=PROGRAM_FORECAST_DAYS)
     generation_end = min(range_end, program_end) if program_end else min(range_end, forecast_end)
     override_rows = program.get("occurrences", [])
-    overrides = {str(row.get("generated_date") or row["original_date"]): row for row in override_rows}
+    overrides = {
+        (str(row.get("generated_date") or row["original_date"]), str(row.get("original_time") or "").strip()): row
+        for row in override_rows
+    }
     periods = program.get("periods") or ([legacy_period(program)] if program.get("start_date") else [])
     records: list[dict[str, Any]] = []
-    base_date_keys: set[str] = set()
+    base_date_keys: set[tuple[str, str]] = set()
     if boolean_value(program.get("auto_generate"), True):
         for period in periods:
             period_start = date.fromisoformat(period["start_date"])
@@ -1456,15 +1521,16 @@ def program_occurrence_records(program: dict[str, Any], range_start: date, range
             if period_generation_end < period_start:
                 continue
             base_dates = period_recurring_dates(period, period_generation_end)
-            base_date_keys.update(item.isoformat() for item in base_dates)
+            schedule_time = str(period.get("schedule_time") or "").strip()
+            base_date_keys.update((item.isoformat(), schedule_time) for item in base_dates)
             schedule_shift_days = 0
             can_shift_following = period.get("frequency") == "weekly" and int(period.get("week_interval") or 1) == 2
             for original in base_dates:
                 record = occurrence_record(
                     program,
                     original,
-                    overrides.get(original.isoformat()),
-                    period.get("schedule_time", ""),
+                    overrides.get((original.isoformat(), schedule_time)) or overrides.get((original.isoformat(), "")),
+                    schedule_time,
                     period.get("timezone", "Asia/Tokyo"),
                     period.get("frequency", "weekly"),
                     schedule_shift_days=schedule_shift_days,
@@ -1475,7 +1541,10 @@ def program_occurrence_records(program: dict[str, Any], range_start: date, range
     for row in override_rows:
         stored_generated_date = str(row.get("generated_date") or "").strip()
         generated_date = stored_generated_date or row["original_date"]
-        if generated_date in base_date_keys:
+        row_time = str(row.get("original_time") or "").strip()
+        if (generated_date, row_time) in base_date_keys or (not row_time and any(
+            date_value == generated_date for date_value, _ in base_date_keys
+        )):
             continue
         original = date.fromisoformat(row["original_date"])
         anchor = date.fromisoformat(generated_date)
@@ -1506,6 +1575,73 @@ def effective_program_occurrences(program: dict[str, Any], range_start: date, ra
         [record for record in records if record["status"] not in {"cancelled", "deleted"} and range_start <= record["date"] <= range_end],
         key=lambda record: (record["date"], record["time"], record["original_date"]),
     )
+
+
+def occurrence_effective_slot(values: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(values.get("adjusted_date") or values.get("original_date") or "").strip(),
+        str(values.get("adjusted_time") or values.get("original_time") or "").strip(),
+    )
+
+
+def occurrence_slots_conflict(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    if left.get("status") in {"cancelled", "deleted"} or right.get("status") in {"cancelled", "deleted"}:
+        return False
+    left_date, left_time = occurrence_effective_slot(left)
+    right_date, right_time = occurrence_effective_slot(right)
+    if not left_date or left_date != right_date:
+        return False
+    return not left_time or not right_time or left_time == right_time
+
+
+def validate_occurrence_slots(
+    occurrences: list[dict[str, Any]],
+    candidate: dict[str, Any] | None = None,
+    exclude_id: int | None = None,
+) -> None:
+    items = [
+        occurrence
+        for occurrence in occurrences
+        if exclude_id is None or str(occurrence.get("id") or "") != str(exclude_id)
+    ]
+    if candidate is not None:
+        items.append(candidate)
+    for index, occurrence in enumerate(items):
+        for previous in items[:index]:
+            if occurrence_slots_conflict(previous, occurrence):
+                date_value, time_value = occurrence_effective_slot(occurrence)
+                raise ValueError(f"同一节目同一天的单集必须使用不同的播出时间：{date_value} {time_value or '未设置时间'}")
+
+
+def occurrence_validation_range(
+    program: dict[str, Any],
+    candidate: dict[str, Any] | None = None,
+) -> tuple[date, date]:
+    values = [program, *(program.get("periods") or []), *(program.get("occurrences") or [])]
+    if candidate is not None:
+        values.append(candidate)
+    dates = []
+    for value in values:
+        for key in ("start_date", "end_date", "original_date", "adjusted_date", "generated_date"):
+            date_value = str(value.get(key) or "").strip()
+            if date_value:
+                dates.append(date.fromisoformat(date_value))
+    if not dates:
+        today = datetime.now(JAPAN_TZ).date()
+        return today, today
+    return min(dates), max(dates)
+
+
+def validate_program_occurrence_slots(
+    program: dict[str, Any],
+    candidate: dict[str, Any] | None = None,
+    exclude_id: int | None = None,
+) -> None:
+    stored_occurrences = [dict(item) for item in program.get("occurrences") or []]
+    validate_occurrence_slots(stored_occurrences, candidate, exclude_id)
+    range_start, range_end = occurrence_validation_range(program, candidate)
+    records = program_occurrence_records(program, range_start, range_end)
+    validate_occurrence_slots(records, candidate, exclude_id)
 
 
 def occurrence_episode_numbers(records: list[dict[str, Any]], episode_start: int = 1) -> list[int]:
@@ -1856,7 +1992,7 @@ def occurrence_start_value(value_date: date, value_time: str, timezone_value: st
 
 def program_calendar_events(program: dict[str, Any], range_start: date, range_end: date) -> list[dict[str, Any]]:
     program_start = date.fromisoformat(program["start_date"]) if program.get("start_date") else range_start
-    records = sorted(program_occurrence_records(program, program_start, range_end), key=lambda record: record["original_date"])
+    records = sorted(program_occurrence_records(program, program_start, range_end), key=lambda record: (record["original_date"], record["original_time"], record["id"] or 0))
     episode_numbers = occurrence_episode_numbers(records, program_episode_start(program))
     events = []
     for index, record in enumerate(records):
@@ -1878,7 +2014,7 @@ def program_calendar_events(program: dict[str, Any], range_start: date, range_en
             event_title += f" · {occurrence_title}"
         event_title += " · 已取消" if record["status"] == "cancelled" else update_suffix
         event: dict[str, Any] = {
-            "id": f"{program['id']}-{record['original_date']}",
+            "id": f"{program['id']}-{record['original_date']}-{record['original_time'] or 'all-day'}-{record['id'] or 'generated'}",
             "title": event_title,
             "start": occurrence_start_value(record["date"], record["time"], record["timezone"]),
             "allDay": not bool(record["time"]),
@@ -2769,6 +2905,7 @@ async def api_preview_program_import(request: Request) -> dict[str, Any]:
     try:
         options = import_payload_options(payload)
         program, occurrences, warnings = normalize_import_payload(payload)
+        validate_program_occurrence_slots({**program, "occurrences": occurrences})
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     matches = program_import_matches(options["source_program_id"], program["title"])
@@ -2793,6 +2930,7 @@ async def api_import_program(request: Request) -> dict[str, Any]:
             if options["target_mode"] == "overwrite" and not existing:
                 raise ValueError("覆盖导入需要选择一个存在的目标节目")
             program_values = validate_program_group(conn, program_values, target_id)
+        validate_program_occurrence_slots({**program_values, "occurrences": occurrence_values})
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -2818,7 +2956,7 @@ async def api_import_program(request: Request) -> dict[str, Any]:
                     }
                     insert_occurrence_row(conn, values)
     except sqlite3.IntegrityError as exc:
-        raise HTTPException(409, "导入的单集存在重复原定日期") from exc
+        raise HTTPException(409, "导入的单集存在重复播出日期和时间") from exc
 
     action = "覆盖节目" if overwrite else "导入节目"
     log_database_activity("program", f"{action}：{program_values['title']}（{len(occurrence_values)} 期）")
@@ -2956,7 +3094,7 @@ def program_occurrence_list(program: dict[str, Any], start: str = "", end: str =
     range_end = calendar_date(end, default_end)
     if range_end < range_start:
         raise HTTPException(400, "排期结束日期不能早于开始日期")
-    records = sorted(program_occurrence_records(program, program_start, range_end), key=lambda item: item["original_date"])
+    records = sorted(program_occurrence_records(program, program_start, range_end), key=lambda item: (item["original_date"], item["original_time"], item["id"] or 0))
     episode_numbers = occurrence_episode_numbers(records, program_episode_start(program))
     visible_records = [
         (episode_numbers[index], record)
@@ -2999,6 +3137,13 @@ async def api_create_occurrence(program_id: str, request: Request) -> dict[str, 
         values = normalized_occurrence(payload)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    program_data = next((item for item in program_rows() if item["id"] == program_id), None)
+    if not program_data:
+        raise HTTPException(404, "节目不存在")
+    try:
+        validate_program_occurrence_slots(program_data, values)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     now = datetime.now(timezone.utc).isoformat()
     values.update({"program_id": program_id, "created_at": now, "updated_at": now})
     with db() as conn:
@@ -3008,7 +3153,7 @@ async def api_create_occurrence(program_id: str, request: Request) -> dict[str, 
         try:
             cursor = insert_occurrence_row(conn, values)
         except sqlite3.IntegrityError as exc:
-            raise HTTPException(409, "该原定日期已经有单集调整") from exc
+            raise HTTPException(409, "该播出日期和时间已经有单集调整") from exc
         row = conn.execute("SELECT * FROM program_occurrences WHERE id = ?", (cursor.lastrowid,)).fetchone()
     log_database_activity("program", f"新增单集：{program['title']}（{values['original_date']}）")
     return {"occurrence": occurrence_payload(row)}
@@ -3040,7 +3185,7 @@ async def api_restore_rescheduled_occurrences(program_id: str, request: Request)
                 (datetime.now(timezone.utc).isoformat(), program_id),
             )
         except sqlite3.IntegrityError as exc:
-            raise HTTPException(409, "改期时间覆盖后出现重复的原定日期") from exc
+            raise HTTPException(409, "改期时间覆盖后出现重复的播出日期和时间") from exc
     if result.rowcount:
         log_database_activity("program", f"恢复改期单集：{program['title']}（{result.rowcount} 期）")
     return {"count": result.rowcount}
@@ -3055,6 +3200,9 @@ async def api_update_occurrence(program_id: str, occurrence_id: int, request: Re
         raise HTTPException(400, "请求格式无效") from exc
     if not isinstance(payload, dict):
         raise HTTPException(400, "请求格式无效")
+    program_data = next((item for item in program_rows() if item["id"] == program_id), None)
+    if not program_data:
+        raise HTTPException(404, "节目不存在")
     with db() as conn:
         existing = conn.execute("SELECT * FROM program_occurrences WHERE id = ? AND program_id = ?", (occurrence_id, program_id)).fetchone()
         program = conn.execute("SELECT title FROM programs WHERE id = ?", (program_id,)).fetchone()
@@ -3066,6 +3214,10 @@ async def api_update_occurrence(program_id: str, occurrence_id: int, request: Re
         values = normalized_occurrence({**dict(existing), **payload})
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    try:
+        validate_program_occurrence_slots(program_data, values, occurrence_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     values.update({"id": occurrence_id, "program_id": program_id, "updated_at": datetime.now(timezone.utc).isoformat()})
     with db() as conn:
         try:
@@ -3075,7 +3227,7 @@ async def api_update_occurrence(program_id: str, occurrence_id: int, request: Re
                 adjusted_date=:adjusted_date, adjusted_time=:adjusted_time, note=:note, guests=:guests, special=:special, updated_at=:updated_at
                 WHERE id=:id AND program_id=:program_id""", values)
         except sqlite3.IntegrityError as exc:
-            raise HTTPException(409, "该原定日期已经有单集调整") from exc
+            raise HTTPException(409, "该播出日期和时间已经有单集调整") from exc
         row = conn.execute("SELECT * FROM program_occurrences WHERE id = ?", (occurrence_id,)).fetchone()
     log_database_activity("program", f"修改单集：{program['title']}（{values['original_date']}）")
     return {"occurrence": occurrence_payload(row)}

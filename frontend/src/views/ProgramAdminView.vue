@@ -150,6 +150,7 @@ const occurrenceDeleteLabel = computed(() => occurrenceDraft.status === "deleted
 const selectedOccurrenceIndex = computed(() => {
   if (!occurrenceDraft.original_date) return -1;
   return occurrenceRows.value.findIndex(row => row.original_date === occurrenceDraft.original_date
+    && row.original_time === occurrenceDraft.original_time
     && (occurrenceDraft.id ? String(row.id) === String(occurrenceDraft.id) : row.generated_date === occurrenceDraft.generated_date));
 });
 const canPreviousOccurrence = computed(() => selectedOccurrenceIndex.value > 0);
@@ -865,7 +866,7 @@ function editOccurrence(row) {
 }
 
 function occurrenceRowKey(row) {
-  return `${row.id || "generated"}-${row.original_date}`;
+  return `${row.id || "generated"}-${row.original_date}-${row.original_time || "all-day"}`;
 }
 
 function setOccurrenceItemRef(row, element) {
@@ -1285,7 +1286,7 @@ onUnmounted(() => {
       <p v-if="occurrenceLoading" class="state">正在读取单集排期……</p>
        <div v-else class="occurrence-editor-layout">
          <div ref="occurrenceListRef" class="occurrence-list">
-              <button v-for="row in occurrenceRows" :key="occurrenceRowKey(row)" :ref="element => setOccurrenceItemRef(row, element)" type="button" class="occurrence-list-item" :class="{ selected: occurrenceDraft.original_date === row.original_date }" @click="editOccurrence(row)">
+               <button v-for="row in occurrenceRows" :key="occurrenceRowKey(row)" :ref="element => setOccurrenceItemRef(row, element)" type="button" class="occurrence-list-item" :class="{ selected: occurrenceRowKey(occurrenceDraft) === occurrenceRowKey(row) }" @click="editOccurrence(row)">
              <span><b>{{ occurrenceEpisodeLabel(row) }}</b><em :class="{ cancelled: row.status === 'cancelled', deleted: row.status === 'deleted', aired: row.aired }">{{ occurrenceStatus(row) }}</em></span>
              <strong>{{ row.date }}</strong>
               <small v-if="row.title" class="occurrence-list-title">{{ row.title }}</small>

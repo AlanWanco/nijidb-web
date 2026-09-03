@@ -16,7 +16,14 @@ export const NIJIGASAKI_CAST = [
   { name: "矢野妃菜喜", aliases: [], color: "#2f2f2f" },
 ];
 
-export function castColorSegments(people = []) {
-  const names = new Set((Array.isArray(people) ? people : []).map(person => String(person || "").trim()).filter(Boolean));
-  return NIJIGASAKI_CAST.filter(member => [member.name, ...member.aliases].some(name => names.has(name)));
+export function castMemberMatches(people = [], member) {
+  if (!member) return false;
+  const names = new Set((Array.isArray(people) ? people : [])
+    .map(person => String(person || "").trim())
+    .filter(Boolean));
+  return [member.name, ...member.aliases].some(name => names.has(name));
+}
+
+export function castColorSegments(people = [], absent = []) {
+  return NIJIGASAKI_CAST.filter(member => castMemberMatches(people, member) && !castMemberMatches(absent, member));
 }

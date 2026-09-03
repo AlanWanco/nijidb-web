@@ -4,7 +4,7 @@ import FullCalendar from "@fullcalendar/vue3";
 import dayGridPlugin from "@fullcalendar/daygrid";
 import interactionPlugin from "@fullcalendar/interaction";
 import zhCnLocale from "@fullcalendar/core/locales/zh-cn";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { api } from "../api";
 import { NIJIGASAKI_CAST, castColorSegments } from "../programCast";
 import { occurrenceLinkItems, programAdminPath, relatedLinkItem } from "../programLinks";
@@ -28,13 +28,16 @@ const calendarRef = ref(null);
 const viewMode = ref("calendar");
 const filters = reactive({ cast: [], delivery: "" });
 const today = new Date();
-const visibleMonth = ref(monthKey(today));
-const jumpYear = ref(today.getFullYear());
-const jumpMonth = ref(today.getMonth() + 1);
 const castFilterDetails = ref(null);
 const adminAuthenticated = ref(false);
 const editAccessNotice = ref("");
 const router = useRouter();
+const route = useRoute();
+const requestedMonth = computed(() => routeMonth(route.params.month));
+const initialMonth = requestedMonth.value || monthKey(today);
+const visibleMonth = ref(initialMonth);
+const jumpYear = ref(Number(initialMonth.slice(0, 4)));
+const jumpMonth = ref(Number(initialMonth.slice(5, 7)));
 const editAccessMessage = "需要登录管理员后才能编辑；未来将开放编辑审核。";
 
 const monthOptions = Array.from({ length: 12 }, (_, index) => ({
@@ -88,6 +91,7 @@ const calendarOptions = reactive({
   fixedWeekCount: false,
   dayMaxEvents: false,
   eventDisplay: "block",
+  initialDate: `${initialMonth}-01`,
   eventContent: renderEventContent,
   headerToolbar: false,
   events: [],
@@ -95,7 +99,7 @@ const calendarOptions = reactive({
   eventClick: selectEvent,
   eventDidMount: ({ event, el }) => {
     const props = event.extendedProps || {};
-    const cast = castColorSegments(eventPeople(event));
+    const cast = eventCast(event);
     const fallback = props.category === "official" ? "#5979ad" : "#5b9478";
     el.style.setProperty("--program-event-color", cast[0]?.color || fallback);
     el.setAttribute("aria-label", event.title);
@@ -111,6 +115,14 @@ const calendarOptions = reactive({
 watch(filteredEvents, events => {
   calendarOptions.events = events;
   if (selectedEvent.value && !events.some(event => event.id === selectedEvent.value.eventId)) closeDrawer();
+}, { immediate: true });
+
+watch(requestedMonth, month => {
+  if (!month) return;
+  visibleMonth.value = month;
+  jumpYear.value = Number(month.slice(0, 4));
+  jumpMonth.value = Number(month.slice(5, 7));
+  calendarRef.value?.getApi?.().gotoDate(`${month}-01`);
 }, { immediate: true });
 
 const selectedProgram = computed(() => {
@@ -220,6 +232,13 @@ function monthKey(value) {
   return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}`;
 }
 
+function routeMonth(value) {
+  const raw = String(value || "");
+  if (!/^\d{6}$/.test(raw)) return "";
+  const month = Number(raw.slice(4, 6));
+  return month >= 1 && month <= 12 ? `${raw.slice(0, 4)}-${raw.slice(4, 6)}` : "";
+}
+
 function nextMonthKey(value) {
   const [year, month] = value.split("-").map(Number);
   return monthKey(new Date(year, month, 1, 12));
@@ -237,22 +256,22 @@ function eventTime(event) {
 }
 
 function eventPeople(event) {
-  const props = event.extendedProps || {};
+  const props = event.extendedProps || event || {};
   return [...(props.people || []), ...(props.guests || [])].map(person => String(person || "").trim()).filter(Boolean);
 }
 
 function eventCast(event) {
-  return castColorSegments(eventPeople(event));
+  const props = event.extendedProps || event || {};
+  return castColorSegments(eventPeople(event), props.absentMembers || props.absent_members);
 }
 
 function eventMatchesFilters(event) {
   const props = event.extendedProps || {};
   if (filters.delivery && props.delivery !== filters.delivery) return false;
   if (!filters.cast.length || allCastSelected.value) return true;
-  const people = eventPeople(event);
+  const cast = eventCast(event);
   return filters.cast.some(selectedName => {
-    const member = NIJIGASAKI_CAST.find(item => item.name === selectedName);
-    return Boolean(member && [member.name, ...member.aliases].some(name => people.includes(name)));
+    return cast.some(member => member.name === selectedName);
   });
 }
 
@@ -337,7 +356,7 @@ function goToToday() {
 
 function renderEventContent(info) {
   const props = info.event.extendedProps;
-  const cast = castColorSegments([...(props.people || []), ...(props.guests || [])]);
+  const cast = eventCast(info.event);
   const deliveryLabel = props.delivery === "live" ? "直播" : "录播";
   const content = document.createElement("div");
   content.className = "program-event-content";
@@ -588,22 +607,24 @@ onUnmounted(() => document.removeEventListener("click", closeCastFilter));
            <span class="program-status" :class="`status-${selectedProgram.status}`">{{ programStatus(selectedProgram) }}</span>
            <span v-if="selectedProgram.update_status === 'updated'" class="program-update-status">{{ updateStatusLabel(selectedProgram) }}</span>
         </div>
-         <h2>{{ selectedProgram.title }}</h2>
-         <div class="program-occurrence-card" :class="{ cancelled: selectedEvent.occurrenceStatus === 'cancelled' }">
-              <span>{{ eventEpisodeLabel({ extendedProps: selectedEvent }) }} · {{ selectedEvent.delivery === "live" ? "直播" : "录播" }} · {{ occurrenceAirStatus(selectedEvent) }}</span>
+          <h2>{{ selectedProgram.title }}</h2>
+          <div class="program-occurrence-card" :class="{ cancelled: selectedEvent.occurrenceStatus === 'cancelled' }">
+            <span v-if="eventCast(selectedEvent).length" class="program-drawer-cast-line" role="img" :aria-label="`出场成员：${eventCast(selectedEvent).map(member => member.name).join('、')}`" :title="eventCast(selectedEvent).map(member => member.name).join('、')"><i v-for="member in eventCast(selectedEvent)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
+               <span>{{ eventEpisodeLabel({ extendedProps: selectedEvent }) }} · {{ selectedEvent.delivery === "live" ? "直播" : "录播" }} · {{ occurrenceAirStatus(selectedEvent) }}</span>
            <strong v-if="selectedEvent.occurrenceTitle" class="program-occurrence-title">{{ selectedEvent.occurrenceTitle }}</strong>
            <strong>{{ fullDateLabel(selectedEvent.date) }}</strong>
           <b v-if="selectedEvent.time">{{ selectedEvent.time }}</b>
            <small>显示时区：{{ deviceTimeZone }}；排期时区：{{ timezoneLabel(selectedEvent.timezone) }}</small>
            <p v-if="selectedEvent.adjustedDate">原定 {{ fullDateLabel(selectedEvent.originalDate) }}，本期已改期</p>
            <p v-if="selectedEvent.occurrenceStatus === 'cancelled'">本期已取消</p>
-           <template v-if="selectedEvent.guests?.length">
-             <p>本期嘉宾</p>
-             <div class="program-guest-tags">
-               <span v-for="guest in selectedEvent.guests" :key="guest">{{ guest }}</span>
-             </div>
-           </template>
-           <p v-if="selectedEvent.note">{{ selectedEvent.note }}</p>
+            <template v-if="selectedEvent.guests?.length">
+              <p>本期嘉宾</p>
+              <div class="program-guest-tags">
+                <span v-for="guest in selectedEvent.guests" :key="guest">{{ guest }}</span>
+              </div>
+            </template>
+            <p v-if="selectedEvent.absentMembers?.length" class="program-occurrence-absence">本期缺席：{{ selectedEvent.absentMembers.join("、") }}</p>
+            <p v-if="selectedEvent.note">{{ selectedEvent.note }}</p>
         </div>
         <p v-if="selectedProgram.description" class="program-description">{{ selectedProgram.description }}</p>
         <dl class="program-meta">

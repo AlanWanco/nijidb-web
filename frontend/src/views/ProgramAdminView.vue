@@ -4,7 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import VueDatePicker from "@vuepic/vue-datepicker";
 import "@vuepic/vue-datepicker/dist/main.css";
 import { api } from "../api";
-import { NIJIGASAKI_CAST, castColorSegments } from "../programCast";
+import { NIJIGASAKI_CAST, castColorSegments, castMemberMatches } from "../programCast";
 
 const weekdayNames = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const castCandidates = NIJIGASAKI_CAST.map(member => member.name);
@@ -112,6 +112,7 @@ function blankOccurrence() {
     adjusted_time: "",
     note: "",
     guests: [],
+    absent_members: [],
     generated: false,
     individual: false,
     materialized: false,
@@ -123,6 +124,8 @@ function blankOccurrence() {
 const form = reactive(blankProgram());
 const occurrenceDraft = reactive(blankOccurrence());
 const peopleOptions = computed(() => castCandidates);
+const occurrenceGuestOptions = NIJIGASAKI_CAST;
+const occurrenceAbsentCast = computed(() => NIJIGASAKI_CAST.filter(member => castMemberMatches(occurrenceDraft.absent_members, member)));
 const allProgramCastSelected = computed(() => programCastFilter.value.length === castCandidates.length);
 const programCastFilterLabel = computed(() => {
   if (!programCastFilter.value.length || allProgramCastSelected.value) return "全部 Cast";
@@ -638,6 +641,10 @@ function programCast(program) {
   return castColorSegments(program.people);
 }
 
+function occurrenceCast(row) {
+  return castColorSegments([...(form.people || []), ...(row.guests || [])], row.absent_members);
+}
+
 function addCustomPerson() {
   const person = customPerson.value.trim();
   if (person && !form.people.includes(person)) form.people.push(person);
@@ -656,6 +663,28 @@ function addOccurrenceGuest() {
 
 function removeOccurrenceGuest(guest) {
   occurrenceDraft.guests = occurrenceDraft.guests.filter(item => item !== guest);
+}
+
+function occurrenceGuestSelected(member) {
+  return !castMemberMatches(occurrenceDraft.absent_members, member)
+    && (castMemberMatches(form.people, member) || castMemberMatches(occurrenceDraft.guests, member));
+}
+
+function occurrenceGuestIsFixed(member) {
+  return castMemberMatches(form.people, member);
+}
+
+function toggleOccurrenceGuest(member) {
+  const selected = occurrenceGuestSelected(member);
+  const matchingGuest = occurrenceDraft.guests.find(guest => [member.name, ...member.aliases].includes(String(guest || "").trim()));
+  const matchingAbsence = occurrenceDraft.absent_members.find(absent => [member.name, ...member.aliases].includes(String(absent || "").trim()));
+  if (selected) {
+    if (occurrenceGuestIsFixed(member) && !matchingAbsence) occurrenceDraft.absent_members.push(member.name);
+    if (matchingGuest) removeOccurrenceGuest(matchingGuest);
+    return;
+  }
+  if (matchingAbsence) occurrenceDraft.absent_members = occurrenceDraft.absent_members.filter(item => item !== matchingAbsence);
+  if (!occurrenceGuestIsFixed(member) && !matchingGuest) occurrenceDraft.guests.push(member.name);
 }
 
 function setOccurrenceStatus(status) {
@@ -855,8 +884,9 @@ function editOccurrence(row) {
     adjusted_date: row.adjusted_date || (row.status === "rescheduled" ? row.original_date || "" : ""),
      adjusted_time: row.adjusted_time || row.original_time || "",
      note: row.note || "",
-    guests: [...(row.guests || [])],
-    generated: Boolean(row.generated),
+     guests: [...(row.guests || [])],
+     absent_members: [...(row.absent_members || [])],
+     generated: Boolean(row.generated),
     individual: Boolean(row.individual),
     materialized: Boolean(row.materialized),
     manual: Boolean(row.manual),
@@ -944,6 +974,7 @@ function occurrenceBody(overrides = {}) {
     adjusted_time: occurrenceDraft.adjusted_time,
     note: occurrenceDraft.note,
     guests: [...occurrenceDraft.guests],
+    absent_members: [...occurrenceDraft.absent_members],
     ...overrides,
   };
 }
@@ -1285,12 +1316,14 @@ onUnmounted(() => {
          <p class="muted occurrence-help">选择某一期后，可单独改期、取消、补录或增加本期嘉宾。当前显示 {{ generatedOccurrenceCount }} 个自动单集{{ materializedOccurrenceCount ? `，${materializedOccurrenceCount} 个已播出并保存` : "" }}{{ adjustedOccurrenceCount ? `，${adjustedOccurrenceCount} 个单独调整` : "" }}{{ deletedOccurrenceCount ? `，${deletedOccurrenceCount} 个已删除` : "" }}。</p>
       <p v-if="occurrenceLoading" class="state">正在读取单集排期……</p>
        <div v-else class="occurrence-editor-layout">
-         <div ref="occurrenceListRef" class="occurrence-list">
-               <button v-for="row in occurrenceRows" :key="occurrenceRowKey(row)" :ref="element => setOccurrenceItemRef(row, element)" type="button" class="occurrence-list-item" :class="{ selected: occurrenceRowKey(occurrenceDraft) === occurrenceRowKey(row) }" @click="editOccurrence(row)">
-             <span><b>{{ occurrenceEpisodeLabel(row) }}</b><em :class="{ cancelled: row.status === 'cancelled', deleted: row.status === 'deleted', aired: row.aired }">{{ occurrenceStatus(row) }}</em></span>
+          <div ref="occurrenceListRef" class="occurrence-list">
+                <button v-for="row in occurrenceRows" :key="occurrenceRowKey(row)" :ref="element => setOccurrenceItemRef(row, element)" type="button" class="occurrence-list-item" :class="{ selected: occurrenceRowKey(occurrenceDraft) === occurrenceRowKey(row) }" @click="editOccurrence(row)">
+              <span v-if="occurrenceCast(row).length" class="occurrence-list-cast-line" role="img" :aria-label="`出场成员：${occurrenceCast(row).map(member => member.name).join('、')}`" :title="occurrenceCast(row).map(member => member.name).join('、')"><i v-for="member in occurrenceCast(row)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
+              <span><b>{{ occurrenceEpisodeLabel(row) }}</b><em :class="{ cancelled: row.status === 'cancelled', deleted: row.status === 'deleted', aired: row.aired }">{{ occurrenceStatus(row) }}</em></span>
              <strong>{{ row.date }}</strong>
               <small v-if="row.title" class="occurrence-list-title">{{ row.title }}</small>
-              <small>{{ row.status === "deleted" ? "已删除，不参与生成" : row.generated ? "自动生成" : row.materialized ? "已播出并保存" : row.adjusted_date ? `原定 ${row.original_date}` : "已单独调整" }}{{ row.guests?.length ? ` · 嘉宾 ${row.guests.length} 人` : "" }}</small>
+               <small>{{ row.status === "deleted" ? "已删除，不参与生成" : row.generated ? "自动生成" : row.materialized ? "已播出并保存" : row.adjusted_date ? `原定 ${row.original_date}` : "已单独调整" }}{{ row.guests?.length ? ` · 嘉宾 ${row.guests.length} 人` : "" }}{{ row.absent_members?.length ? ` · 缺席 ${row.absent_members.length} 人` : "" }}</small>
+               <small v-if="row.absent_members?.length" class="occurrence-list-absence">缺席：{{ row.absent_members.join("、") }}</small>
           </button>
           <p v-if="!occurrenceRows.length" class="muted">当前区间没有自动生成的单集，可以手动添加一条记录。</p>
         </div>
@@ -1349,17 +1382,25 @@ onUnmounted(() => {
               <small>源地址填写 HTTP/HTTPS 地址；搬运地址和字幕地址支持 BV 号、B 站地址或其他 HTTP/HTTPS 地址。</small>
             </div>
             <label>备注<textarea v-model="occurrenceDraft.note" rows="3" placeholder="例如：延期至下周、嘉宾变更……"></textarea></label>
-           <div class="program-form-field occurrence-guests-field">
-             <span class="program-field-label">本期嘉宾</span>
-             <div v-if="occurrenceDraft.guests.length" class="people-picker">
-               <span v-for="guest in occurrenceDraft.guests" :key="guest" class="person-tag selected custom-person-tag"><span>{{ guest }}</span><button type="button" aria-label="移除本期嘉宾" @click="removeOccurrenceGuest(guest)">×</button></span>
-             </div>
-             <div class="custom-person-entry">
-               <input v-model="occurrenceGuestInput" placeholder="添加本期嘉宾" @keydown.enter.prevent="addOccurrenceGuest">
-                <button type="button" class="secondary program-action-button" @click="addOccurrenceGuest">添加嘉宾</button>
-             </div>
-             <small>仅作用于这一期，不会修改节目默认参与成员。</small>
-           </div>
+            <div class="program-form-field occurrence-guests-field">
+              <span class="program-field-label">本期嘉宾</span>
+              <div v-if="occurrenceDraft.guests.length" class="people-picker">
+                <span v-for="guest in occurrenceDraft.guests" :key="guest" class="person-tag selected custom-person-tag"><i v-if="castMember(guest)" class="program-cast-dot" :style="{ backgroundColor: castMember(guest).color }"></i><span>{{ guest }}</span><button type="button" aria-label="移除本期嘉宾" @click="removeOccurrenceGuest(guest)">×</button></span>
+              </div>
+              <div class="occurrence-guest-cast-picker">
+                <span class="program-field-label">虹咲成员（可多选）</span>
+                <div v-if="occurrenceGuestOptions.length" class="people-picker">
+                  <button v-for="member in occurrenceGuestOptions" :key="member.name" type="button" class="person-tag" :class="{ selected: occurrenceGuestSelected(member), 'program-guest-fixed': occurrenceGuestIsFixed(member) }" :aria-pressed="occurrenceGuestSelected(member)" :title="occurrenceGuestIsFixed(member) ? '节目固定成员，默认出席；取消选择将记录为缺席' : '选中后记录为本期嘉宾'" @click="toggleOccurrenceGuest(member)"><i class="program-cast-dot" :style="{ backgroundColor: member.color }"></i>{{ member.name }}</button>
+                </div>
+                <small>节目固定成员默认已选；取消选择会记录为本期缺席。其他成员默认未选，选中后记录为本期嘉宾。</small>
+              </div>
+              <p v-if="occurrenceAbsentCast.length" class="occurrence-absence-note">本期缺席：{{ occurrenceAbsentCast.map(member => member.name).join("、") }}</p>
+              <div class="custom-person-entry">
+                <input v-model="occurrenceGuestInput" placeholder="添加本期嘉宾" @keydown.enter.prevent="addOccurrenceGuest">
+                 <button type="button" class="secondary program-action-button" @click="addOccurrenceGuest">添加嘉宾</button>
+              </div>
+              <small>虹咲成员选择和缺席记录仅作用于这一期；自定义嘉宾也不会修改节目默认参与成员。</small>
+            </div>
           <div class="actions">
              <button class="program-action-button" :disabled="occurrenceSaving">{{ occurrenceSaving ? "保存中……" : "保存本期调整" }}</button>
               <button v-if="occurrenceDraft.id || occurrenceDraft.generated" type="button" class="program-action-button" :class="occurrenceDraft.status === 'deleted' ? 'secondary' : 'danger'" :disabled="occurrenceSaving" @click="toggleOccurrenceDeletion">{{ occurrenceDeleteLabel }}</button>
@@ -1404,7 +1445,7 @@ onUnmounted(() => {
             <article v-for="(occurrence, index) in importPreview.occurrences" :key="`${occurrence.original_date}-${index}`" class="program-json-occurrence-item">
                <div class="program-json-occurrence-topline"><strong>{{ occurrence.original_date }}</strong><span>{{ occurrence.original_time || "全天" }}</span><span v-if="occurrence.status === 'rescheduled'">→ {{ occurrence.adjusted_date }}{{ occurrence.adjusted_time ? ` ${occurrence.adjusted_time}` : "" }}</span><span>{{ importDeliveryLabel(occurrence.delivery) }}</span><span>{{ importSpecialLabel(occurrence.special) }}</span><span :class="{ cancelled: occurrence.status === 'cancelled', rescheduled: occurrence.status === 'rescheduled', deleted: occurrence.status === 'deleted' }">{{ importStatusLabel(occurrence.status) }}</span></div>
                <strong v-if="occurrence.title" class="program-json-occurrence-title">{{ occurrence.title }}</strong>
-              <p v-if="occurrence.guests?.length || occurrence.note">{{ occurrence.guests?.length ? `嘉宾：${occurrence.guests.join("、")}` : "" }}{{ occurrence.guests?.length && occurrence.note ? " · " : "" }}{{ occurrence.note }}</p>
+               <p v-if="occurrence.guests?.length || occurrence.absent_members?.length || occurrence.note">{{ occurrence.guests?.length ? `嘉宾：${occurrence.guests.join("、")}` : "" }}{{ occurrence.guests?.length && (occurrence.absent_members?.length || occurrence.note) ? " · " : "" }}{{ occurrence.absent_members?.length ? `缺席：${occurrence.absent_members.join("、")}` : "" }}{{ occurrence.absent_members?.length && occurrence.note ? " · " : "" }}{{ occurrence.note }}</p>
               <small v-if="occurrence.source_url || occurrence.mirror_url || occurrence.subtitle_url">{{ [occurrence.source_url, occurrence.mirror_url, occurrence.subtitle_url].filter(Boolean).join(" · ") }}</small>
             </article>
           </div>

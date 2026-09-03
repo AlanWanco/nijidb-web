@@ -30,7 +30,8 @@
     "occurrences[].special": "普通单集使用空字符串；番外、アフタートーク、特別版、公开录音、guest 加更等统一使用 EX。EX 不占系统期数。",
     "occurrences[].status": "scheduled、rescheduled、cancelled 或 deleted。deleted 会保留为不显示的删除记录。",
     "occurrences[].note": "补充来源或播出语义；直播回看建议写明“生配信アーカイブ”，以区别于预直播 live 单集。",
-    "occurrences[].guests": "本期临时嘉宾数组，不会修改节目固定成员。"
+    "occurrences[].guests": "本期临时嘉宾数组，不会修改节目固定成员；虹咲成员使用规范日文原名。",
+    "occurrences[].absent_members": "本期明确缺席的虹咲成员数组；仅记录节目固定成员本期缺席，不要把未被邀请的非固定成员填写在这里。"
   },
   "_import_notes": [
     "期数不是 occurrences 的输入字段；EX 不占期。允许空号：不要为了补齐 #5/#7 之间的编号而伪造没有内容的单集或强行补连号，真实日期占位和后续单集按系统规则自然处理。标题中的【#N】只能作为核对提示。",
@@ -39,7 +40,7 @@
     "episode_start=0 是有效设置，适用于首集按第 0 期编号的节目；此时普通单集从 0 开始递增，EX 仍不占期。不要为了把编号改成 1 而修改日期或伪造单集。",
     "EX 统一用于番外、アフタートーク、特別版、公开录音和 guest 加更，不占期；普通期的 special 使用空字符串。直播场次和直播存档使用 delivery=live，并可在 note 写“生配信アーカイブ”；不要把直播回看误标为 recorded。",
     "一个 JSON 文件只描述一个节目系列；如果内容混入其他节目（例如“ふわふわ曖昧dream”），应拆分为独立文件，或明确标记为另一个节目，不要硬塞进当前节目。",
-    "program.people 用于节目级固定成员、主持人和常驻嘉宾；单期临时嘉宾使用 occurrences[].guests，后者不会修改节目固定成员。",
+    "program.people 用于节目级固定成员、主持人和常驻嘉宾；单期临时嘉宾使用 occurrences[].guests，固定虹咲成员本期缺席使用 occurrences[].absent_members。",
     "schedule_mode 缺省为 individual：导入的 occurrences 是准确的最终逐期数据，program.auto_generate 会被关闭，不会凭 periods 生成额外单集。",
     "需要继续按排期规则生成时，将 schedule_mode 设置为 generated；此时 program.auto_generate 会开启，occurrences 作为已保存覆盖和例外。",
     "导出默认是 individual 完整逐期快照，适合交给 AI 优化内容后覆盖导回；也可以选择 generated 规则加当前自动生成结果和例外导出。自动生成结果按系统现有约半年的生成窗口写入。",
@@ -104,7 +105,8 @@
       "note": "普通单集示例。",
       "guests": [
         "本期嘉宾"
-      ]
+      ],
+      "absent_members": []
     },
     {
       "original_date": "2026-02-04",
@@ -122,7 +124,8 @@
       "mirror_url": "",
       "subtitle_url": "",
       "note": "本期顺延一周，后续隔周排期同步顺延。",
-      "guests": []
+      "guests": [],
+      "absent_members": []
     },
     {
       "original_date": "2026-02-18",
@@ -137,7 +140,8 @@
       "mirror_url": "",
       "subtitle_url": "",
       "note": "因故取消，保留记录。",
-      "guests": []
+      "guests": [],
+      "absent_members": []
     },
     {
       "original_date": "2026-02-25",
@@ -152,7 +156,8 @@
       "mirror_url": "",
       "subtitle_url": "",
       "note": "EX 特别单集示例。",
-      "guests": []
+      "guests": [],
+      "absent_members": []
     }
   ]
 }

@@ -116,6 +116,10 @@ function programCast(program) {
   return castColorSegments(program.people || []);
 }
 
+function occurrenceCast(row) {
+  return castColorSegments([...(selectedProgram.value?.people || []), ...(row.guests || [])], row.absent_members);
+}
+
 function programMatchesCast(program) {
   if (!castFilter.value.length || allCastSelected.value) return true;
   const people = program.people || [];
@@ -352,18 +356,20 @@ onUnmounted(() => document.removeEventListener("click", closeCastFilter));
            </div>
           <p v-if="occurrenceLoading" class="state">正在读取单集排期……</p>
           <p v-else-if="!visibleOccurrences.length" class="muted">当前没有可公开显示的单集记录。</p>
-          <div v-else class="program-readonly-episodes">
-            <article v-for="row in visibleOccurrences" :key="`${row.id || 'generated'}-${row.original_date}-${row.original_time || 'all-day'}`" class="program-readonly-episode" :class="{ cancelled: row.status === 'cancelled' }">
-               <div class="program-readonly-episode-heading"><strong>{{ episodeLabel(row) }}</strong><span class="program-status" :class="occurrenceStateClass(row)">{{ occurrenceStatus(row) }}</span><strong v-if="row.title" class="program-readonly-episode-title">{{ row.title }}</strong></div>
+           <div v-else class="program-readonly-episodes">
+             <article v-for="row in visibleOccurrences" :key="`${row.id || 'generated'}-${row.original_date}-${row.original_time || 'all-day'}`" class="program-readonly-episode" :class="{ cancelled: row.status === 'cancelled' }">
+                <span v-if="occurrenceCast(row).length" class="program-readonly-episode-cast-line" role="img" :aria-label="`出场成员：${occurrenceCast(row).map(member => member.name).join('、')}`" :title="occurrenceCast(row).map(member => member.name).join('、')"><i v-for="member in occurrenceCast(row)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
+                <div class="program-readonly-episode-heading"><strong>{{ episodeLabel(row) }}</strong><span class="program-status" :class="occurrenceStateClass(row)">{{ occurrenceStatus(row) }}</span><strong v-if="row.title" class="program-readonly-episode-title">{{ row.title }}</strong></div>
                 <time>{{ dateLabel(row.date) }}{{ row.time ? ` · ${row.time}` : " · 全天" }}</time>
-                <small>{{ occurrenceSourceLabel(row) }} · {{ row.delivery === "live" ? "直播" : "录播" }}{{ row.guests?.length ? ` · 嘉宾 ${row.guests.length} 人` : "" }}</small>
+                <small>{{ occurrenceSourceLabel(row) }} · {{ row.delivery === "live" ? "直播" : "录播" }}{{ row.guests?.length ? ` · 嘉宾 ${row.guests.length} 人` : "" }}{{ row.absent_members?.length ? ` · 缺席 ${row.absent_members.length} 人` : "" }}</small>
                <div v-if="occurrenceLinkItems(row).length" class="program-episode-links">
                  <template v-for="link in occurrenceLinkItems(row)" :key="link.key">
                    <a v-if="link.href" class="program-meta-link" :href="link.href" target="_blank" rel="noopener noreferrer">{{ link.label }}：{{ link.display }} ↗</a>
                    <span v-else>{{ link.label }}：{{ link.display }}</span>
                  </template>
-               </div>
-               <p v-if="row.note">{{ row.note }}</p>
+                </div>
+                <p v-if="row.absent_members?.length" class="program-episode-absence">缺席：{{ row.absent_members.join("、") }}</p>
+                <p v-if="row.note">{{ row.note }}</p>
             </article>
           </div>
         </section>

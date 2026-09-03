@@ -41,6 +41,17 @@ BACKUP_RETENTION_COUNT = 30
 PROGRAM_JSON_FORMAT = "nijidb-program"
 PROGRAM_JSON_VERSION = 2
 PROGRAM_IMPORT_MAX_OCCURRENCES = 2000
+NIJIGASAKI_NAME_ALIASES = {
+    "大西亚玖璃": "大西亜玖璃",
+    "相良茉优": "相良茉優",
+    "前田佳织里": "前田佳織里",
+    "久保田未梦": "久保田未夢",
+    "村上奈津实": "村上奈津実",
+    "鬼头明里": "鬼頭明里",
+    "楠木灯": "楠木ともり",
+    "指出毬亚": "指出毬亜",
+    "田中智惠美": "田中ちえ美",
+}
 R2_ENDPOINT = os.getenv("R2_ENDPOINT", "").strip()
 R2_BUCKET = os.getenv("R2_BUCKET", "nijidb").strip()
 R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "").strip()
@@ -263,6 +274,7 @@ def migrate_occurrence_date_time_constraint(conn: sqlite3.Connection) -> None:
           adjusted_time TEXT NOT NULL DEFAULT '',
           note TEXT NOT NULL DEFAULT '',
           guests TEXT NOT NULL DEFAULT '[]',
+          absent_members TEXT NOT NULL DEFAULT '[]',
           special TEXT NOT NULL DEFAULT '',
           materialized INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL,
@@ -270,15 +282,17 @@ def migrate_occurrence_date_time_constraint(conn: sqlite3.Connection) -> None:
           UNIQUE(program_id, original_date, original_time)
         )
     """)
-    conn.execute("""
+    legacy_columns = {row["name"] for row in conn.execute("PRAGMA table_info(program_occurrences_legacy)")}
+    legacy_absent_members = "absent_members" if "absent_members" in legacy_columns else "'[]'"
+    conn.execute(f"""
         INSERT INTO program_occurrences (
           id, program_id, original_date, title, generated_date, original_time, delivery, shift_following_days,
-          source_url, mirror_url, subtitle_url, status, adjusted_date, adjusted_time, note, guests, special,
+          source_url, mirror_url, subtitle_url, status, adjusted_date, adjusted_time, note, guests, absent_members, special,
           materialized, created_at, updated_at
         )
         SELECT
           id, program_id, original_date, title, generated_date, original_time, delivery, shift_following_days,
-          source_url, mirror_url, subtitle_url, status, adjusted_date, adjusted_time, note, guests, special,
+          source_url, mirror_url, subtitle_url, status, adjusted_date, adjusted_time, note, guests, {legacy_absent_members}, special,
           materialized, created_at, updated_at
         FROM program_occurrences_legacy
     """)
@@ -370,6 +384,7 @@ def init_db() -> None:
            adjusted_time TEXT NOT NULL DEFAULT '',
            note TEXT NOT NULL DEFAULT '',
            guests TEXT NOT NULL DEFAULT '[]',
+           absent_members TEXT NOT NULL DEFAULT '[]',
            special TEXT NOT NULL DEFAULT '',
            materialized INTEGER NOT NULL DEFAULT 0,
            created_at TEXT NOT NULL,
@@ -404,6 +419,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE program_occurrences ADD COLUMN generated_date TEXT NOT NULL DEFAULT ''")
         if "guests" not in occurrence_columns:
             conn.execute("ALTER TABLE program_occurrences ADD COLUMN guests TEXT NOT NULL DEFAULT '[]'")
+        if "absent_members" not in occurrence_columns:
+            conn.execute("ALTER TABLE program_occurrences ADD COLUMN absent_members TEXT NOT NULL DEFAULT '[]'")
         if "materialized" not in occurrence_columns:
             conn.execute("ALTER TABLE program_occurrences ADD COLUMN materialized INTEGER NOT NULL DEFAULT 0")
         if "special" not in occurrence_columns:
@@ -419,6 +436,7 @@ def init_db() -> None:
         if "shift_following_days" not in occurrence_columns:
             conn.execute("ALTER TABLE program_occurrences ADD COLUMN shift_following_days INTEGER NOT NULL DEFAULT 0")
         migrate_occurrence_date_time_constraint(conn)
+        normalize_legacy_cast_names(conn)
         seed_program_periods(conn)
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(releases)")}
         if "position" not in columns:
@@ -614,10 +632,40 @@ def program_people(value: Any) -> list[str]:
     return [str(item).strip() for item in parsed if str(item).strip()]
 
 
+def normalize_legacy_cast_names(conn: sqlite3.Connection) -> int:
+    updated = 0
+    for table, key_column, value_column in (
+        ("programs", "id", "people"),
+        ("program_occurrences", "id", "guests"),
+        ("program_occurrences", "id", "absent_members"),
+    ):
+        rows = conn.execute(f"SELECT {key_column}, {value_column} FROM {table}").fetchall()
+        for row in rows:
+            people = program_people(row[value_column])
+            canonical = []
+            changed = False
+            for person in people:
+                name = NIJIGASAKI_NAME_ALIASES.get(person, person)
+                changed = changed or name != person
+                if name not in canonical:
+                    canonical.append(name)
+            if not changed:
+                continue
+            conn.execute(
+                f"UPDATE {table} SET {value_column} = ? WHERE {key_column} = ?",
+                (json.dumps(canonical, ensure_ascii=False), row[key_column]),
+            )
+            updated += 1
+    if updated:
+        print(f"[migration] normalized {updated} cast-name fields", flush=True)
+    return updated
+
+
 def occurrence_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     payload = dict(row)
     payload["title"] = str(payload.get("title") or "").strip()
     payload["guests"] = program_people(payload.get("guests", "[]"))
+    payload["absent_members"] = program_people(payload.get("absent_members", "[]"))
     payload["special"] = str(payload.get("special") or "").strip().upper()
     delivery = str(payload.get("delivery") or "").strip()
     payload["delivery"] = delivery if delivery in PROGRAM_DELIVERIES else ""
@@ -956,7 +1004,8 @@ def program_json_metadata() -> dict[str, Any]:
             "occurrences[].special": "普通单集使用空字符串；番外、アフタートーク、特別版、公开录音、guest 加更等统一使用 EX。EX 不占系统期数。",
             "occurrences[].status": "scheduled、rescheduled、cancelled 或 deleted。deleted 会保留为不显示的删除记录。",
             "occurrences[].note": "补充来源或播出语义；直播回看建议写明“生配信アーカイブ”，以区别于预直播 live 单集。",
-            "occurrences[].guests": "本期临时嘉宾数组，不会修改节目固定成员。",
+            "occurrences[].guests": "本期临时嘉宾数组，不会修改节目固定成员；虹咲成员使用规范日文原名。",
+            "occurrences[].absent_members": "本期明确缺席的虹咲成员数组；仅记录节目固定成员本期缺席，不要把未被邀请的非固定成员填写在这里。",
         },
         "_import_notes": [
             "期数不是 occurrences 的输入字段；EX 不占期。允许空号：不要为了补齐 #5/#7 之间的编号而伪造没有内容的单集或强行补连号，真实日期占位和后续单集按系统规则自然处理。标题中的【#N】只能作为核对提示。",
@@ -965,7 +1014,7 @@ def program_json_metadata() -> dict[str, Any]:
             "episode_start=0 是有效设置，适用于首集按第 0 期编号的节目；此时普通单集从 0 开始递增，EX 仍不占期。不要为了把编号改成 1 而修改日期或伪造单集。",
             "EX 统一用于番外、アフタートーク、特別版、公开录音和 guest 加更，不占期；普通期的 special 使用空字符串。直播场次和直播存档使用 delivery=live，并可在 note 写“生配信アーカイブ”；不要把直播回看误标为 recorded。",
             "一个 JSON 文件只描述一个节目系列；如果内容混入其他节目（例如“ふわふわ曖昧dream”），应拆分为独立文件，或明确标记为另一个节目，不要硬塞进当前节目。",
-            "program.people 用于节目级固定成员、主持人和常驻嘉宾；单期临时嘉宾使用 occurrences[].guests，后者不会修改节目固定成员。",
+            "program.people 用于节目级固定成员、主持人和常驻嘉宾；单期临时嘉宾使用 occurrences[].guests，固定虹咲成员本期缺席使用 occurrences[].absent_members。",
             "schedule_mode 缺省为 individual：导入的 occurrences 是准确的最终逐期数据，program.auto_generate 会被关闭，不会凭 periods 生成额外单集。",
             "需要继续按排期规则生成时，将 schedule_mode 设置为 generated；此时 program.auto_generate 会开启，occurrences 作为已保存覆盖和例外。",
             "导出默认是 individual 完整逐期快照，适合交给 AI 优化内容后覆盖导回；也可以选择 generated 规则加当前自动生成结果和例外导出。自动生成结果按系统现有约半年的生成窗口写入。",
@@ -1031,6 +1080,7 @@ def program_json_template() -> dict[str, Any]:
             "subtitle_url": "",
             "note": "普通单集示例。",
             "guests": ["本期嘉宾"],
+            "absent_members": [],
         },
         {
             "original_date": "2026-02-04",
@@ -1049,6 +1099,7 @@ def program_json_template() -> dict[str, Any]:
             "subtitle_url": "",
             "note": "本期顺延一周，后续隔周排期同步顺延。",
             "guests": [],
+            "absent_members": [],
         },
         {
             "original_date": "2026-02-18",
@@ -1064,6 +1115,7 @@ def program_json_template() -> dict[str, Any]:
             "subtitle_url": "",
             "note": "因故取消，保留记录。",
             "guests": [],
+            "absent_members": [],
         },
         {
             "original_date": "2026-02-25",
@@ -1079,6 +1131,7 @@ def program_json_template() -> dict[str, Any]:
             "subtitle_url": "",
             "note": "EX 特别单集示例。",
             "guests": [],
+            "absent_members": [],
         },
     ]
     return payload
@@ -1198,6 +1251,7 @@ def normalize_import_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], l
             item.get("shift_following_days") not in (None, "", 0),
             item.get("note"),
             item.get("guests"),
+            item.get("absent_members"),
         ))
         if options["schedule_mode"] == "generated" and generated_marker and not has_override_content:
             skipped_generated += 1
@@ -1218,6 +1272,7 @@ def normalize_import_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], l
             "adjusted_time": str(item.get("adjusted_time") or "").strip(),
             "note": item.get("note", ""),
             "guests": item.get("guests", []),
+            "absent_members": item.get("absent_members", []),
             "materialized": item.get("materialized", False),
         }
         occurrences.append(normalized_occurrence(occurrence_values))
@@ -1257,6 +1312,7 @@ def import_preview_payload(
             for key in ("original_date", "title", "generated_date", "original_time", "delivery", "status", "special", "adjusted_date", "adjusted_time", "shift_following_days", "source_url", "mirror_url", "subtitle_url", "note")
         }
         item["guests"] = program_people(occurrence.get("guests", []))
+        item["absent_members"] = program_people(occurrence.get("absent_members", []))
         payload["occurrences"].append(item)
     payload["warnings"] = warnings
     payload["counts"] = {"periods": len(program["periods"]), "occurrences": len(occurrences)}
@@ -1384,6 +1440,7 @@ def normalized_occurrence(values: dict[str, Any]) -> dict[str, Any]:
         "adjusted_time": adjusted_time if status == "rescheduled" else "",
         "note": str(values.get("note") or "").strip(),
         "guests": normalized_people(values.get("guests")),
+        "absent_members": normalized_people(values.get("absent_members")),
         "materialized": boolean_value(values.get("materialized"), False),
     }
 
@@ -1392,10 +1449,10 @@ def insert_occurrence_row(conn: sqlite3.Connection, values: dict[str, Any]) -> s
     values = {"materialized": 0, **values}
     return conn.execute("""INSERT INTO program_occurrences (
         program_id, original_date, title, generated_date, original_time, delivery, shift_following_days, source_url, mirror_url, subtitle_url, status,
-        adjusted_date, adjusted_time, note, guests, special, materialized, created_at, updated_at
+        adjusted_date, adjusted_time, note, guests, absent_members, special, materialized, created_at, updated_at
     ) VALUES (
         :program_id, :original_date, :title, :generated_date, :original_time, :delivery, :shift_following_days, :source_url, :mirror_url, :subtitle_url, :status,
-        :adjusted_date, :adjusted_time, :note, :guests, :special, :materialized, :created_at, :updated_at
+        :adjusted_date, :adjusted_time, :note, :guests, :absent_members, :special, :materialized, :created_at, :updated_at
     )""", values)
 
 
@@ -1509,6 +1566,7 @@ def occurrence_record(
         "adjusted_time": override.get("adjusted_time", ""),
         "note": override.get("note", ""),
         "guests": program_people(override.get("guests", [])),
+        "absent_members": program_people(override.get("absent_members", [])),
         "materialized": boolean_value(override.get("materialized"), False),
         "manual": manual,
     }
@@ -1764,6 +1822,7 @@ def materialize_generated_occurrences(conn: sqlite3.Connection, program: dict[st
             "",
             "",
             json.dumps([], ensure_ascii=False),
+            json.dumps([], ensure_ascii=False),
             record.get("special", ""),
             1,
             now,
@@ -1779,8 +1838,8 @@ def materialize_generated_occurrences(conn: sqlite3.Connection, program: dict[st
     conn.executemany(
         """INSERT OR IGNORE INTO program_occurrences (
             program_id, original_date, title, generated_date, original_time, delivery, shift_following_days, source_url, mirror_url, subtitle_url, status,
-            adjusted_date, adjusted_time, note, guests, special, materialized, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            adjusted_date, adjusted_time, note, guests, absent_members, special, materialized, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         rows,
     )
     return conn.total_changes - before
@@ -1942,6 +2001,7 @@ def program_json_occurrence_item(occurrence: dict[str, Any], freeze_effective_da
         "subtitle_url": occurrence.get("subtitle_url", ""),
         "note": occurrence.get("note", ""),
         "guests": occurrence.get("guests", []),
+        "absent_members": occurrence.get("absent_members", []),
     }
     if occurrence.get("generated_date"):
         item["generated_date"] = occurrence["generated_date"]
@@ -2069,6 +2129,7 @@ def program_calendar_events(program: dict[str, Any], range_start: date, range_en
                 "updateStatus": program.get("update_status", "updated"),
                 "note": record["note"],
                 "guests": record["guests"],
+                "absentMembers": record["absent_members"],
                 "people": program_people(program.get("people", [])),
             },
         }
@@ -3240,7 +3301,7 @@ async def api_update_occurrence(program_id: str, occurrence_id: int, request: Re
             conn.execute("""UPDATE program_occurrences SET
                 original_date=:original_date, title=:title, generated_date=:generated_date, original_time=:original_time, delivery=:delivery, shift_following_days=:shift_following_days, status=:status,
                 source_url=:source_url, mirror_url=:mirror_url, subtitle_url=:subtitle_url,
-                adjusted_date=:adjusted_date, adjusted_time=:adjusted_time, note=:note, guests=:guests, special=:special, updated_at=:updated_at
+                adjusted_date=:adjusted_date, adjusted_time=:adjusted_time, note=:note, guests=:guests, absent_members=:absent_members, special=:special, updated_at=:updated_at
                 WHERE id=:id AND program_id=:program_id""", values)
         except sqlite3.IntegrityError as exc:
             raise HTTPException(409, "该播出日期和时间已经有单集调整") from exc

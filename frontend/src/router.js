@@ -10,6 +10,7 @@ const router = createRouter({
     { path: "/music", component: () => import("./views/HomeView.vue"), meta: { title: "虹咲音乐档案" } },
     { path: "/release/:releaseId", component: () => import("./views/ReleaseView.vue"), meta: { title: "发行详情" } },
     { path: "/programs", component: () => import("./views/ProgramsView.vue"), meta: { title: "节目档案" } },
+    { path: "/programs/:month(\\d{6})", component: () => import("./views/ProgramsView.vue"), meta: { title: "节目档案" } },
     { path: "/programs/archive", component: () => import("./views/ProgramArchiveView.vue"), meta: { title: "已录入节目" } },
     { path: "/programs/archive/:programId", component: () => import("./views/ProgramArchiveView.vue"), meta: { title: "节目详情" } },
     { path: "/admin/login", component: () => import("./views/LoginView.vue"), meta: { title: "管理员登录" } },

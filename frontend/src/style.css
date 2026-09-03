@@ -2851,6 +2851,27 @@ footer {
   background: var(--cast-color);
 }
 
+.program-readonly-episode-cast-line,
+.occurrence-list-cast-line {
+  position: absolute;
+  top: 13px;
+  bottom: 13px;
+  left: 0;
+  display: flex;
+  width: 6px;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 18%, transparent);
+}
+
+.program-readonly-episode-cast-line i,
+.occurrence-list-item .occurrence-list-cast-line i {
+  min-height: 0;
+  flex: 1 1 0;
+  background: var(--cast-color);
+}
+
 .program-list-cast i {
   display: block;
   width: 8px;
@@ -3455,6 +3476,22 @@ footer {
   background: var(--accent-soft);
 }
 
+.program-occurrence-card .program-drawer-cast-line {
+  display: flex;
+  width: 100%;
+  height: 7px;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 18%, transparent);
+}
+
+.program-occurrence-card .program-drawer-cast-line i {
+  min-width: 0;
+  flex: 1 1 0;
+  background: var(--cast-color);
+}
+
 .program-occurrence-card.cancelled {
   border-left-color: var(--muted);
   background: var(--surface-alt);
@@ -3500,6 +3537,14 @@ footer {
   background: var(--surface);
   color: var(--accent);
   font-size: 10px;
+}
+
+.program-occurrence-absence,
+.program-episode-absence,
+.occurrence-list-absence,
+.occurrence-absence-note {
+  color: #c05262 !important;
+  font-weight: 600;
 }
 
 .program-admin-page .programs-topline {
@@ -4161,6 +4206,18 @@ html[data-theme="mocha"] .dp__theme_dark {
   display: flex;
   gap: 8px;
   margin-top: 10px;
+}
+
+.occurrence-guest-cast-picker {
+  margin-top: 13px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  padding-top: 12px;
+}
+
+.occurrence-guest-cast-picker > .program-field-label {
+  margin-bottom: 7px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .custom-person-entry input {
@@ -4984,11 +5041,12 @@ html[data-theme="mocha"] .dp__theme_dark {
 }
 
 .program-readonly-episode {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) max-content;
   gap: 5px 18px;
   border-top: 1px solid var(--line);
-  padding: 14px 0;
+  padding: 14px 0 14px 14px;
 }
 
 .program-readonly-episode-heading {
@@ -5018,6 +5076,10 @@ html[data-theme="mocha"] .dp__theme_dark {
 .program-readonly-episode > small {
   color: var(--muted);
   font-size: 11px;
+}
+
+.program-readonly-episode .program-episode-absence {
+  margin-top: 4px;
 }
 
 .program-readonly-episode > p {
@@ -5154,6 +5216,7 @@ html[data-theme="mocha"] .dp__theme_dark {
 }
 
 .occurrence-list-item {
+  position: relative;
   display: grid;
   width: 100%;
   gap: 4px;
@@ -5177,6 +5240,16 @@ html[data-theme="mocha"] .dp__theme_dark {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.occurrence-list-item .occurrence-list-cast-line {
+  top: 12px;
+  bottom: 12px;
+  justify-content: initial;
+}
+
+.occurrence-list-item .occurrence-list-absence {
+  color: #c05262;
 }
 
 .occurrence-list-item b {

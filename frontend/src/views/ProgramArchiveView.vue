@@ -312,8 +312,8 @@ onUnmounted(() => document.removeEventListener("click", closeCastFilter));
         <div class="section-heading">
           <div><p class="eyebrow">PROGRAM PROFILE</p><h2>{{ selectedProgram.title }}</h2></div>
           <div class="program-readonly-actions">
-            <button type="button" class="secondary program-action-button" @click="openAdminEditor(selectedAdminProgramPath)">编辑节目</button>
             <button type="button" class="secondary program-action-button" @click="returnToList">← 已录入节目</button>
+            <button type="button" class="secondary program-action-button" @click="openAdminEditor(selectedAdminProgramPath)">编辑节目</button>
           </div>
         </div>
         <div class="program-readonly-detail-grid">

@@ -2569,6 +2569,8 @@ async def api_preview_program_import(request: Request) -> dict[str, Any]:
         payload = await request.json()
     except ValueError as exc:
         raise HTTPException(400, "请求格式无效") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "请求格式无效")
     try:
         options = import_payload_options(payload)
         program, occurrences, warnings = normalize_import_payload(payload)
@@ -2585,6 +2587,8 @@ async def api_import_program(request: Request) -> dict[str, Any]:
         payload = await request.json()
     except ValueError as exc:
         raise HTTPException(400, "请求格式无效") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "请求格式无效")
     try:
         options = import_payload_options(payload)
         program_values, occurrence_values, warnings = normalize_import_payload(payload)

@@ -1210,13 +1210,28 @@ Object.assign(messages.ja, {
   "月": "月",
 });
 
-const storedLocale = localStorage.getItem("locale");
-export const locale = ref(storedLocale === "en" || storedLocale === "ja" ? storedLocale : "zh-CN");
 export const languageOptions = [
   { value: "zh-CN", label: "中文", shortLabel: "中" },
   { value: "en", label: "English", shortLabel: "EN" },
   { value: "ja", label: "日本語", shortLabel: "日" },
 ];
+
+function systemLocale() {
+  const languages = typeof navigator !== "undefined"
+    ? [...(navigator.languages || []), navigator.language].filter(Boolean)
+    : [];
+  for (const language of languages) {
+    const normalized = String(language).toLowerCase();
+    if (normalized.startsWith("ja")) return "ja";
+    if (normalized.startsWith("en")) return "en";
+    if (normalized.startsWith("zh")) return "zh-CN";
+  }
+  return "zh-CN";
+}
+
+const storedLocale = localStorage.getItem("locale");
+const initialLocale = languageOptions.some(option => option.value === storedLocale) ? storedLocale : systemLocale();
+export const locale = ref(initialLocale);
 export const currentLanguage = computed(() => languageOptions.find(option => option.value === locale.value) || languageOptions[0]);
 
 export function t(key, values = {}) {

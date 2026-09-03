@@ -96,6 +96,7 @@ function blankOccurrence() {
   return {
     id: "",
     original_date: "",
+    title: "",
     generated_date: "",
     original_time: "",
     delivery: "",
@@ -838,6 +839,7 @@ function editOccurrence(row) {
   Object.assign(occurrenceDraft, {
     id: row.id || "",
     original_date: row.original_date || "",
+    title: row.title || "",
     generated_date: row.generated_date || "",
     original_time: row.original_time || "",
     delivery: row.delivery_override || "",
@@ -927,6 +929,7 @@ function leaveOccurrenceFocus() {
 function occurrenceBody(overrides = {}) {
   return {
     original_date: occurrenceDraft.original_date,
+    title: occurrenceDraft.title,
     generated_date: occurrenceDraft.generated_date,
     original_time: occurrenceDraft.original_time,
     delivery: occurrenceDraft.delivery,
@@ -1283,9 +1286,10 @@ onUnmounted(() => {
        <div v-else class="occurrence-editor-layout">
          <div ref="occurrenceListRef" class="occurrence-list">
               <button v-for="row in occurrenceRows" :key="occurrenceRowKey(row)" :ref="element => setOccurrenceItemRef(row, element)" type="button" class="occurrence-list-item" :class="{ selected: occurrenceDraft.original_date === row.original_date }" @click="editOccurrence(row)">
-              <span><b>{{ occurrenceEpisodeLabel(row) }}</b><em :class="{ cancelled: row.status === 'cancelled', deleted: row.status === 'deleted', aired: row.aired }">{{ occurrenceStatus(row) }}</em></span>
-            <strong>{{ row.date }}</strong>
-             <small>{{ row.status === "deleted" ? "已删除，不参与生成" : row.generated ? "自动生成" : row.materialized ? "已播出并保存" : row.adjusted_date ? `原定 ${row.original_date}` : "已单独调整" }}{{ row.guests?.length ? ` · 嘉宾 ${row.guests.length} 人` : "" }}</small>
+             <span><b>{{ occurrenceEpisodeLabel(row) }}</b><em :class="{ cancelled: row.status === 'cancelled', deleted: row.status === 'deleted', aired: row.aired }">{{ occurrenceStatus(row) }}</em></span>
+             <strong>{{ row.date }}</strong>
+              <small v-if="row.title" class="occurrence-list-title">{{ row.title }}</small>
+              <small>{{ row.status === "deleted" ? "已删除，不参与生成" : row.generated ? "自动生成" : row.materialized ? "已播出并保存" : row.adjusted_date ? `原定 ${row.original_date}` : "已单独调整" }}{{ row.guests?.length ? ` · 嘉宾 ${row.guests.length} 人` : "" }}</small>
           </button>
           <p v-if="!occurrenceRows.length" class="muted">当前区间没有自动生成的单集，可以手动添加一条记录。</p>
         </div>
@@ -1295,7 +1299,8 @@ onUnmounted(() => {
               <div><p class="form-kicker">ONE EPISODE</p><h3>{{ occurrenceDraft.id || occurrenceDraft.generated ? "编辑单集" : "添加单集调整" }}</h3></div>
               <button type="button" class="occurrence-nav-button" :disabled="!canNextOccurrence" aria-label="下一集" title="下一集" @click="selectAdjacentOccurrence(1)">→</button>
               <span v-if="occurrenceDraft.id || occurrenceDraft.generated" class="program-kind">{{ occurrenceDraft.id ? "已保存" : "自动生成" }}</span>
-           </div>
+            </div>
+            <label>单集标题<input v-model="occurrenceDraft.title" type="text" placeholder="例如：特别企划、嘉宾回顾……"><small>可选；填写后会显示在日历和单集详情中。</small></label>
             <label>原定日期<VueDatePicker v-model="occurrenceDraft.original_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" locale="zh-CN" :enable-time-picker="false" auto-apply :clearable="false" :readonly="occurrenceOriginalLocked" :teleport="true" placeholder="选择日期" /><small>{{ occurrenceDraft.individual ? "逐期设置模式：可直接修改本期原定日期。" : occurrenceOriginalLocked ? "来自节目排期规则，不能修改原定日期。" : "手动补录单集时填写原定日期。" }}</small></label>
                <label>原定时间<VueDatePicker v-model="occurrenceDraft.original_time" class="program-date-picker" time-picker model-type="HH:mm" format="HH:mm" locale="zh-CN" auto-apply :clearable="true" :is-24="true" :readonly="occurrenceOriginalLocked" :teleport="true" text-input placeholder="选择时间" /><small>{{ occurrenceDraft.individual ? "逐期设置模式：可直接修改本期原定时间。" : occurrenceOriginalLocked ? "来自排期规则，只能修改调整日期；调整时间已默认沿用原定时间。" : "手动补录单集时填写原定时间。" }}节目排期时区：{{ occurrenceTimezoneLabel }}；日历会按访问设备时区显示。</small></label>
            <div class="program-form-field">
@@ -1397,6 +1402,7 @@ onUnmounted(() => {
           <div v-if="importPreview.occurrences.length" class="program-json-occurrence-list">
             <article v-for="(occurrence, index) in importPreview.occurrences" :key="`${occurrence.original_date}-${index}`" class="program-json-occurrence-item">
                <div class="program-json-occurrence-topline"><strong>{{ occurrence.original_date }}</strong><span>{{ occurrence.original_time || "全天" }}</span><span v-if="occurrence.status === 'rescheduled'">→ {{ occurrence.adjusted_date }}{{ occurrence.adjusted_time ? ` ${occurrence.adjusted_time}` : "" }}</span><span>{{ importDeliveryLabel(occurrence.delivery) }}</span><span>{{ importSpecialLabel(occurrence.special) }}</span><span :class="{ cancelled: occurrence.status === 'cancelled', rescheduled: occurrence.status === 'rescheduled', deleted: occurrence.status === 'deleted' }">{{ importStatusLabel(occurrence.status) }}</span></div>
+               <strong v-if="occurrence.title" class="program-json-occurrence-title">{{ occurrence.title }}</strong>
               <p v-if="occurrence.guests?.length || occurrence.note">{{ occurrence.guests?.length ? `嘉宾：${occurrence.guests.join("、")}` : "" }}{{ occurrence.guests?.length && occurrence.note ? " · " : "" }}{{ occurrence.note }}</p>
               <small v-if="occurrence.source_url || occurrence.mirror_url || occurrence.subtitle_url">{{ [occurrence.source_url, occurrence.mirror_url, occurrence.subtitle_url].filter(Boolean).join(" · ") }}</small>
             </article>

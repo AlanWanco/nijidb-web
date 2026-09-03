@@ -12,6 +12,7 @@
     "program.periods[].week_interval": "周更间隔；填写 2 表示隔周。",
     "program.periods[].week_index": "固定月更的第几周，1–5 表示顺数，-1–-5 表示倒数。",
     "occurrences[].original_date": "单集原定日期，必填；支持 YYYY-MM-DD。",
+    "occurrences[].title": "单集标题，可选；有值时会显示在日历和单集详情中。",
     "occurrences[].adjusted_date": "改期后的实际日期；status 为 rescheduled 时必填。",
     "occurrences[].adjusted_time": "改期后的时间；留空表示沿用原定时间。",
     "occurrences[].shift_following_days": "改期后后续隔周排期的偏移，只能填写 -7、0 或 7；只有 rescheduled 单集可以填写。individual 模式不会再次级联。",
@@ -74,6 +75,7 @@
   "occurrences": [
     {
       "original_date": "2026-01-07",
+      "title": "普通单集示例标题",
       "original_time": "20:00",
       "delivery": "live",
       "status": "scheduled",
@@ -90,6 +92,7 @@
     },
     {
       "original_date": "2026-02-04",
+      "title": "顺延单集示例标题",
       "original_time": "20:00",
       "delivery": "recorded",
       "status": "rescheduled",
@@ -107,6 +110,7 @@
     },
     {
       "original_date": "2026-02-18",
+      "title": "取消单集示例标题",
       "original_time": "20:00",
       "delivery": "",
       "status": "cancelled",
@@ -121,6 +125,7 @@
     },
     {
       "original_date": "2026-02-25",
+      "title": "EX 特别单集示例标题",
       "original_time": "20:00",
       "delivery": "",
       "status": "deleted",

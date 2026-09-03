@@ -354,8 +354,8 @@ onUnmounted(() => document.removeEventListener("click", closeCastFilter));
           <p v-else-if="!visibleOccurrences.length" class="muted">当前没有可公开显示的单集记录。</p>
           <div v-else class="program-readonly-episodes">
             <article v-for="row in visibleOccurrences" :key="`${row.id || 'generated'}-${row.original_date}`" class="program-readonly-episode" :class="{ cancelled: row.status === 'cancelled' }">
-               <div class="program-readonly-episode-heading"><strong>{{ episodeLabel(row) }}</strong><span class="program-status" :class="occurrenceStateClass(row)">{{ occurrenceStatus(row) }}</span></div>
-               <time>{{ dateLabel(row.date) }}{{ row.time ? ` · ${row.time}` : " · 全天" }}</time>
+               <div class="program-readonly-episode-heading"><strong>{{ episodeLabel(row) }}</strong><span class="program-status" :class="occurrenceStateClass(row)">{{ occurrenceStatus(row) }}</span><strong v-if="row.title" class="program-readonly-episode-title">{{ row.title }}</strong></div>
+                <time>{{ dateLabel(row.date) }}{{ row.time ? ` · ${row.time}` : " · 全天" }}</time>
                 <small>{{ occurrenceSourceLabel(row) }} · {{ row.delivery === "live" ? "直播" : "录播" }}{{ row.guests?.length ? ` · 嘉宾 ${row.guests.length} 人` : "" }}</small>
                <div v-if="occurrenceLinkItems(row).length" class="program-episode-links">
                  <template v-for="link in occurrenceLinkItems(row)" :key="link.key">

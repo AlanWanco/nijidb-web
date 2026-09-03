@@ -588,10 +588,11 @@ onUnmounted(() => document.removeEventListener("click", closeCastFilter));
            <span class="program-status" :class="`status-${selectedProgram.status}`">{{ programStatus(selectedProgram) }}</span>
            <span v-if="selectedProgram.update_status === 'updated'" class="program-update-status">{{ updateStatusLabel(selectedProgram) }}</span>
         </div>
-        <h2>{{ selectedProgram.title }}</h2>
-        <div class="program-occurrence-card" :class="{ cancelled: selectedEvent.occurrenceStatus === 'cancelled' }">
-             <span>{{ eventEpisodeLabel({ extendedProps: selectedEvent }) }} · {{ selectedEvent.delivery === "live" ? "直播" : "录播" }} · {{ occurrenceAirStatus(selectedEvent) }}</span>
-          <strong>{{ fullDateLabel(selectedEvent.date) }}</strong>
+         <h2>{{ selectedProgram.title }}</h2>
+         <div class="program-occurrence-card" :class="{ cancelled: selectedEvent.occurrenceStatus === 'cancelled' }">
+              <span>{{ eventEpisodeLabel({ extendedProps: selectedEvent }) }} · {{ selectedEvent.delivery === "live" ? "直播" : "录播" }} · {{ occurrenceAirStatus(selectedEvent) }}</span>
+           <strong v-if="selectedEvent.occurrenceTitle" class="program-occurrence-title">{{ selectedEvent.occurrenceTitle }}</strong>
+           <strong>{{ fullDateLabel(selectedEvent.date) }}</strong>
           <b v-if="selectedEvent.time">{{ selectedEvent.time }}</b>
            <small>显示时区：{{ deviceTimeZone }}；排期时区：{{ timezoneLabel(selectedEvent.timezone) }}</small>
            <p v-if="selectedEvent.adjustedDate">原定 {{ fullDateLabel(selectedEvent.originalDate) }}，本期已改期</p>

@@ -3472,6 +3472,11 @@ footer {
   font-size: 20px;
 }
 
+.program-occurrence-card .program-occurrence-title {
+  color: var(--ink);
+  font-size: 16px;
+}
+
 .program-occurrence-card b {
   color: var(--accent);
   font: 600 12px var(--mono);
@@ -3659,6 +3664,7 @@ footer {
 
 .program-form-grid input,
 .program-form-grid select,
+.program-json-target-select select,
 .program-form-grid textarea,
 .occurrence-form input,
 .occurrence-form textarea,
@@ -3674,7 +3680,8 @@ footer {
 }
 
 .program-form-grid input,
-.program-form-grid select {
+.program-form-grid select,
+.program-json-target-select select {
   min-height: 46px;
   font: inherit;
   line-height: 1.35;
@@ -3701,6 +3708,7 @@ footer {
 
 .program-form-grid input:focus,
 .program-form-grid select:focus,
+.program-json-target-select select:focus,
 .program-form-grid textarea:focus,
 .occurrence-form input:focus,
 .occurrence-form textarea:focus,
@@ -4606,6 +4614,12 @@ html[data-theme="mocha"] .dp__theme_dark {
   line-height: 1.6;
 }
 
+.program-json-occurrence-title {
+  display: block;
+  margin-top: 6px;
+  font-size: 13px;
+}
+
 .program-json-warnings {
   margin-top: 20px;
   padding: 14px 16px;
@@ -4989,6 +5003,11 @@ html[data-theme="mocha"] .dp__theme_dark {
   font-size: 14px;
 }
 
+.program-readonly-episode-heading .program-readonly-episode-title {
+  color: var(--ink);
+  font-size: 14px;
+}
+
 .program-readonly-episode time {
   color: var(--muted);
   font: 600 11px var(--mono);
@@ -5191,6 +5210,11 @@ html[data-theme="mocha"] .dp__theme_dark {
 .occurrence-list-item small {
   color: var(--muted);
   font-size: 10px;
+}
+
+.occurrence-list-item .occurrence-list-title {
+  color: var(--ink);
+  font-size: 12px;
 }
 
 .occurrence-form {

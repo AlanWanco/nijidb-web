@@ -276,6 +276,7 @@ def init_db() -> None:
            id INTEGER PRIMARY KEY AUTOINCREMENT,
            program_id TEXT NOT NULL,
             original_date TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
              generated_date TEXT NOT NULL DEFAULT '',
              original_time TEXT NOT NULL DEFAULT '',
              delivery TEXT NOT NULL DEFAULT '',
@@ -316,6 +317,8 @@ def init_db() -> None:
         if "timezone" not in period_columns:
             conn.execute("ALTER TABLE program_periods ADD COLUMN timezone TEXT NOT NULL DEFAULT 'Asia/Tokyo'")
         occurrence_columns = {row["name"] for row in conn.execute("PRAGMA table_info(program_occurrences)")}
+        if "title" not in occurrence_columns:
+            conn.execute("ALTER TABLE program_occurrences ADD COLUMN title TEXT NOT NULL DEFAULT ''")
         if "generated_date" not in occurrence_columns:
             conn.execute("ALTER TABLE program_occurrences ADD COLUMN generated_date TEXT NOT NULL DEFAULT ''")
         if "guests" not in occurrence_columns:
@@ -531,6 +534,7 @@ def program_people(value: Any) -> list[str]:
 
 def occurrence_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     payload = dict(row)
+    payload["title"] = str(payload.get("title") or "").strip()
     payload["guests"] = program_people(payload.get("guests", "[]"))
     payload["special"] = str(payload.get("special") or "").strip().upper()
     delivery = str(payload.get("delivery") or "").strip()
@@ -852,6 +856,7 @@ def program_json_metadata() -> dict[str, Any]:
             "program.periods[].week_interval": "周更间隔；填写 2 表示隔周。",
             "program.periods[].week_index": "固定月更的第几周，1–5 表示顺数，-1–-5 表示倒数。",
             "occurrences[].original_date": "单集原定日期，必填；支持 YYYY-MM-DD。",
+            "occurrences[].title": "单集标题，可选；有值时会显示在日历和单集详情中。",
             "occurrences[].adjusted_date": "改期后的实际日期；status 为 rescheduled 时必填。",
             "occurrences[].adjusted_time": "改期后的时间；留空表示沿用原定时间。",
             "occurrences[].shift_following_days": "改期后后续隔周排期的偏移，只能填写 -7、0 或 7；只有 rescheduled 单集可以填写。individual 模式不会再次级联。",
@@ -916,6 +921,7 @@ def program_json_template() -> dict[str, Any]:
     payload["occurrences"] = [
         {
             "original_date": "2026-01-07",
+            "title": "普通单集示例标题",
             "original_time": "20:00",
             "delivery": "live",
             "status": "scheduled",
@@ -930,6 +936,7 @@ def program_json_template() -> dict[str, Any]:
         },
         {
             "original_date": "2026-02-04",
+            "title": "顺延单集示例标题",
             "original_time": "20:00",
             "delivery": "recorded",
             "status": "rescheduled",
@@ -947,6 +954,7 @@ def program_json_template() -> dict[str, Any]:
         },
         {
             "original_date": "2026-02-18",
+            "title": "取消单集示例标题",
             "original_time": "20:00",
             "delivery": "",
             "status": "cancelled",
@@ -961,6 +969,7 @@ def program_json_template() -> dict[str, Any]:
         },
         {
             "original_date": "2026-02-25",
+            "title": "EX 特别单集示例标题",
             "original_time": "20:00",
             "delivery": "",
             "status": "deleted",
@@ -1073,6 +1082,7 @@ def normalize_import_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], l
             special_value = "EX"
         generated_marker = boolean_value(item.get("generated"), False)
         has_override_content = any((
+            item.get("title"),
             item.get("delivery") not in (None, "", "跟随默认"),
             item.get("source_url"),
             item.get("mirror_url"),
@@ -1092,6 +1102,7 @@ def normalize_import_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], l
             continue
         occurrence_values = {
             "original_date": original_date,
+            "title": str(item.get("title") or "").strip(),
             "generated_date": generated_date,
             "original_time": str(item.get("original_time") or item.get("time") or "").strip(),
             "delivery": import_choice(item.get("delivery"), delivery_aliases),
@@ -1141,7 +1152,7 @@ def import_preview_payload(
     for occurrence in occurrences:
         item = {
             key: occurrence.get(key, "")
-            for key in ("original_date", "generated_date", "original_time", "delivery", "status", "special", "adjusted_date", "adjusted_time", "shift_following_days", "source_url", "mirror_url", "subtitle_url", "note")
+            for key in ("original_date", "title", "generated_date", "original_time", "delivery", "status", "special", "adjusted_date", "adjusted_time", "shift_following_days", "source_url", "mirror_url", "subtitle_url", "note")
         }
         item["guests"] = program_people(occurrence.get("guests", []))
         payload["occurrences"].append(item)
@@ -1257,6 +1268,7 @@ def normalized_occurrence(values: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{label}格式应为 HH:MM")
     return {
         "original_date": original_date,
+        "title": str(values.get("title") or "").strip(),
         "generated_date": generated_date,
         "original_time": original_time,
         "delivery": delivery,
@@ -1277,10 +1289,10 @@ def normalized_occurrence(values: dict[str, Any]) -> dict[str, Any]:
 def insert_occurrence_row(conn: sqlite3.Connection, values: dict[str, Any]) -> sqlite3.Cursor:
     values = {"materialized": 0, **values}
     return conn.execute("""INSERT INTO program_occurrences (
-        program_id, original_date, generated_date, original_time, delivery, shift_following_days, source_url, mirror_url, subtitle_url, status,
+        program_id, original_date, title, generated_date, original_time, delivery, shift_following_days, source_url, mirror_url, subtitle_url, status,
         adjusted_date, adjusted_time, note, guests, special, materialized, created_at, updated_at
     ) VALUES (
-        :program_id, :original_date, :generated_date, :original_time, :delivery, :shift_following_days, :source_url, :mirror_url, :subtitle_url, :status,
+        :program_id, :original_date, :title, :generated_date, :original_time, :delivery, :shift_following_days, :source_url, :mirror_url, :subtitle_url, :status,
         :adjusted_date, :adjusted_time, :note, :guests, :special, :materialized, :created_at, :updated_at
     )""", values)
 
@@ -1375,6 +1387,7 @@ def occurrence_record(
         "generated": not has_override,
         "individual": individual,
         "original_date": effective_original_date,
+        "title": str(override.get("title") or "").strip() if has_override else "",
         "generated_date": generated_date or (base_original_date if individual else ""),
         "original_time": effective_original_time,
         "delivery": delivery,
@@ -1562,6 +1575,7 @@ def materialize_generated_occurrences(conn: sqlite3.Connection, program: dict[st
         (
             program["id"],
             record["original_date"],
+            record.get("title", ""),
             record.get("generated_date", ""),
             record.get("original_time", ""),
             record.get("delivery_override", ""),
@@ -1588,9 +1602,9 @@ def materialize_generated_occurrences(conn: sqlite3.Connection, program: dict[st
     before = conn.total_changes
     conn.executemany(
         """INSERT OR IGNORE INTO program_occurrences (
-            program_id, original_date, generated_date, original_time, delivery, shift_following_days, source_url, mirror_url, subtitle_url, status,
+            program_id, original_date, title, generated_date, original_time, delivery, shift_following_days, source_url, mirror_url, subtitle_url, status,
             adjusted_date, adjusted_time, note, guests, special, materialized, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         rows,
     )
     return conn.total_changes - before
@@ -1740,6 +1754,7 @@ def program_json_occurrence_item(occurrence: dict[str, Any], freeze_effective_da
         adjusted_time = occurrence.get("time", "") if occurrence.get("time", "") != occurrence.get("original_time", "") else ""
     item = {
         "original_date": original_date,
+        "title": str(occurrence.get("title") or "").strip(),
         "original_time": occurrence.get("original_time", ""),
         "delivery": occurrence.get("delivery_override", occurrence.get("delivery", "")),
         "status": status,
@@ -1833,9 +1848,14 @@ def program_calendar_events(program: dict[str, Any], range_start: date, range_en
             episode_label = f"原定第{episode_number}期"
         else:
             episode_label = f"第{episode_number}期"
+        occurrence_title = str(record.get("title") or "").strip()
+        event_title = f"{program_display_name(program)} · {episode_label}"
+        if occurrence_title:
+            event_title += f" · {occurrence_title}"
+        event_title += " · 已取消" if record["status"] == "cancelled" else update_suffix
         event: dict[str, Any] = {
             "id": f"{program['id']}-{record['original_date']}",
-            "title": f"{program_display_name(program)} · {episode_label}" + (" · 已取消" if record["status"] == "cancelled" else update_suffix),
+            "title": event_title,
             "start": occurrence_start_value(record["date"], record["time"], record["timezone"]),
             "allDay": not bool(record["time"]),
             "extendedProps": {
@@ -1843,6 +1863,7 @@ def program_calendar_events(program: dict[str, Any], range_start: date, range_en
                 "programTitle": program["title"],
                 "subprogramName": program.get("subprogram_name") or "主节目",
                 "episode": episode_number,
+                "occurrenceTitle": occurrence_title,
                 "special": record.get("special", ""),
                 "source_url": record.get("source_url", ""),
                 "mirror_url": record.get("mirror_url", ""),
@@ -3004,7 +3025,7 @@ async def api_update_occurrence(program_id: str, occurrence_id: int, request: Re
     with db() as conn:
         try:
             conn.execute("""UPDATE program_occurrences SET
-                original_date=:original_date, generated_date=:generated_date, original_time=:original_time, delivery=:delivery, shift_following_days=:shift_following_days, status=:status,
+                original_date=:original_date, title=:title, generated_date=:generated_date, original_time=:original_time, delivery=:delivery, shift_following_days=:shift_following_days, status=:status,
                 source_url=:source_url, mirror_url=:mirror_url, subtitle_url=:subtitle_url,
                 adjusted_date=:adjusted_date, adjusted_time=:adjusted_time, note=:note, guests=:guests, special=:special, updated_at=:updated_at
                 WHERE id=:id AND program_id=:program_id""", values)

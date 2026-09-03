@@ -916,9 +916,9 @@ function scrollOccurrenceListTo(row) {
   const listRect = list.getBoundingClientRect();
   const itemRect = item.getBoundingClientRect();
   const itemTop = list.scrollTop + itemRect.top - listRect.top;
-  const centeredTop = itemTop - (list.clientHeight - item.offsetHeight) / 2;
+  const targetTop = itemTop - list.clientHeight * 0.35 + item.offsetHeight / 2;
   const maxTop = Math.max(0, list.scrollHeight - list.clientHeight);
-  const top = Math.min(maxTop, Math.max(0, centeredTop));
+  const top = Math.min(maxTop, Math.max(0, targetTop));
   list.scrollTo({ top, behavior: "smooth" });
 }
 

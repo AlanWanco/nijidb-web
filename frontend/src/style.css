@@ -2964,6 +2964,36 @@ footer {
   min-width: 0;
 }
 
+@keyframes program-calendar-enter-next {
+  from {
+    opacity: .35;
+    transform: translateX(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes program-calendar-enter-previous {
+  from {
+    opacity: .35;
+    transform: translateX(-18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.program-calendar-slide-next {
+  animation: program-calendar-enter-next 240ms cubic-bezier(.22, .7, .2, 1) both;
+}
+
+.program-calendar-slide-previous {
+  animation: program-calendar-enter-previous 240ms cubic-bezier(.22, .7, .2, 1) both;
+}
+
 .program-calendar .fc {
   color: var(--ink);
   font-family: var(--display-font);
@@ -5142,8 +5172,8 @@ html[data-theme="mocha"] .dp__theme_dark {
 
 .program-admin-page.occurrence-focused .occurrence-list {
   min-height: 0;
-  height: 100%;
-  max-height: none;
+  height: var(--occurrence-list-height, min(680px, calc(100vh - 270px)));
+  max-height: var(--occurrence-list-height, min(680px, calc(100vh - 270px)));
 }
 
 .program-occurrence-editor .section-heading {
@@ -5792,7 +5822,7 @@ html[data-theme="mocha"] .dp__theme_dark {
     grid-template-columns: 1fr;
   }
 
-  .occurrence-list {
+  .program-admin-page.occurrence-focused .occurrence-list {
     height: auto;
     max-height: 270px;
   }
@@ -5822,6 +5852,11 @@ html[data-theme="mocha"] .dp__theme_dark {
   .program-drawer-backdrop-leave-active,
   .program-drawer-panel-enter-active,
   .program-drawer-panel-leave-active {
+    animation: none;
+  }
+
+  .program-calendar-slide-next,
+  .program-calendar-slide-previous {
     animation: none;
   }
 }

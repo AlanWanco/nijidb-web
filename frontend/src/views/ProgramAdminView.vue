@@ -34,6 +34,8 @@ const occurrenceLoading = ref(false);
 const occurrenceSaving = ref(false);
 const occurrenceRows = ref([]);
 const occurrenceListRef = ref(null);
+const occurrenceFormRef = ref(null);
+const occurrenceListHeight = ref(0);
 const occurrenceEditorRef = ref(null);
 const customPerson = ref("");
 const occurrenceGuestInput = ref("");
@@ -48,6 +50,7 @@ const exportModeDialog = ref(false);
 const message = ref("");
 const error = ref("");
 let toastTimer = 0;
+let occurrenceFormResizeObserver = null;
 
 function scheduleToastDismiss() {
   window.clearTimeout(toastTimer);
@@ -483,6 +486,7 @@ function nextPanel() {
 }
 
 watch([message, error], scheduleToastDismiss);
+watch(occurrenceFormRef, observeOccurrenceForm, { flush: "post" });
 
 async function loadPrograms() {
   loading.value = true;
@@ -918,6 +922,24 @@ function scrollOccurrenceListTo(row) {
   list.scrollTo({ top, behavior: "smooth" });
 }
 
+function observeOccurrenceForm() {
+  occurrenceFormResizeObserver?.disconnect();
+  occurrenceFormResizeObserver = null;
+  const formElement = occurrenceFormRef.value;
+  if (!formElement) {
+    occurrenceListHeight.value = 0;
+    return;
+  }
+  const syncHeight = () => {
+    occurrenceListHeight.value = Math.ceil(formElement.getBoundingClientRect().height);
+  };
+  syncHeight();
+  if (window.ResizeObserver) {
+    occurrenceFormResizeObserver = new ResizeObserver(syncHeight);
+    occurrenceFormResizeObserver.observe(formElement);
+  }
+}
+
 async function focusOccurrenceEditor(row = null) {
   await nextTick();
   occurrenceEditorRef.value?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1068,6 +1090,8 @@ onMounted(async () => {
 onUnmounted(() => {
   window.clearTimeout(toastTimer);
   document.removeEventListener("click", closeProgramCastFilter);
+  occurrenceFormResizeObserver?.disconnect();
+  occurrenceFormResizeObserver = null;
 });
 </script>
 
@@ -1316,7 +1340,7 @@ onUnmounted(() => {
          <p class="muted occurrence-help">选择某一期后，可单独改期、取消、补录或增加本期嘉宾。当前显示 {{ generatedOccurrenceCount }} 个自动单集{{ materializedOccurrenceCount ? `，${materializedOccurrenceCount} 个已播出并保存` : "" }}{{ adjustedOccurrenceCount ? `，${adjustedOccurrenceCount} 个单独调整` : "" }}{{ deletedOccurrenceCount ? `，${deletedOccurrenceCount} 个已删除` : "" }}。</p>
       <p v-if="occurrenceLoading" class="state">正在读取单集排期……</p>
        <div v-else class="occurrence-editor-layout">
-          <div ref="occurrenceListRef" class="occurrence-list">
+          <div ref="occurrenceListRef" class="occurrence-list" :style="occurrenceListHeight ? { '--occurrence-list-height': `${occurrenceListHeight}px` } : undefined">
                 <button v-for="row in occurrenceRows" :key="occurrenceRowKey(row)" :ref="element => setOccurrenceItemRef(row, element)" type="button" class="occurrence-list-item" :class="{ selected: occurrenceRowKey(occurrenceDraft) === occurrenceRowKey(row) }" @click="editOccurrence(row)">
               <span v-if="occurrenceCast(row).length" class="occurrence-list-cast-line" role="img" :aria-label="`出场成员：${occurrenceCast(row).map(member => member.name).join('、')}`" :title="occurrenceCast(row).map(member => member.name).join('、')"><i v-for="member in occurrenceCast(row)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
               <span><b>{{ occurrenceEpisodeLabel(row) }}</b><em :class="{ cancelled: row.status === 'cancelled', deleted: row.status === 'deleted', aired: row.aired }">{{ occurrenceStatus(row) }}</em></span>
@@ -1327,7 +1351,7 @@ onUnmounted(() => {
           </button>
           <p v-if="!occurrenceRows.length" class="muted">当前区间没有自动生成的单集，可以手动添加一条记录。</p>
         </div>
-        <form class="occurrence-form" @submit.prevent="saveOccurrence">
+        <form ref="occurrenceFormRef" class="occurrence-form" @submit.prevent="saveOccurrence">
            <div class="occurrence-form-heading">
              <button type="button" class="occurrence-nav-button" :disabled="!canPreviousOccurrence" aria-label="上一集" title="上一集" @click="selectAdjacentOccurrence(-1)">←</button>
               <div><p class="form-kicker">ONE EPISODE</p><h3>{{ occurrenceDraft.id || occurrenceDraft.generated ? "编辑单集" : "添加单集调整" }}</h3></div>

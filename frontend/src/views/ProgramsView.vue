@@ -34,6 +34,9 @@ const editAccessNotice = ref("");
 const router = useRouter();
 const route = useRoute();
 let calendarTouchStart = null;
+const calendarAnimationClass = ref("");
+let calendarAnimationFrame = 0;
+let calendarAnimationTimer = 0;
 const requestedMonth = computed(() => routeMonth(route.params.month));
 const initialMonth = requestedMonth.value || monthKey(today);
 const visibleMonth = ref(initialMonth);
@@ -341,15 +344,36 @@ function updateVisibleMonth(value) {
 function jumpToMonth() {
   const calendarApi = calendarRef.value?.getApi?.();
   if (!calendarApi) return;
+  const targetMonth = `${jumpYear.value}-${String(jumpMonth.value).padStart(2, "0")}`;
+  if (targetMonth !== visibleMonth.value) animateCalendar(targetMonth > visibleMonth.value ? "next" : "previous");
   calendarApi.gotoDate(new Date(jumpYear.value, jumpMonth.value - 1, 1, 12));
 }
 
 function previousMonth() {
-  calendarRef.value?.getApi?.().prev();
+  const calendarApi = calendarRef.value?.getApi?.();
+  if (!calendarApi) return;
+  animateCalendar("previous");
+  calendarApi.prev();
 }
 
 function nextMonth() {
-  calendarRef.value?.getApi?.().next();
+  const calendarApi = calendarRef.value?.getApi?.();
+  if (!calendarApi) return;
+  animateCalendar("next");
+  calendarApi.next();
+}
+
+function animateCalendar(direction) {
+  window.cancelAnimationFrame(calendarAnimationFrame);
+  window.clearTimeout(calendarAnimationTimer);
+  calendarAnimationClass.value = "";
+  calendarAnimationFrame = window.requestAnimationFrame(() => {
+    calendarAnimationClass.value = `program-calendar-slide-${direction}`;
+    calendarAnimationTimer = window.setTimeout(() => {
+      calendarAnimationClass.value = "";
+      calendarAnimationTimer = 0;
+    }, 260);
+  });
 }
 
 function handleCalendarTouchStart(event) {
@@ -376,7 +400,11 @@ function handleCalendarTouchCancel() {
 }
 
 function goToToday() {
-  calendarRef.value?.getApi?.().today();
+  const calendarApi = calendarRef.value?.getApi?.();
+  if (!calendarApi) return;
+  const targetMonth = monthKey(today);
+  if (targetMonth !== visibleMonth.value) animateCalendar(targetMonth > visibleMonth.value ? "next" : "previous");
+  calendarApi.today();
 }
 
 function renderEventContent(info) {
@@ -506,7 +534,11 @@ onMounted(() => {
   checkAdminSession();
   document.addEventListener("click", closeCastFilter);
 });
-onUnmounted(() => document.removeEventListener("click", closeCastFilter));
+onUnmounted(() => {
+  document.removeEventListener("click", closeCastFilter);
+  window.cancelAnimationFrame(calendarAnimationFrame);
+  window.clearTimeout(calendarAnimationTimer);
+});
 </script>
 
 <template>
@@ -593,7 +625,7 @@ onUnmounted(() => document.removeEventListener("click", closeCastFilter));
            </div>
           </div>
           <div v-show="viewMode === 'calendar'">
-            <div class="program-calendar-touch-zone" @touchstart.passive="handleCalendarTouchStart" @touchend.passive="handleCalendarTouchEnd" @touchcancel.passive="handleCalendarTouchCancel">
+            <div class="program-calendar-touch-zone" :class="calendarAnimationClass" @touchstart.passive="handleCalendarTouchStart" @touchend.passive="handleCalendarTouchEnd" @touchcancel.passive="handleCalendarTouchCancel">
               <FullCalendar ref="calendarRef" class="program-calendar" :options="calendarOptions" />
             </div>
             <p v-if="!filteredEvents.length && !loading" class="muted program-empty">当前筛选没有匹配的节目。</p>

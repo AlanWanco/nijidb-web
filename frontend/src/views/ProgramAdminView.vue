@@ -1115,7 +1115,7 @@ function occurrenceDraftSignature() {
   return JSON.stringify(occurrenceBody());
 }
 
-function queueOccurrenceAutoSave(delay = 800) {
+function queueOccurrenceAutoSave(delay = 400) {
   window.clearTimeout(occurrenceAutoSaveTimer);
   occurrenceAutoSaveState.value = "pending";
   occurrenceAutoSaveTimer = window.setTimeout(() => {

@@ -667,7 +667,10 @@ function programCast(program) {
 }
 
 function occurrenceCast(row) {
-  return castColorSegments([...(form.people || []), ...(row.guests || [])], row.absent_members);
+  const selected = occurrenceRowKey(row) === occurrenceRowKey(occurrenceDraft);
+  const guests = selected ? occurrenceDraft.guests : row.guests;
+  const absentMembers = selected ? occurrenceDraft.absent_members : row.absent_members;
+  return castColorSegments([...(form.people || []), ...(guests || [])], absentMembers);
 }
 
 function addCustomPerson() {

@@ -40,13 +40,47 @@ const deliveryOptions = [
   { value: "event", label: "Event" },
 ];
 const defaultDeliveryValues = ["live", "recorded"];
-const filters = reactive({ cast: [], delivery: [...defaultDeliveryValues] });
+const router = useRouter();
+const route = useRoute();
+
+function queryValues(value) {
+  return (Array.isArray(value) ? value : [value])
+    .flatMap(item => String(item || "").split(","))
+    .map(item => item.trim())
+    .filter(Boolean);
+}
+
+function castValuesFromQuery(value) {
+  const names = [];
+  queryValues(value).forEach(name => {
+    const member = NIJIGASAKI_CAST.find(item => [item.name, ...item.aliases].includes(name));
+    if (member && !names.includes(member.name)) names.push(member.name);
+  });
+  return names;
+}
+
+function filtersFromQuery(query) {
+  const hasDelivery = Object.prototype.hasOwnProperty.call(query, "delivery");
+  const deliveryValues = queryValues(query.delivery).map(value => value.toLowerCase());
+  return {
+    cast: castValuesFromQuery(query.cast),
+    delivery: !hasDelivery
+      ? [...defaultDeliveryValues]
+      : deliveryValues.includes("none")
+        ? []
+        : [...new Set(deliveryValues.filter(value => deliveryOptions.some(option => option.value === value)))],
+  };
+}
+
+function sameValues(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+const filters = reactive(filtersFromQuery(route.query));
 const today = new Date();
 const castFilterDetails = ref(null);
 const adminAuthenticated = ref(false);
 const editAccessNotice = ref("");
-const router = useRouter();
-const route = useRoute();
 let calendarTouchStart = null;
 const calendarAnimationClass = ref("");
 let calendarAnimationFrame = 0;
@@ -166,6 +200,22 @@ watch(eventernoteSelected, enabled => {
   }
   loadEventernoteEvents();
 });
+
+watch(() => [route.query.cast, route.query.delivery], () => {
+  const nextFilters = filtersFromQuery(route.query);
+  if (!sameValues(filters.cast, nextFilters.cast)) filters.cast = nextFilters.cast;
+  if (!sameValues(filters.delivery, nextFilters.delivery)) filters.delivery = nextFilters.delivery;
+});
+
+watch(filters, () => {
+  const nextQuery = { ...route.query };
+  if (filters.cast.length && !allCastSelected.value) nextQuery.cast = filters.cast.join(",");
+  else delete nextQuery.cast;
+  if (!filters.delivery.length) nextQuery.delivery = "none";
+  else if (sameValues(filters.delivery, defaultDeliveryValues)) delete nextQuery.delivery;
+  else nextQuery.delivery = filters.delivery.join(",");
+  if (JSON.stringify(nextQuery) !== JSON.stringify(route.query)) router.replace({ query: nextQuery });
+}, { deep: true });
 
 watch(requestedMonth, month => {
   if (!month) return;

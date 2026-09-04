@@ -5239,7 +5239,7 @@ html[data-theme="mocha"] .dp__theme_dark {
 }
 
 .program-search-hits {
-  margin: -6px 0 0;
+  margin: 2px 0 0;
   padding: 0 14px 15px;
   color: var(--accent);
   font-size: 11px;

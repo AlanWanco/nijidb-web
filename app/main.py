@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 
 SOURCE_URL = "https://www.lovelive-anime.jp/nijigasaki/cd.php"
+EVENTERNOTE_EVENTS_URL = "https://events.nijigaku.fans/api/events"
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = Path(os.getenv("DATA_DIR", "/data")) / "nijidb.sqlite3"
 MEDIA_DIR = DB_PATH.parent / "images"
@@ -2177,6 +2178,32 @@ def program_calendar_events(program: dict[str, Any], range_start: date, range_en
     return events
 
 
+def eventernote_event_payload(item: dict[str, Any]) -> dict[str, Any]:
+    performers = []
+    for performer in item.get("performers") or []:
+        if not isinstance(performer, dict):
+            continue
+        actor = performer.get("actor") or {}
+        if not isinstance(actor, dict):
+            actor = {}
+        name = str(actor.get("name") or performer.get("source_name") or "").strip()
+        if name and name not in performers:
+            performers.append(name)
+    return {
+        "id": str(item.get("id") or item.get("eventernote_event_id") or "").strip(),
+        "title": str(item.get("title") or "").strip(),
+        "event_date": str(item.get("event_date") or "").strip(),
+        "open_time": str(item.get("open_time") or "").strip(),
+        "start_time": str(item.get("start_time") or "").strip(),
+        "end_time": str(item.get("end_time") or "").strip(),
+        "raw_time_text": str(item.get("raw_time_text") or "").strip(),
+        "place_name": str(item.get("place_name") or "").strip(),
+        "timezone": str(item.get("timezone") or "Asia/Tokyo").strip() or "Asia/Tokyo",
+        "source_url": str(item.get("source_url") or "").strip(),
+        "performers": performers,
+    }
+
+
 def admin_cookie(request: Request) -> bool:
     raw = request.cookies.get("nijidb_admin", "")
     expected = admin_cookie_value(settings().get("admin_password_hash", ""))
@@ -2793,6 +2820,32 @@ async def api_program_calendar(start: str = "", end: str = "") -> dict[str, Any]
     programs = program_rows()
     events = [event for program in programs for event in program_calendar_events(program, range_start, range_end)]
     return {"events": events, "programs": programs, "start": range_start.isoformat(), "end": range_end.isoformat()}
+
+
+@app.get("/api/eventernote/events")
+async def api_eventernote_events(from_date: str = "", to_date: str = "") -> dict[str, Any]:
+    today = datetime.now(JAPAN_TZ).date()
+    range_start = calendar_date(from_date, today)
+    range_end = calendar_date(to_date, range_start + timedelta(days=42))
+    if range_end < range_start:
+        raise HTTPException(400, "Eventernote 日期范围无效")
+    if range_end - range_start > timedelta(days=366):
+        raise HTTPException(400, "Eventernote 日期范围过大")
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers={"Accept": "application/json", "User-Agent": "nijidb-web/1.0"}) as client:
+            response = await client.get(EVENTERNOTE_EVENTS_URL, params={"from_date": range_start.isoformat(), "to_date": range_end.isoformat()})
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(502, "Eventernote 数据暂时无法读取") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+        raise HTTPException(502, "Eventernote 数据格式无效")
+    return {
+        "items": [eventernote_event_payload(item) for item in payload["items"] if isinstance(item, dict)],
+        "cached_at": payload.get("cached_at"),
+        "from_date": range_start.isoformat(),
+        "to_date": range_end.isoformat(),
+    }
 
 
 @app.get("/api/programs/{program_id}/occurrences")

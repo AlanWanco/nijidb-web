@@ -2739,6 +2739,12 @@ footer {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+.program-eventernote-toggle[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
 .program-clear-filter {
   min-height: 36px;
 }
@@ -3214,6 +3220,14 @@ footer {
   min-width: 0;
   grid-template-columns: 8px minmax(0, 1fr);
   column-gap: 6px;
+}
+
+.program-calendar .program-event-content.program-event-external {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.program-calendar .program-event-eventernote {
+  border-style: dashed;
 }
 
 .program-calendar .program-event-markers {

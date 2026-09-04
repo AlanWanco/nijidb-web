@@ -25,13 +25,17 @@ const timezoneLabels = {
 };
 const programs = ref([]);
 const allEvents = ref([]);
+const eventernoteEvents = ref([]);
 const selectedEvent = ref(null);
 const drawerOpen = ref(false);
 const loading = ref(true);
 const error = ref("");
+const eventernoteLoading = ref(false);
+const eventernoteError = ref("");
 const calendarRef = ref(null);
 const viewMode = ref("calendar");
 const filters = reactive({ cast: [], delivery: "" });
+const showEventernote = ref(false);
 const today = new Date();
 const castFilterDetails = ref(null);
 const adminAuthenticated = ref(false);
@@ -42,19 +46,25 @@ let calendarTouchStart = null;
 const calendarAnimationClass = ref("");
 let calendarAnimationFrame = 0;
 let calendarAnimationTimer = 0;
+let eventernoteRequestId = 0;
+const calendarRequestRange = ref(null);
 const requestedMonth = computed(() => routeMonth(route.params.month));
 const initialMonth = requestedMonth.value || monthKey(today);
 const visibleMonth = ref(initialMonth);
 const jumpYear = ref(Number(initialMonth.slice(0, 4)));
 const jumpMonth = ref(Number(initialMonth.slice(5, 7)));
 const editAccessMessage = computed(() => t("需要登录管理员后才能编辑；未来将开放编辑审核。"));
+const displayError = computed(() => error.value || eventernoteError.value);
 
 const monthOptions = Array.from({ length: 12 }, (_, index) => ({
   value: index + 1,
   label: `${index + 1} 月`,
 }));
 
-const filteredEvents = computed(() => allEvents.value.filter(eventMatchesFilters));
+const calendarEvents = computed(() => showEventernote.value
+  ? [...allEvents.value, ...eventernoteEvents.value]
+  : allEvents.value);
+const filteredEvents = computed(() => calendarEvents.value.filter(eventMatchesFilters));
 const monthEvents = computed(() => filteredEvents.value
   .filter(event => eventDate(event) >= `${visibleMonth.value}-01` && eventDate(event) < nextMonthKey(visibleMonth.value))
   .sort(compareEvents));
@@ -67,7 +77,11 @@ const listGroups = computed(() => {
   });
   return [...groups.entries()].map(([date, events]) => ({ date, events }));
 });
-const filteredProgramCount = computed(() => new Set(monthEvents.value.map(event => event.extendedProps?.programId)).size);
+const filteredProgramCount = computed(() => new Set(
+  monthEvents.value
+    .filter(event => !event.extendedProps?.isEventernote)
+    .map(event => event.extendedProps?.programId),
+).size);
 const allCastSelected = computed(() => filters.cast.length === NIJIGASAKI_CAST.length);
 const activeFilterCount = computed(() => Number(filters.cast.length > 0 && !allCastSelected.value) + Number(Boolean(filters.delivery)));
 const castFilterLabel = computed(() => {
@@ -110,16 +124,19 @@ const calendarOptions = reactive({
   eventDidMount: ({ event, el }) => {
     const props = event.extendedProps || {};
     const cast = eventCast(event);
-    const fallback = props.category === "official" ? "#5979ad" : "#5b9478";
+    const fallback = props.isEventernote ? "#8a8f9f" : props.category === "official" ? "#5979ad" : "#5b9478";
     el.style.setProperty("--program-event-color", cast[0]?.color || fallback);
     el.setAttribute("aria-label", event.title);
     el.title = event.title;
   },
-  eventClassNames: ({ event }) => [
-    `program-event-${event.extendedProps.category}`,
-    event.extendedProps.aired ? "program-event-aired" : "program-event-upcoming",
-    event.extendedProps.occurrenceStatus === "cancelled" ? "program-event-cancelled" : "",
-  ].filter(Boolean),
+  eventClassNames: ({ event }) => {
+    const props = event.extendedProps || {};
+    return [
+      props.isEventernote ? "program-event-eventernote" : `program-event-${props.category}`,
+      props.aired ? "program-event-aired" : "program-event-upcoming",
+      props.occurrenceStatus === "cancelled" ? "program-event-cancelled" : "",
+    ].filter(Boolean);
+  },
 });
 
 watch(filteredEvents, events => {
@@ -129,6 +146,17 @@ watch(filteredEvents, events => {
 
 watch(locale, nextLocale => {
   calendarOptions.locale = nextLocale === "en" ? enGbLocale : nextLocale === "ja" ? jaLocale : zhCnLocale;
+});
+
+watch(showEventernote, enabled => {
+  eventernoteRequestId += 1;
+  eventernoteLoading.value = false;
+  eventernoteError.value = "";
+  if (!enabled) {
+    eventernoteEvents.value = [];
+    return;
+  }
+  loadEventernoteEvents();
 });
 
 watch(requestedMonth, month => {
@@ -279,6 +307,42 @@ function eventCast(event) {
   return castColorSegments(eventPeople(event), props.absentMembers || props.absent_members);
 }
 
+function eventernoteTime(value) {
+  const match = String(value || "").match(/^(\d{1,2}):(\d{2})/);
+  return match ? `${match[1].padStart(2, "0")}:${match[2]}` : "";
+}
+
+function normalizeEventernoteEvent(item) {
+  const date = String(item.event_date || "").trim();
+  const title = String(item.title || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !title) return null;
+  const startTime = eventernoteTime(item.start_time);
+  const start = startTime ? `${date}T${startTime}:00+09:00` : date;
+  const people = Array.isArray(item.performers)
+    ? item.performers.map(person => String(person || "").trim()).filter(Boolean)
+    : [];
+  return {
+    id: `eventernote-${item.id || `${date}-${title}`}`,
+    title,
+    start,
+    allDay: !startTime,
+    extendedProps: {
+      isEventernote: true,
+      sourceUrl: String(item.source_url || "").trim(),
+      originalDate: date,
+      originalTime: startTime,
+      timezone: item.timezone || "Asia/Tokyo",
+      people,
+      guests: [],
+      absentMembers: [],
+      delivery: "",
+      occurrenceStatus: "",
+      aired: new Date(startTime ? start : `${date}T00:00:00+09:00`).getTime() <= Date.now(),
+      note: [item.place_name, item.raw_time_text].filter(Boolean).join(" · "),
+    },
+  };
+}
+
 function eventMatchesFilters(event) {
   const props = event.extendedProps || {};
   if (filters.delivery && props.delivery !== filters.delivery) return false;
@@ -301,6 +365,7 @@ function listDateLabel(value) {
 }
 
 function eventDeliveryLabel(event) {
+  if (event.extendedProps?.isEventernote) return t("线下活动");
   return event.extendedProps?.delivery === "live" ? t("直播") : t("录播");
 }
 
@@ -417,11 +482,12 @@ function goToToday() {
 }
 
 function renderEventContent(info) {
-  const props = info.event.extendedProps;
+  const props = info.event.extendedProps || {};
+  const isEventernote = Boolean(props.isEventernote);
   const cast = eventCast(info.event);
   const deliveryLabel = props.delivery === "live" ? t("直播") : t("录播");
   const content = document.createElement("div");
-  content.className = "program-event-content";
+  content.className = `program-event-content${isEventernote ? " program-event-external" : ""}`;
 
   const markerStack = document.createElement("span");
   markerStack.className = "program-event-markers";
@@ -469,8 +535,30 @@ function renderEventContent(info) {
   }
   label.append(document.createTextNode(info.event.title));
   details.append(label);
-  content.append(markerStack, details);
+  if (!isEventernote) content.append(markerStack);
+  content.append(details);
   return { domNodes: [content] };
+}
+
+async function loadEventernoteEvents(range = calendarRequestRange.value) {
+  if (!showEventernote.value || !range) return;
+  const requestId = ++eventernoteRequestId;
+  eventernoteLoading.value = true;
+  eventernoteError.value = "";
+  try {
+    const params = new URLSearchParams({ from_date: range.fromDate, to_date: range.toDate });
+    const data = await api(`/api/eventernote/events?${params}`);
+    if (requestId !== eventernoteRequestId || !showEventernote.value) return;
+    eventernoteEvents.value = (Array.isArray(data.items) ? data.items : [])
+      .map(normalizeEventernoteEvent)
+      .filter(Boolean);
+  } catch (requestError) {
+    if (requestId !== eventernoteRequestId || !showEventernote.value) return;
+    eventernoteEvents.value = [];
+    eventernoteError.value = requestError.message || t("Eventernote 数据加载失败");
+  } finally {
+    if (requestId === eventernoteRequestId) eventernoteLoading.value = false;
+  }
 }
 
 async function loadCalendar(info) {
@@ -482,9 +570,12 @@ async function loadCalendar(info) {
       start: shiftCalendarDate(info?.startStr, -2),
       end: shiftCalendarDate(info?.endStr, 2),
     });
+    calendarRequestRange.value = { fromDate: params.get("start"), toDate: params.get("end") };
     const data = await api(`/api/programs/calendar?${params}`);
     programs.value = data.programs;
     allEvents.value = data.events;
+    if (showEventernote.value) await loadEventernoteEvents();
+    else eventernoteEvents.value = [];
     if (selectedEvent.value && !selectedProgram.value) closeDrawer();
   } catch (requestError) {
     error.value = requestError.message || t("节目日历加载失败");
@@ -500,6 +591,10 @@ function selectEvent(info) {
 
 function openEvent(event) {
   const props = event.extendedProps || {};
+  if (props.isEventernote) {
+    if (props.sourceUrl) window.open(props.sourceUrl, "_blank", "noopener,noreferrer");
+    return;
+  }
   const original = localDateTimeParts(props.originalStart || props.originalDate);
   selectedEvent.value = {
     eventId: event.id,
@@ -547,6 +642,7 @@ onUnmounted(() => {
   document.removeEventListener("click", closeCastFilter);
   window.cancelAnimationFrame(calendarAnimationFrame);
   window.clearTimeout(calendarAnimationTimer);
+  eventernoteRequestId += 1;
 });
 </script>
 
@@ -561,7 +657,7 @@ onUnmounted(() => {
        <RouterLink class="back" to="/music">← {{ t("返回音乐目录") }}</RouterLink>
     </div>
 
-      <p v-if="error" class="state error">{{ error }}</p>
+      <p v-if="displayError" class="state error">{{ displayError }}</p>
       <div class="program-layout">
         <section class="program-calendar-card">
           <div class="section-heading">
@@ -598,6 +694,7 @@ onUnmounted(() => {
                  <option value="recorded">{{ t("录播") }}</option>
                </select>
              </label>
+             <button type="button" class="secondary program-action-button program-eventernote-toggle" :class="{ selected: showEventernote }" :aria-pressed="showEventernote" @click="showEventernote = !showEventernote">{{ eventernoteLoading ? t("读取 Eventernote 数据……") : showEventernote ? t("隐藏 Eventernote 数据") : t("显示 Eventernote 数据") }}</button>
              <button v-if="activeFilterCount" type="button" class="secondary program-action-button program-clear-filter" @click="clearFilters">{{ t("清除筛选") }}</button>
             </div>
             <div class="program-calendar-jump">

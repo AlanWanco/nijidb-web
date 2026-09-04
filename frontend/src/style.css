@@ -4579,14 +4579,27 @@ html[data-theme="mocha"] .dp__theme_dark {
 }
 
 .program-json-dialog {
+  display: flex;
+  flex-direction: column;
   width: min(980px, 100%);
   max-height: min(900px, 92vh);
-  overflow: auto;
-  padding: clamp(20px, 4vw, 34px);
+  overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--line) 75%, var(--accent));
   border-radius: 20px;
   background: var(--surface);
   box-shadow: 0 24px 80px #10122566;
+}
+
+.program-json-dialog-scroll {
+  min-height: 0;
+  overflow: auto;
+  padding: clamp(20px, 4vw, 34px);
+}
+
+.program-json-dialog.program-json-mode-dialog {
+  display: block;
+  overflow: auto;
+  padding: clamp(20px, 4vw, 34px);
 }
 
 .program-json-dialog-heading,
@@ -5944,8 +5957,15 @@ html[data-theme="mocha"] .dp__theme_dark {
 
   .program-json-dialog {
     max-height: 94vh;
-    padding: 18px;
     border-radius: 17px;
+  }
+
+  .program-json-dialog-scroll {
+    padding: 18px;
+  }
+
+  .program-json-dialog.program-json-mode-dialog {
+    padding: 18px;
   }
 
   .program-json-summary,

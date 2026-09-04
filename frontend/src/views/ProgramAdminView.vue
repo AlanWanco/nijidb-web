@@ -1363,7 +1363,7 @@ onUnmounted(() => {
        <div v-else class="occurrence-editor-layout">
           <div ref="occurrenceListRef" class="occurrence-list" :style="occurrenceListHeight ? { '--occurrence-list-height': `${occurrenceListHeight}px` } : undefined">
                 <button v-for="row in occurrenceRows" :key="occurrenceRowKey(row)" :ref="element => setOccurrenceItemRef(row, element)" type="button" class="occurrence-list-item" :class="{ selected: occurrenceRowKey(occurrenceDraft) === occurrenceRowKey(row) }" @click="editOccurrence(row)">
-               <span v-if="occurrenceCast(row).length" class="occurrence-list-cast-line" role="img" :aria-label="`${t('出场成员')}：${occurrenceCast(row).map(member => member.name).join('、')}`" :title="occurrenceCast(row).map(member => member.name).join('、')"><i v-for="member in occurrenceCast(row)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
+                <span v-if="occurrenceCast(row).length" class="occurrence-list-cast-line" role="img" :aria-label="`${t('出场成员')}：${occurrenceCast(row).map(member => member.name).join('、')}`" :title="occurrenceCast(row).map(member => member.name).join('、')"><i v-for="member in occurrenceCast(row)" :key="member.name" :style="{ '--cast-color': member.color, backgroundColor: member.color }"></i></span>
               <span><b>{{ occurrenceEpisodeLabel(row) }}</b><em :class="{ cancelled: row.status === 'cancelled', deleted: row.status === 'deleted', aired: row.aired }">{{ occurrenceStatus(row) }}</em></span>
              <strong>{{ row.date }}</strong>
               <small v-if="row.title" class="occurrence-list-title">{{ row.title }}</small>
@@ -1455,8 +1455,9 @@ onUnmounted(() => {
       </div>
     </section>
 
-     <div v-if="importPreview" class="program-json-modal" role="dialog" aria-modal="true" aria-labelledby="program-json-preview-title" @click.self="closeImportPreview">
-       <section class="program-json-dialog">
+      <div v-if="importPreview" class="program-json-modal" role="dialog" aria-modal="true" aria-labelledby="program-json-preview-title" @click.self="closeImportPreview">
+        <section class="program-json-dialog">
+          <div class="program-json-dialog-scroll">
          <div class="program-json-dialog-heading">
             <div><p class="eyebrow">JSON IMPORT / PREVIEW</p><h2 id="program-json-preview-title">{{ t("导入预览") }}</h2><small>{{ importFileName }} · {{ importScheduleModeLabel(importPreview.import_options?.schedule_mode) }} · {{ importTargetMode === "overwrite" ? t("将覆盖所选节目") : t("将新建节目") }}</small></div>
             <button type="button" class="secondary program-action-button" :disabled="importSubmitting" @click="closeImportPreview">{{ t("关闭") }}</button>
@@ -1509,8 +1510,9 @@ onUnmounted(() => {
            <button type="button" class="secondary program-action-button" :disabled="importSubmitting" @click="closeImportPreview">{{ t("取消") }}</button>
             <button type="button" class="program-action-button" :disabled="importSubmitting || (importTargetMode === 'overwrite' && !importTargetProgramId)" @click="submitImport">{{ importSubmitting ? t("导入中……") : importTargetMode === "overwrite" ? t("确认覆盖导入") : t("确认新建导入") }}</button>
          </div>
-       </section>
-     </div>
+          </div>
+        </section>
+      </div>
 
      <div v-if="exportModeDialog" class="program-json-modal" role="dialog" aria-modal="true" aria-labelledby="program-json-export-title" @click.self="closeExportModeDialog">
        <section class="program-json-dialog program-json-mode-dialog">

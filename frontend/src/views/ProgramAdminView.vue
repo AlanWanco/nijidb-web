@@ -330,7 +330,7 @@ function setEpisodeStartMode(mode) {
 function episodeStartPayload() {
   if (episodeStartMode.value === "zero") return 0;
   if (episodeStartMode.value === "one") return 1;
-  const raw = episodeStartCustom.value.trim();
+  const raw = String(episodeStartCustom.value ?? "").trim();
   if (!/^\d+$/.test(raw)) throw new Error(t("自定义首集编号必须是 0 到 9999 的整数"));
   const parsed = Number(raw);
   if (!Number.isSafeInteger(parsed) || parsed > 9999) throw new Error(t("自定义首集编号必须是 0 到 9999 的整数"));

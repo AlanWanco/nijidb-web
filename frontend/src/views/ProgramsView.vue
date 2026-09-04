@@ -336,7 +336,7 @@ function normalizeEventernoteEvent(item) {
       people,
       guests: [],
       absentMembers: [],
-      delivery: "",
+      delivery: "live",
       occurrenceStatus: "",
       aired: new Date(startTime ? start : `${date}T00:00:00+09:00`).getTime() <= Date.now(),
       note: [item.place_name, item.raw_time_text].filter(Boolean).join(" · "),

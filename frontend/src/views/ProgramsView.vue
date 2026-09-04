@@ -171,6 +171,7 @@ const selectedProgram = computed(() => {
   const programId = selectedEvent.value?.programId;
   return programs.value.find(program => program.id === programId) || null;
 });
+const selectedEventernote = computed(() => selectedEvent.value?.isEventernote ? selectedEvent.value : null);
 const selectedAdminEditorPath = computed(() => selectedProgram.value && selectedEvent.value
   ? programAdminPath(selectedProgram.value.id, {
     panel: "occurrences",
@@ -576,7 +577,7 @@ async function loadCalendar(info) {
     allEvents.value = data.events;
     if (showEventernote.value) await loadEventernoteEvents();
     else eventernoteEvents.value = [];
-    if (selectedEvent.value && !selectedProgram.value) closeDrawer();
+    if (selectedEvent.value && !selectedProgram.value && !selectedEvent.value.isEventernote) closeDrawer();
   } catch (requestError) {
     error.value = requestError.message || t("节目日历加载失败");
   } finally {
@@ -592,7 +593,14 @@ function selectEvent(info) {
 function openEvent(event) {
   const props = event.extendedProps || {};
   if (props.isEventernote) {
-    if (props.sourceUrl) window.open(props.sourceUrl, "_blank", "noopener,noreferrer");
+    selectedEvent.value = {
+      eventId: event.id,
+      title: event.title,
+      date: props.originalDate || eventDate(event),
+      time: props.originalTime || eventTime(event),
+      ...props,
+    };
+    drawerOpen.value = true;
     return;
   }
   const original = localDateTimeParts(props.originalStart || props.originalDate);
@@ -759,8 +767,34 @@ onUnmounted(() => {
     <Transition name="program-drawer-backdrop">
       <div v-if="drawerOpen" class="program-drawer-backdrop" @click="closeDrawer"></div>
     </Transition>
-    <Transition name="program-drawer-panel">
-       <aside v-if="drawerOpen && selectedEvent && selectedProgram" class="program-drawer" :aria-label="t('节目详情')">
+     <Transition name="program-drawer-panel">
+        <aside v-if="drawerOpen && selectedEventernote" class="program-drawer" :aria-label="t('节目详情')">
+        <div class="program-drawer-header">
+          <span class="eyebrow">{{ t("节目详情") }}</span>
+          <button type="button" class="icon-button" :aria-label="t('关闭详情')" :title="t('关闭详情')" @click="closeDrawer">×</button>
+        </div>
+        <div class="program-drawer-body">
+          <div class="program-drawer-tags">
+            <span class="program-subprogram-key">{{ t("线下活动") }}</span>
+          </div>
+          <h2>{{ selectedEventernote.title }}</h2>
+          <div class="program-occurrence-card">
+            <span v-if="eventCast(selectedEventernote).length" class="program-drawer-cast-line" role="img" :aria-label="`${t('出场成员')}：${eventCast(selectedEventernote).map(member => member.name).join('、')}`" :title="eventCast(selectedEventernote).map(member => member.name).join('、')"><i v-for="member in eventCast(selectedEventernote)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
+            <span>{{ t("线下活动") }} · {{ occurrenceAirStatus(selectedEventernote) }}</span>
+            <strong>{{ fullDateLabel(selectedEventernote.date) }}</strong>
+            <b v-if="selectedEventernote.time">{{ selectedEventernote.time }}</b>
+            <small>{{ t("显示时区") }}：{{ deviceTimeZone }}；{{ t("排期时区") }}：{{ timezoneLabel(selectedEventernote.timezone) }}</small>
+            <p v-if="selectedEventernote.note">{{ selectedEventernote.note }}</p>
+          </div>
+          <dl class="program-meta">
+            <template v-if="selectedEventernote.sourceUrl">
+              <dt>{{ t("相关链接") }}</dt>
+              <dd><a class="program-meta-link" :href="selectedEventernote.sourceUrl" target="_blank" rel="noopener noreferrer">Eventernote ↗</a></dd>
+            </template>
+          </dl>
+        </div>
+      </aside>
+        <aside v-else-if="drawerOpen && selectedEvent && selectedProgram" class="program-drawer" :aria-label="t('节目详情')">
        <div class="program-drawer-header">
          <span class="eyebrow">{{ t("节目详情") }}</span>
          <button type="button" class="icon-button" :aria-label="t('关闭详情')" :title="t('关闭详情')" @click="closeDrawer">×</button>

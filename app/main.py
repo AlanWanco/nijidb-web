@@ -1306,11 +1306,13 @@ def import_preview_payload(
     }
     payload["program"]["people"] = program_people(program.get("people", []))
     payload["occurrences"] = []
-    for occurrence in occurrences:
+    episode_numbers = import_occurrence_episode_numbers(occurrences, program_episode_start(program))
+    for index, occurrence in enumerate(occurrences):
         item = {
             key: occurrence.get(key, "")
             for key in ("original_date", "title", "generated_date", "original_time", "delivery", "status", "special", "adjusted_date", "adjusted_time", "shift_following_days", "source_url", "mirror_url", "subtitle_url", "note")
         }
+        item["episode"] = episode_numbers[index]
         item["guests"] = program_people(occurrence.get("guests", []))
         item["absent_members"] = program_people(occurrence.get("absent_members", []))
         payload["occurrences"].append(item)
@@ -1754,6 +1756,18 @@ def occurrence_episode_numbers(records: list[dict[str, Any]], episode_start: int
         numbers.append(episode)
         if record.get("special") != "EX":
             episode += 1
+    return numbers
+
+
+def import_occurrence_episode_numbers(records: list[dict[str, Any]], episode_start: int = 1) -> list[int]:
+    ordered = sorted(
+        enumerate(records),
+        key=lambda item: (item[1]["original_date"], item[1].get("original_time", ""), item[0]),
+    )
+    ordered_numbers = occurrence_episode_numbers([record for _, record in ordered], episode_start)
+    numbers = [0] * len(records)
+    for (index, _), number in zip(ordered, ordered_numbers):
+        numbers[index] = number
     return numbers
 
 

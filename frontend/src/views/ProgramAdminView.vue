@@ -6,6 +6,7 @@ import "@vuepic/vue-datepicker/dist/main.css";
 import { api } from "../api";
 import { locale, localeTag, t } from "../i18n";
 import { NIJIGASAKI_CAST, castColorSegments, castMemberMatches } from "../programCast";
+import { occurrenceLinkItems } from "../programLinks";
 
 const weekdayNames = computed(() => locale.value === "en"
   ? ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -445,6 +446,12 @@ function importStatusLabel(value) {
 
 function importSpecialLabel(value) {
   return value === "EX" ? t("EX 特别节目") : t("普通单集");
+}
+
+function importOccurrenceEpisodeLabel(occurrence) {
+  if (occurrence.special === "EX") return t("EX 特别节目");
+  const label = t("第 {count} 期", { count: occurrence.episode });
+  return ["cancelled", "deleted"].includes(occurrence.status) ? `${t("原定")} ${label}` : label;
 }
 
 async function submitImport() {
@@ -1165,15 +1172,15 @@ onUnmounted(() => {
       <p v-if="loading" class="state">{{ t("正在读取节目……") }}</p>
       <p v-else-if="!programs.length" class="muted">{{ t("还没有录入节目。") }}</p>
       <p v-else-if="!filteredPrograms.length" class="muted">{{ t("当前关键词和 Cast 筛选没有匹配的节目。") }}</p>
-      <article v-for="program in filteredPrograms" :key="program.id" class="program-admin-item" :class="{ 'is-subprogram': Boolean(program.parent_id) }">
-        <span v-if="programCast(program).length" class="program-admin-cast-line" :aria-label="t('固定参与成员')">
-          <i v-for="member in programCast(program)" :key="member.name" :style="{ '--cast-color': member.color }"></i>
-        </span>
-        <div>
-            <div class="program-admin-tags"><span class="program-kind">{{ program.parent_id ? t("子节目") : t("主节目") }}</span><span class="program-subprogram-key">{{ program.parent_id ? program.subprogram_name : t("主节目") }}</span><span class="program-status" :class="`status-${program.status}`">{{ programStatus(program) }}</span><span v-if="program.update_status === 'updated'" class="program-update-status">{{ updateStatusLabel(program) }}</span><span class="program-type-label" :class="`program-type-${program.category}`">{{ programType(program) }} · {{ formatLabel(program) }}</span></div>
-          <h3>{{ program.title }}</h3>
-           <p>{{ scheduleLabel(program) }} · {{ t("已播") }} {{ program.episode_count }} {{ t("期") }}{{ program.parent_id ? ` · ${t("挂在")} ${program.title}` : "" }}</p>
-        </div>
+       <article v-for="program in filteredPrograms" :key="program.id" class="program-admin-item" :class="{ 'is-subprogram': Boolean(program.parent_id) }">
+         <span v-if="programCast(program).length" class="program-admin-cast-line" :aria-label="t('固定参与成员')">
+           <i v-for="member in programCast(program)" :key="member.name" :style="{ '--cast-color': member.color }"></i>
+         </span>
+         <div>
+             <div class="program-admin-tags"><span class="program-kind">{{ program.parent_id ? t("子节目") : t("主节目") }}</span><span v-if="program.parent_id" class="program-parent-title-key" :title="program.title">{{ program.title }}</span><span class="program-status" :class="`status-${program.status}`">{{ programStatus(program) }}</span><span v-if="program.update_status === 'updated'" class="program-update-status">{{ updateStatusLabel(program) }}</span><span class="program-type-label" :class="`program-type-${program.category}`">{{ programType(program) }} · {{ formatLabel(program) }}</span></div>
+           <h3>{{ program.parent_id ? program.subprogram_name : program.title }}</h3>
+            <p>{{ scheduleLabel(program) }} · {{ t("已播") }} {{ program.episode_count }} {{ t("期") }}</p>
+         </div>
         <div class="program-admin-actions">
           <button type="button" class="secondary program-action-button" @click="editProgram(program)">{{ t("编辑") }}</button>
           <button type="button" class="danger program-action-button" :disabled="deletingId === program.id" @click="deleteProgram(program)">{{ deletingId === program.id ? t("删除中……") : t("删除") }}</button>
@@ -1479,12 +1486,17 @@ onUnmounted(() => {
         </section>
          <section class="program-json-preview-section">
            <div class="program-json-preview-heading"><div><p class="form-kicker">EPISODE CONTENT</p><h3>{{ t("单集内容") }}</h3></div><span class="section-count">{{ importPreview.counts.occurrences }}</span></div>
-          <div v-if="importPreview.occurrences.length" class="program-json-occurrence-list">
-            <article v-for="(occurrence, index) in importPreview.occurrences" :key="`${occurrence.original_date}-${index}`" class="program-json-occurrence-item">
-                <div class="program-json-occurrence-topline"><strong>{{ occurrence.original_date }}</strong><span>{{ occurrence.original_time || t("全天") }}</span><span v-if="occurrence.status === 'rescheduled'">→ {{ occurrence.adjusted_date }}{{ occurrence.adjusted_time ? ` ${occurrence.adjusted_time}` : "" }}</span><span>{{ importDeliveryLabel(occurrence.delivery) }}</span><span>{{ importSpecialLabel(occurrence.special) }}</span><span :class="{ cancelled: occurrence.status === 'cancelled', rescheduled: occurrence.status === 'rescheduled', deleted: occurrence.status === 'deleted' }">{{ importStatusLabel(occurrence.status) }}</span></div>
+           <div v-if="importPreview.occurrences.length" class="program-json-occurrence-list">
+             <article v-for="(occurrence, index) in importPreview.occurrences" :key="`${occurrence.original_date}-${index}`" class="program-json-occurrence-item">
+               <div class="program-json-occurrence-topline"><strong>{{ importOccurrenceEpisodeLabel(occurrence) }} · {{ occurrence.original_date }}</strong><span>{{ occurrence.original_time || t("全天") }}</span><span v-if="occurrence.status === 'rescheduled'">→ {{ occurrence.adjusted_date }}{{ occurrence.adjusted_time ? ` ${occurrence.adjusted_time}` : "" }}</span><span>{{ importDeliveryLabel(occurrence.delivery) }}</span><span>{{ importSpecialLabel(occurrence.special) }}</span><span :class="{ cancelled: occurrence.status === 'cancelled', rescheduled: occurrence.status === 'rescheduled', deleted: occurrence.status === 'deleted' }">{{ importStatusLabel(occurrence.status) }}</span></div>
                <strong v-if="occurrence.title" class="program-json-occurrence-title">{{ occurrence.title }}</strong>
                 <p v-if="occurrence.guests?.length || occurrence.absent_members?.length || occurrence.note">{{ occurrence.guests?.length ? `${t("嘉宾")}：${occurrence.guests.join("、")}` : "" }}{{ occurrence.guests?.length && (occurrence.absent_members?.length || occurrence.note) ? " · " : "" }}{{ occurrence.absent_members?.length ? `${t("缺席")}：${occurrence.absent_members.join("、")}` : "" }}{{ occurrence.absent_members?.length && occurrence.note ? " · " : "" }}{{ occurrence.note }}</p>
-              <small v-if="occurrence.source_url || occurrence.mirror_url || occurrence.subtitle_url">{{ [occurrence.source_url, occurrence.mirror_url, occurrence.subtitle_url].filter(Boolean).join(" · ") }}</small>
+               <div v-if="occurrenceLinkItems(occurrence).length" class="program-episode-links">
+                 <template v-for="link in occurrenceLinkItems(occurrence)" :key="link.key">
+                   <a v-if="link.href" class="program-meta-link" :href="link.href" target="_blank" rel="noopener noreferrer">{{ link.label }}：{{ link.display }} ↗</a>
+                   <span v-else>{{ link.label }}：{{ link.display }}</span>
+                 </template>
+               </div>
             </article>
           </div>
            <p v-else class="muted">{{ t("没有单集覆盖资料；导入后将只按排期规则生成。") }}</p>

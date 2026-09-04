@@ -4457,18 +4457,18 @@ html[data-theme="mocha"] .dp__theme_dark {
 
 .program-admin-item {
   position: relative;
-  display: flex;
-  align-items: stretch;
-  flex-direction: column;
-  gap: 11px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
   border-top: 1px solid var(--line);
-  padding: 17px 0 17px 14px;
+  padding: 18px 0 18px 14px;
 }
 
 .program-admin-cast-line {
   position: absolute;
-  top: 17px;
-  bottom: 17px;
+  top: 18px;
+  bottom: 18px;
   left: 0;
   display: flex;
   width: 6px;
@@ -4535,9 +4535,9 @@ html[data-theme="mocha"] .dp__theme_dark {
 }
 
 .program-admin-actions {
-  align-items: center;
-  border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
-  padding-top: 10px;
+   align-items: center;
+   border-top: 0;
+   padding-top: 0;
 }
 
 .program-action-button {
@@ -5415,9 +5415,11 @@ html[data-theme="mocha"] .dp__theme_dark {
 }
 
 .occurrence-list-item .occurrence-list-cast-line {
-  top: 12px;
-  bottom: 12px;
-  justify-content: initial;
+   top: 12px;
+   bottom: 12px;
+   justify-content: initial;
+   z-index: 1;
+   pointer-events: none;
 }
 
 .occurrence-list-item .occurrence-list-absence {
@@ -5792,7 +5794,8 @@ html[data-theme="mocha"] .dp__theme_dark {
 
   .program-admin-item {
     align-items: flex-start;
-    flex-direction: column;
+    grid-template-columns: 1fr;
+    gap: 11px;
   }
 
   .program-panel-nav {
@@ -5913,6 +5916,11 @@ html[data-theme="mocha"] .dp__theme_dark {
   .settings-heading-actions,
   .program-editor-danger-actions {
     width: 100%;
+  }
+
+  .program-admin-actions {
+    border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+    padding-top: 10px;
   }
 
   .program-editor-danger-actions {

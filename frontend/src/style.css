@@ -5140,6 +5140,15 @@ html[data-theme="mocha"] .dp__theme_dark {
   background: linear-gradient(90deg, var(--accent-soft), transparent 54%);
 }
 
+.program-readonly-item.is-subprogram {
+  padding-left: 24px;
+  background: linear-gradient(90deg, var(--accent-soft), transparent 38%);
+}
+
+.program-readonly-item.is-subprogram:hover {
+  padding-left: 28px;
+}
+
 .program-readonly-item h3 {
   margin: 7px 0 4px;
   font-size: 16px;
@@ -5773,9 +5782,25 @@ html[data-theme="mocha"] .dp__theme_dark {
     line-height: 1;
   }
 
-  .program-calendar .program-event-markers,
-  .program-calendar .program-event-details {
+  .program-calendar .program-event-markers {
     display: none;
+  }
+
+  .program-calendar .program-event-details {
+    display: block;
+    height: 100%;
+  }
+
+  .program-calendar .program-event-label {
+    display: none;
+  }
+
+  .program-calendar .program-event-color-strip {
+    height: 100%;
+  }
+
+  .program-calendar .program-event-color-strip.empty {
+    background: var(--program-event-color, var(--accent));
   }
 
   .program-calendar .program-event-cancelled {

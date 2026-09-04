@@ -297,7 +297,7 @@ onUnmounted(() => document.removeEventListener("click", closeCastFilter));
          <p v-else-if="!programs.length" class="muted">{{ t("还没有录入节目。") }}</p>
          <p v-else-if="!filteredPrograms.length" class="muted">{{ t("当前搜索和 Cast 筛选没有匹配的节目。") }}</p>
         <div v-else class="program-readonly-list">
-          <RouterLink v-for="program in filteredPrograms" :key="program.id" class="program-readonly-item" :to="`/programs/archive/${encodeURIComponent(program.id)}`">
+          <RouterLink v-for="program in filteredPrograms" :key="program.id" class="program-readonly-item" :class="{ 'is-subprogram': Boolean(program.parent_id) }" :to="`/programs/archive/${encodeURIComponent(program.id)}`">
              <span v-if="programCast(program).length" class="program-admin-cast-line" :aria-label="t('固定参与成员')"><i v-for="member in programCast(program)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
             <div>
                 <div class="program-admin-tags"><span class="program-kind" :class="`program-kind-${program.category}`">{{ programType(program) }}</span><span v-if="program.parent_id" class="program-parent-title-key" :title="program.title">{{ program.title }}</span><span class="program-status" :class="`status-${program.status}`">{{ programStatus(program) }}</span></div>

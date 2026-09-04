@@ -4489,7 +4489,7 @@ html[data-theme="mocha"] .dp__theme_dark {
 }
 
 .program-admin-item.is-subprogram {
-  padding-left: 24px;
+  padding-left: 40px;
   background: linear-gradient(90deg, var(--accent-soft), transparent 38%);
 }
 
@@ -5141,12 +5141,12 @@ html[data-theme="mocha"] .dp__theme_dark {
 }
 
 .program-readonly-item.is-subprogram {
-  padding-left: 24px;
+  padding-left: 40px;
   background: linear-gradient(90deg, var(--accent-soft), transparent 38%);
 }
 
 .program-readonly-item.is-subprogram:hover {
-  padding-left: 28px;
+  padding-left: 44px;
 }
 
 .program-readonly-item h3 {

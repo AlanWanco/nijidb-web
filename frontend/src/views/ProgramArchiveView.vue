@@ -121,6 +121,11 @@ function programCast(program) {
   return castColorSegments(program.people || []);
 }
 
+function searchHitLabel(hit) {
+  const episode = hit.special === "EX" ? t("EX 特别节目") : t("第 {count} 期", { count: hit.episode });
+  return hit.title ? `${episode} · ${hit.title}` : episode;
+}
+
 function occurrenceCast(row) {
   return castColorSegments([...(selectedProgram.value?.people || []), ...(row.guests || [])], row.absent_members);
 }
@@ -304,9 +309,10 @@ onUnmounted(() => window.clearTimeout(programSearchTimer));
              <span v-if="programCast(program).length" class="program-admin-cast-line" :aria-label="t('固定参与成员')"><i v-for="member in programCast(program)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
             <div>
                 <div class="program-admin-tags"><span class="program-kind" :class="`program-kind-${program.category}`">{{ programType(program) }}</span><span v-if="program.parent_id" class="program-parent-title-key" :title="program.title">{{ program.title }}</span><span class="program-status" :class="`status-${program.status}`">{{ programStatus(program) }}</span></div>
-               <h3>{{ program.parent_id ? program.subprogram_name : program.title }}</h3>
-               <p>{{ scheduleLabel(program) }} · {{ t("已播") }} {{ program.episode_count }} {{ t("期") }}</p>
-            </div>
+                <h3>{{ program.parent_id ? program.subprogram_name : program.title }}</h3>
+                <p>{{ scheduleLabel(program) }} · {{ t("已播") }} {{ program.episode_count }} {{ t("期") }}</p>
+                <p v-if="program.search_hits?.length" class="program-search-hits">{{ t("命中单集：") }}{{ program.search_hits.map(searchHitLabel).join("、") }}</p>
+             </div>
             <span class="program-readonly-arrow" aria-hidden="true">→</span>
           </RouterLink>
         </div>

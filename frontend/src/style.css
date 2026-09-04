@@ -5235,6 +5235,13 @@ html[data-theme="mocha"] .dp__theme_dark {
   font-size: 12px;
 }
 
+.program-readonly-item .program-search-hits {
+  margin-top: 5px;
+  color: var(--accent);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
 .program-readonly-arrow {
   padding-right: 4px;
   color: var(--accent);

@@ -2012,41 +2012,37 @@ def replace_imported_program_row(
     replace_program_periods(conn, target_id, values["periods"], updated_at)
 
 
+def text_search_sql(alias: str, fields: tuple[str, ...]) -> str:
+    text = " || ' ' || ".join(f"coalesce({alias}.{field}, '')" for field in fields)
+    return f"instr(lower({text}), lower(?)) > 0"
+
+
 def program_rows(query: str = "") -> list[dict[str, Any]]:
     search = query.strip()
+    program_search_sql = text_search_sql("p", ("title", "subprogram_name", "description", "people", "official_url"))
+    occurrence_search_sql = text_search_sql("o", ("title", "note", "guests", "source_url", "mirror_url", "subtitle_url"))
+    matched_occurrence_ids: dict[str, set[int]] = {}
     with db() as conn:
         search_where = ""
         search_params: tuple[str, ...] = ()
         if search:
-            search_where = """
-            WHERE instr(
-                lower(
-                    coalesce(p.title, '') || ' ' ||
-                    coalesce(p.subprogram_name, '') || ' ' ||
-                    coalesce(p.description, '') || ' ' ||
-                    coalesce(p.people, '') || ' ' ||
-                    coalesce(p.official_url, '')
-                ),
-                lower(?)
-            ) > 0
+            search_where = f"""
+            WHERE {program_search_sql}
             OR EXISTS (
                 SELECT 1
                 FROM program_occurrences AS o
                 WHERE o.program_id = p.id
-                  AND instr(
-                      lower(
-                          coalesce(o.title, '') || ' ' ||
-                          coalesce(o.note, '') || ' ' ||
-                          coalesce(o.guests, '') || ' ' ||
-                          coalesce(o.source_url, '') || ' ' ||
-                          coalesce(o.mirror_url, '') || ' ' ||
-                          coalesce(o.subtitle_url, '')
-                      ),
-                      lower(?)
-                  ) > 0
+                  AND o.status != 'deleted'
+                  AND {occurrence_search_sql}
             )
             """
             search_params = (search, search)
+            matched_rows = conn.execute(
+                f"SELECT o.program_id, o.id FROM program_occurrences AS o WHERE o.status != 'deleted' AND {occurrence_search_sql}",
+                (search,),
+            ).fetchall()
+            for row in matched_rows:
+                matched_occurrence_ids.setdefault(row["program_id"], set()).add(row["id"])
         program_rows = conn.execute(
             f"SELECT p.* FROM programs AS p {search_where} ORDER BY p.category, p.title COLLATE NOCASE, CASE WHEN p.parent_id = '' THEN 0 ELSE 1 END, p.subprogram_name COLLATE NOCASE",
             search_params,
@@ -2059,7 +2055,24 @@ def program_rows(query: str = "") -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in occurrence_rows:
         grouped.setdefault(row["program_id"], []).append(occurrence_payload(row))
-    return [program_payload(row, grouped.get(row["id"], []), periods_grouped.get(row["id"])) for row in program_rows]
+    results = []
+    for row in program_rows:
+        payload = program_payload(row, grouped.get(row["id"], []), periods_grouped.get(row["id"]))
+        if search:
+            matched_ids = matched_occurrence_ids.get(row["id"], set())
+            episode_numbers = import_occurrence_episode_numbers(payload["occurrences"], program_episode_start(payload))
+            payload["search_hits"] = [
+                {
+                    "id": occurrence["id"],
+                    "episode": episode_numbers[index],
+                    "special": occurrence.get("special", ""),
+                    "title": occurrence.get("title", ""),
+                }
+                for index, occurrence in enumerate(payload["occurrences"])
+                if occurrence["id"] in matched_ids
+            ]
+        results.append(payload)
+    return results
 
 
 def program_json_occurrence_item(occurrence: dict[str, Any], freeze_effective_date: bool) -> dict[str, Any]:

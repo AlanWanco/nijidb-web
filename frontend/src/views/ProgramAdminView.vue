@@ -1170,7 +1170,7 @@ onUnmounted(() => {
           <i v-for="member in programCast(program)" :key="member.name" :style="{ '--cast-color': member.color }"></i>
         </span>
         <div>
-           <div class="program-admin-tags"><span class="program-kind">{{ program.parent_id ? t("子节目") : t("主节目") }}</span><span class="program-subprogram-key">{{ program.subprogram_name || t("主节目") }}</span><span class="program-status" :class="`status-${program.status}`">{{ programStatus(program) }}</span><span v-if="program.update_status === 'updated'" class="program-update-status">{{ updateStatusLabel(program) }}</span><span class="program-type-label" :class="`program-type-${program.category}`">{{ programType(program) }} · {{ formatLabel(program) }}</span></div>
+            <div class="program-admin-tags"><span class="program-kind">{{ program.parent_id ? t("子节目") : t("主节目") }}</span><span class="program-subprogram-key">{{ program.parent_id ? program.subprogram_name : t("主节目") }}</span><span class="program-status" :class="`status-${program.status}`">{{ programStatus(program) }}</span><span v-if="program.update_status === 'updated'" class="program-update-status">{{ updateStatusLabel(program) }}</span><span class="program-type-label" :class="`program-type-${program.category}`">{{ programType(program) }} · {{ formatLabel(program) }}</span></div>
           <h3>{{ program.title }}</h3>
            <p>{{ scheduleLabel(program) }} · {{ t("已播") }} {{ program.episode_count }} {{ t("期") }}{{ program.parent_id ? ` · ${t("挂在")} ${program.title}` : "" }}</p>
         </div>

@@ -671,7 +671,7 @@ onUnmounted(() => {
       <div class="program-drawer-body">
          <div class="program-drawer-tags">
             <span class="program-kind" :class="`program-kind-${selectedProgram.category}`">{{ programType(selectedProgram) }}</span>
-            <span class="program-subprogram-key">{{ selectedProgram.subprogram_name || t("主节目") }}</span>
+             <span class="program-subprogram-key">{{ selectedProgram.parent_id ? selectedProgram.subprogram_name : t("主节目") }}</span>
            <span class="program-status" :class="`status-${selectedProgram.status}`">{{ programStatus(selectedProgram) }}</span>
             <span v-if="selectedProgram.update_status === 'updated'" class="program-update-status">{{ updateStatusLabel(selectedProgram) }}</span>
         </div>

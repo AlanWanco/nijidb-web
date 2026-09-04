@@ -321,7 +321,7 @@ onUnmounted(() => document.removeEventListener("click", closeCastFilter));
         </div>
         <div class="program-readonly-detail-grid">
           <div>
-             <div class="program-admin-tags"><span class="program-kind" :class="`program-kind-${selectedProgram.category}`">{{ programType(selectedProgram) }}</span><span class="program-subprogram-key">{{ selectedProgram.subprogram_name || t("主节目") }}</span><span class="program-status" :class="`status-${selectedProgram.status}`">{{ programStatus(selectedProgram) }}</span></div>
+              <div class="program-admin-tags"><span class="program-kind" :class="`program-kind-${selectedProgram.category}`">{{ programType(selectedProgram) }}</span><span class="program-subprogram-key">{{ selectedProgram.parent_id ? selectedProgram.subprogram_name : t("主节目") }}</span><span class="program-status" :class="`status-${selectedProgram.status}`">{{ programStatus(selectedProgram) }}</span></div>
             <p v-if="selectedProgram.description" class="program-description">{{ selectedProgram.description }}</p>
             <dl class="program-meta">
                <dt>{{ t("节目属性") }}</dt><dd>{{ formatLabel(selectedProgram) }}</dd>

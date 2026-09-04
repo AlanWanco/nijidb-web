@@ -2989,6 +2989,10 @@ footer {
   background: var(--cast-color);
 }
 
+.program-readonly-episode-cast-line {
+  border-radius: 0;
+}
+
 .program-list-cast i {
   display: block;
   width: 8px;

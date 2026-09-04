@@ -796,6 +796,7 @@ onUnmounted(() => {
             <strong>{{ fullDateLabel(selectedEventernote.date) }}</strong>
             <b v-if="selectedEventernote.time">{{ selectedEventernote.time }}</b>
             <small>{{ t("显示时区") }}：{{ deviceTimeZone }}；{{ t("排期时区") }}：{{ timezoneLabel(selectedEventernote.timezone) }}</small>
+            <p v-if="selectedEventernote.people?.length">{{ t("参与成员") }}：{{ selectedEventernote.people.join("、") }}</p>
             <p v-if="selectedEventernote.note">{{ selectedEventernote.note }}</p>
           </div>
           <dl class="program-meta">

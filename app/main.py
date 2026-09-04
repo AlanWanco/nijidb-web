@@ -3419,6 +3419,19 @@ async def api_restore_rescheduled_occurrences(program_id: str, request: Request)
     return {"count": result.rowcount}
 
 
+@app.delete("/api/admin/programs/{program_id}/occurrences")
+async def api_clear_occurrences(program_id: str, request: Request) -> dict[str, int]:
+    require_api_admin(request)
+    with db() as conn:
+        program = conn.execute("SELECT title FROM programs WHERE id = ?", (program_id,)).fetchone()
+        if not program:
+            raise HTTPException(404, "节目不存在")
+        result = conn.execute("DELETE FROM program_occurrences WHERE program_id = ?", (program_id,))
+    if result.rowcount:
+        log_database_activity("program", f"清空单集覆盖：{program['title']}（{result.rowcount} 条）")
+    return {"deleted_count": result.rowcount}
+
+
 @app.patch("/api/admin/programs/{program_id}/occurrences/{occurrence_id}")
 async def api_update_occurrence(program_id: str, occurrence_id: int, request: Request) -> dict[str, Any]:
     require_api_admin(request)

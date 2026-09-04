@@ -5654,6 +5654,20 @@ html[data-theme="mocha"] .dp__theme_dark {
   font-size: 20px;
 }
 
+.occurrence-auto-save-status {
+  align-self: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.occurrence-auto-save-status.is-saved {
+  color: var(--accent);
+}
+
+.occurrence-auto-save-status.is-error {
+  color: #bd626b;
+}
+
 .occurrence-form label {
   display: block;
   margin: 12px 0 16px;

@@ -36,6 +36,7 @@ const saving = ref(false);
 const deletingId = ref("");
 const occurrenceLoading = ref(false);
 const occurrenceSaving = ref(false);
+const occurrenceAutoSaveState = ref("");
 const occurrenceRows = ref([]);
 const occurrenceListRef = ref(null);
 const occurrenceEditorRef = ref(null);
@@ -51,6 +52,11 @@ const importTargetProgramId = ref("");
 const exportModeDialog = ref(false);
 const message = ref("");
 const error = ref("");
+const occurrenceEditingRowKey = ref("");
+let occurrenceAutoSaveTimer = 0;
+let occurrenceAutoSaveQueued = false;
+let occurrenceDraftHydrating = false;
+let occurrenceDraftBaseline = "";
 let toastTimer = 0;
 
 function scheduleToastDismiss() {
@@ -167,6 +173,7 @@ const occurrenceRescheduleBaseDate = computed(() => occurrenceDraft.original_dat
   ? addDays(occurrenceDraft.original_date, Number(occurrenceDraft.schedule_shift_days) || 0)
   : occurrenceDraft.effective_date || occurrenceDraft.adjusted_date || "");
 const occurrenceDeleteLabel = computed(() => occurrenceDraft.status === "deleted" ? t("恢复单集") : t("删除单集"));
+const occurrenceAutoSaveEnabled = computed(() => Boolean(editingId.value && (occurrenceDraft.id || occurrenceDraft.generated || occurrenceDraft.materialized)));
 const selectedOccurrenceIndex = computed(() => {
   if (!occurrenceDraft.original_date) return -1;
   return occurrenceRows.value.findIndex(row => row.original_date === occurrenceDraft.original_date
@@ -543,6 +550,12 @@ function nextPanel() {
 
 watch([message, error], scheduleToastDismiss);
 
+watch(() => occurrenceBody(), () => {
+  if (occurrenceDraftHydrating || !occurrenceAutoSaveEnabled.value) return;
+  if (occurrenceDraftSignature() === occurrenceDraftBaseline) return;
+  queueOccurrenceAutoSave();
+}, { deep: true });
+
 async function loadPrograms() {
   loading.value = true;
   try {
@@ -632,8 +645,19 @@ function legacyPeriod(program) {
 }
 
 function resetOccurrenceDraft() {
+  window.clearTimeout(occurrenceAutoSaveTimer);
+  occurrenceAutoSaveTimer = 0;
+  occurrenceAutoSaveQueued = false;
+  occurrenceDraftHydrating = true;
   Object.assign(occurrenceDraft, blankOccurrence());
   occurrenceGuestInput.value = "";
+  occurrenceEditingRowKey.value = "";
+  occurrenceAutoSaveState.value = "";
+  occurrenceDraftBaseline = occurrenceDraftSignature();
+  nextTick(() => {
+    occurrenceDraftHydrating = false;
+    occurrenceDraftBaseline = occurrenceDraftSignature();
+  });
 }
 
 function resetForm() {
@@ -931,7 +955,12 @@ async function applyRescheduledToOriginal() {
 }
 
 function editOccurrence(row) {
+  window.clearTimeout(occurrenceAutoSaveTimer);
+  occurrenceAutoSaveTimer = 0;
+  occurrenceAutoSaveQueued = false;
+  occurrenceDraftHydrating = true;
   activePanel.value = "occurrences";
+  occurrenceEditingRowKey.value = occurrenceRowKey(row);
   Object.assign(occurrenceDraft, {
     id: row.id || "",
     original_date: row.original_date || "",
@@ -959,6 +988,12 @@ function editOccurrence(row) {
     timezone: row.timezone || "",
   });
   occurrenceGuestInput.value = "";
+  occurrenceAutoSaveState.value = "";
+  occurrenceDraftBaseline = occurrenceDraftSignature();
+  nextTick(() => {
+    occurrenceDraftHydrating = false;
+    occurrenceDraftBaseline = occurrenceDraftSignature();
+  });
 }
 
 function occurrenceRowKey(row) {
@@ -1045,46 +1080,143 @@ function occurrenceBody(overrides = {}) {
   };
 }
 
-async function saveOccurrence() {
+function savedOccurrenceRow(previous, saved) {
+  const status = saved.status || previous?.status || "scheduled";
+  const originalDate = saved.original_date ?? previous?.original_date ?? "";
+  const originalTime = saved.original_time ?? previous?.original_time ?? "";
+  const adjustedDate = saved.adjusted_date || "";
+  const adjustedTime = saved.adjusted_time || "";
+  return {
+    ...previous,
+    ...saved,
+    id: saved.id || previous?.id || "",
+    date: status === "rescheduled" && adjustedDate ? adjustedDate : originalDate,
+    time: status === "rescheduled" && adjustedTime ? adjustedTime : originalTime,
+    delivery: saved.delivery || previous?.delivery || form.delivery,
+    delivery_override: saved.delivery || "",
+    status,
+    generated: false,
+    individual: previous?.individual ?? occurrenceDraft.individual,
+    materialized: Boolean(saved.materialized),
+    manual: !saved.generated_date && !Boolean(saved.materialized),
+    timezone: previous?.timezone || occurrenceDraft.timezone || form.periods[0]?.timezone || "Asia/Tokyo",
+  };
+}
+
+function updateSavedOccurrence(rowKey, saved) {
+  const index = occurrenceRows.value.findIndex(row => (saved.id && String(row.id) === String(saved.id)) || occurrenceRowKey(row) === rowKey);
+  if (index < 0) return null;
+  const updated = savedOccurrenceRow(occurrenceRows.value[index], saved);
+  occurrenceRows.value.splice(index, 1, updated);
+  return updated;
+}
+
+function occurrenceDraftSignature() {
+  return JSON.stringify(occurrenceBody());
+}
+
+function queueOccurrenceAutoSave(delay = 800) {
+  window.clearTimeout(occurrenceAutoSaveTimer);
+  occurrenceAutoSaveState.value = "pending";
+  occurrenceAutoSaveTimer = window.setTimeout(() => {
+    occurrenceAutoSaveTimer = 0;
+    saveOccurrence({ auto: true });
+  }, delay);
+}
+
+async function saveOccurrence({ auto = false } = {}) {
   if (!editingId.value) return;
+  if (occurrenceSaving.value) {
+    if (auto) occurrenceAutoSaveQueued = true;
+    return false;
+  }
+  window.clearTimeout(occurrenceAutoSaveTimer);
+  occurrenceAutoSaveTimer = 0;
   const position = captureOccurrencePosition();
+  const rowKey = occurrenceEditingRowKey.value || occurrenceRowKey(occurrenceDraft);
+  const draftId = occurrenceDraft.id;
+  const body = occurrenceBody();
+  const draftSignature = JSON.stringify(body);
   occurrenceSaving.value = true;
-  message.value = "";
-  error.value = "";
+  if (!auto) {
+    message.value = "";
+    error.value = "";
+  } else {
+    occurrenceAutoSaveState.value = "saving";
+  }
   try {
-    const body = occurrenceBody();
-    const path = occurrenceDraft.id
-      ? `/api/admin/programs/${editingId.value}/occurrences/${occurrenceDraft.id}`
+    const path = draftId
+      ? `/api/admin/programs/${editingId.value}/occurrences/${draftId}`
       : `/api/admin/programs/${editingId.value}/occurrences`;
-    const data = await api(path, { method: occurrenceDraft.id ? "PATCH" : "POST", body });
-    await Promise.all([loadPrograms(), loadOccurrences(editingId.value)]);
-    message.value = occurrenceDraft.id ? t("单集排期已更新") : t("单集排期已添加");
-    const saved = occurrenceRows.value.find(row => String(row.id) === String(data.occurrence?.id));
-    if (saved) editOccurrence(saved);
-    else resetOccurrenceDraft();
-    await restoreOccurrencePosition(position);
+    const data = await api(path, { method: draftId ? "PATCH" : "POST", body });
+    const saved = data.occurrence;
+    const updated = saved ? updateSavedOccurrence(rowKey, saved) : null;
+    if (occurrenceEditingRowKey.value === rowKey && saved) {
+      occurrenceDraft.id = saved.id || occurrenceDraft.id;
+      occurrenceDraft.generated = false;
+      occurrenceDraft.materialized = Boolean(saved.materialized);
+      occurrenceEditingRowKey.value = updated ? occurrenceRowKey(updated) : occurrenceEditingRowKey.value;
+    }
+    if (auto) {
+      if (occurrenceDraftSignature() === draftSignature) {
+        occurrenceDraftBaseline = draftSignature;
+        occurrenceAutoSaveState.value = "saved";
+      }
+    } else {
+      message.value = draftId ? t("单集排期已更新") : t("单集排期已添加");
+      occurrenceDraftBaseline = occurrenceDraftSignature();
+      await restoreOccurrencePosition(position);
+    }
+    return true;
   } catch (requestError) {
+    if (auto) occurrenceAutoSaveState.value = "error";
     showError(requestError);
+    return false;
   } finally {
     occurrenceSaving.value = false;
+    if (occurrenceAutoSaveQueued) {
+      occurrenceAutoSaveQueued = false;
+      queueOccurrenceAutoSave(0);
+    }
   }
 }
 
 async function deleteOccurrence() {
   if ((!occurrenceDraft.id && !occurrenceDraft.generated) || !editingId.value) return;
   if (!window.confirm(t("删除后，这条单集不会再显示在生成列表和日历中；如需保留请使用“因故取消”。继续吗？"))) return;
+  window.clearTimeout(occurrenceAutoSaveTimer);
+  occurrenceAutoSaveTimer = 0;
+  occurrenceAutoSaveQueued = false;
   const position = captureOccurrencePosition();
+  const rowKey = occurrenceEditingRowKey.value || occurrenceRowKey(occurrenceDraft);
+  const draftId = occurrenceDraft.id;
   occurrenceSaving.value = true;
   try {
-    if (occurrenceDraft.id) {
-      await api(`/api/admin/programs/${editingId.value}/occurrences/${occurrenceDraft.id}`, { method: "DELETE" });
+    let saved = null;
+    if (draftId) {
+      await api(`/api/admin/programs/${editingId.value}/occurrences/${draftId}`, { method: "DELETE" });
+      const index = occurrenceRows.value.findIndex(row => String(row.id) === String(draftId) || occurrenceRowKey(row) === rowKey);
+      if (index >= 0) {
+        const row = occurrenceRows.value[index];
+        occurrenceRows.value.splice(index, 1, {
+          ...row,
+          status: "deleted",
+          adjusted_date: "",
+          adjusted_time: "",
+          shift_following_days: 0,
+          date: row.original_date,
+          time: row.original_time,
+          aired: false,
+        });
+      }
     } else {
-      await api(`/api/admin/programs/${editingId.value}/occurrences`, {
+      const data = await api(`/api/admin/programs/${editingId.value}/occurrences`, {
         method: "POST",
         body: occurrenceBody({ status: "deleted", adjusted_date: "", adjusted_time: "", shift_following_days: 0 }),
       });
+      saved = data.occurrence;
     }
-    await Promise.all([loadPrograms(), loadOccurrences(editingId.value)]);
+    if (saved) updateSavedOccurrence(rowKey, saved);
     resetOccurrenceDraft();
     await restoreOccurrencePosition(position);
     message.value = t("单集已删除");
@@ -1107,6 +1239,29 @@ async function restoreDeletedOccurrence() {
 async function toggleOccurrenceDeletion() {
   if (occurrenceDraft.status === "deleted") await restoreDeletedOccurrence();
   else await deleteOccurrence();
+}
+
+async function clearOccurrenceList() {
+  if (!editingId.value) return;
+  const title = form.title || t("当前主节目");
+  if (!window.confirm(t("第一次确认：确定清空「{title}」的全部单集覆盖吗？排期规则生成的单集不会删除。", { title }))) return;
+  if (!window.confirm(t("第二次确认：清空「{title}」的全部单集覆盖不可恢复，继续吗？", { title }))) return;
+  window.clearTimeout(occurrenceAutoSaveTimer);
+  occurrenceAutoSaveTimer = 0;
+  occurrenceAutoSaveQueued = false;
+  occurrenceSaving.value = true;
+  message.value = "";
+  error.value = "";
+  try {
+    const data = await api(`/api/admin/programs/${editingId.value}/occurrences`, { method: "DELETE" });
+    await loadOccurrences(editingId.value);
+    resetOccurrenceDraft();
+    message.value = t("已清空 {count} 条单集覆盖", { count: data.deleted_count || 0 });
+  } catch (requestError) {
+    showError(requestError);
+  } finally {
+    occurrenceSaving.value = false;
+  }
 }
 
 async function deleteProgram(program) {
@@ -1133,6 +1288,7 @@ onMounted(async () => {
 });
 onUnmounted(() => {
   window.clearTimeout(toastTimer);
+  window.clearTimeout(occurrenceAutoSaveTimer);
   document.removeEventListener("click", closeProgramCastFilter);
 });
 </script>
@@ -1447,14 +1603,7 @@ onUnmounted(() => {
                 </div>
                 <small>{{ t("本期原定周视为不播；选择提前或顺延后，之后的隔两周排期也从这里起同步平移一周。") }}</small>
              </div>
-             <div class="occurrence-link-fields">
-               <label class="occurrence-source-field"><span class="program-field-label">{{ t("源地址") }}</span><input v-model="occurrenceDraft.source_url" type="url" placeholder="https://"></label>
-               <label><span class="program-field-label">{{ t("搬运地址") }}</span><input v-model="occurrenceDraft.mirror_url" type="text" :placeholder="t('BV号或B站地址')"></label>
-               <label><span class="program-field-label">{{ t("字幕地址") }}</span><input v-model="occurrenceDraft.subtitle_url" type="text" :placeholder="t('BV号或B站地址')"></label>
-               <small>{{ t("源地址填写 HTTP/HTTPS 地址；搬运地址和字幕地址支持 BV 号、B 站地址或其他 HTTP/HTTPS 地址。") }}</small>
-             </div>
-             <label>{{ t("备注") }}<textarea v-model="occurrenceDraft.note" rows="3" :placeholder="t('例如：延期至下周、嘉宾变更……')"></textarea></label>
-            <div class="program-form-field occurrence-guests-field">
+             <div class="program-form-field occurrence-guests-field">
               <span class="program-field-label">{{ t("本期嘉宾") }}</span>
               <div v-if="occurrenceDraft.guests.length" class="people-picker">
                  <span v-for="guest in occurrenceDraft.guests" :key="guest" class="person-tag selected custom-person-tag"><i v-if="castMember(guest)" class="program-cast-dot" :style="{ backgroundColor: castMember(guest).color }"></i><span>{{ guest }}</span><button type="button" :aria-label="t('移除本期嘉宾')" @click="removeOccurrenceGuest(guest)">×</button></span>
@@ -1471,12 +1620,20 @@ onUnmounted(() => {
                  <input v-model="occurrenceGuestInput" :placeholder="t('添加本期嘉宾')" @keydown.enter.prevent="addOccurrenceGuest">
                   <button type="button" class="secondary program-action-button" @click="addOccurrenceGuest">{{ t("添加嘉宾") }}</button>
               </div>
-               <small>{{ t("虹咲成员选择和缺席记录仅作用于这一期；自定义嘉宾也不会修改节目默认参与成员。") }}</small>
-            </div>
-          <div class="actions">
-              <button class="program-action-button" :disabled="occurrenceSaving">{{ occurrenceSaving ? t("保存中……") : t("保存本期调整") }}</button>
-              <button v-if="occurrenceDraft.id || occurrenceDraft.generated" type="button" class="program-action-button" :class="occurrenceDraft.status === 'deleted' ? 'secondary' : 'danger'" :disabled="occurrenceSaving" @click="toggleOccurrenceDeletion">{{ occurrenceDeleteLabel }}</button>
-              <button type="button" class="secondary program-action-button" @click="resetOccurrenceDraft">{{ t("清空") }}</button>
+                <small>{{ t("虹咲成员选择和缺席记录仅作用于这一期；自定义嘉宾也不会修改节目默认参与成员。") }}</small>
+             </div>
+              <div class="occurrence-link-fields">
+                <label class="occurrence-source-field"><span class="program-field-label">{{ t("源地址") }}</span><input v-model="occurrenceDraft.source_url" type="url" placeholder="https://"></label>
+                <label><span class="program-field-label">{{ t("搬运地址") }}</span><input v-model="occurrenceDraft.mirror_url" type="text" :placeholder="t('BV号或B站地址')"></label>
+                <label><span class="program-field-label">{{ t("字幕地址") }}</span><input v-model="occurrenceDraft.subtitle_url" type="text" :placeholder="t('BV号或B站地址')"></label>
+                <small>{{ t("源地址填写 HTTP/HTTPS 地址；搬运地址和字幕地址支持 BV 号、B 站地址或其他 HTTP/HTTPS 地址。") }}</small>
+              </div>
+              <label>{{ t("备注") }}<textarea v-model="occurrenceDraft.note" rows="3" :placeholder="t('例如：延期至下周、嘉宾变更……')"></textarea></label>
+           <div class="actions">
+               <span v-if="occurrenceAutoSaveEnabled && occurrenceAutoSaveState" class="occurrence-auto-save-status" :class="`is-${occurrenceAutoSaveState}`" role="status" aria-live="polite">{{ occurrenceAutoSaveState === 'saved' ? t("已自动保存") : occurrenceAutoSaveState === 'error' ? t("自动保存失败，请检查输入") : t("自动保存中……") }}</span>
+               <button v-if="!occurrenceAutoSaveEnabled" class="program-action-button" :disabled="occurrenceSaving">{{ occurrenceSaving ? t("保存中……") : t("保存本期调整") }}</button>
+               <button v-if="occurrenceDraft.id || occurrenceDraft.generated" type="button" class="program-action-button" :class="occurrenceDraft.status === 'deleted' ? 'secondary' : 'danger'" :disabled="occurrenceSaving" @click="toggleOccurrenceDeletion">{{ occurrenceDeleteLabel }}</button>
+               <button type="button" class="danger program-action-button" :disabled="occurrenceSaving" @click="clearOccurrenceList">{{ t("清空列表") }}</button>
           </div>
         </form>
       </div>

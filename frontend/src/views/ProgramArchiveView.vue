@@ -21,7 +21,12 @@ const route = useRoute();
 const router = useRouter();
 const programs = ref([]);
 const occurrences = ref([]);
-const keyword = ref("");
+
+function queryValue(value) {
+  return Array.isArray(value) ? String(value[0] || "") : String(value || "");
+}
+
+const keyword = ref(queryValue(route.query.q));
 const castFilter = ref([]);
 const castFilterDetails = ref(null);
 const castFilterOpen = ref(false);
@@ -126,6 +131,15 @@ function searchHitLabel(hit) {
   return hit.title ? `${episode} · ${hit.title}` : episode;
 }
 
+function programSearchMatchesPeople(program) {
+  const query = keyword.value.trim().toLocaleLowerCase();
+  return Boolean(query && (program.people || []).some(person => String(person).toLocaleLowerCase().includes(query)));
+}
+
+function showSearchHits(program) {
+  return Boolean(program.search_hits?.length && !programSearchMatchesPeople(program));
+}
+
 function occurrenceCast(row) {
   return castColorSegments([...(selectedProgram.value?.people || []), ...(row.guests || [])], row.absent_members);
 }
@@ -210,7 +224,7 @@ function openProgram(program) {
 }
 
 function returnToList() {
-  router.push("/programs/archive");
+  router.push({ path: "/programs/archive", query: route.query });
 }
 
 async function checkAdminSession() {
@@ -239,8 +253,18 @@ watch(programId, () => {
   }
 });
 
-watch(keyword, () => {
+watch(() => route.query.q, value => {
+  const nextKeyword = queryValue(value);
+  if (nextKeyword !== keyword.value) keyword.value = nextKeyword;
+});
+
+watch(keyword, value => {
   if (detailMode.value) return;
+  const nextKeyword = value.trim();
+  const nextQuery = { ...route.query };
+  if (nextKeyword) nextQuery.q = nextKeyword;
+  else delete nextQuery.q;
+  if (queryValue(route.query.q) !== nextKeyword) router.replace({ query: nextQuery });
   window.clearTimeout(programSearchTimer);
   programSearchTimer = window.setTimeout(() => loadPrograms(), 220);
 });
@@ -304,18 +328,25 @@ onUnmounted(() => window.clearTimeout(programSearchTimer));
          <p v-if="loading" class="state">{{ t("正在读取节目……") }}</p>
          <p v-else-if="!programs.length" class="muted">{{ t("还没有录入节目。") }}</p>
          <p v-else-if="!filteredPrograms.length" class="muted">{{ t("当前搜索和 Cast 筛选没有匹配的节目。") }}</p>
-        <div v-else class="program-readonly-list">
-          <RouterLink v-for="program in filteredPrograms" :key="program.id" class="program-readonly-item" :class="{ 'is-subprogram': Boolean(program.parent_id) }" :to="`/programs/archive/${encodeURIComponent(program.id)}`">
+         <div v-else class="program-readonly-list">
+           <div v-for="program in filteredPrograms" :key="program.id" class="program-readonly-result">
+            <RouterLink class="program-readonly-item" :class="{ 'is-subprogram': Boolean(program.parent_id) }" :to="{ path: `/programs/archive/${encodeURIComponent(program.id)}`, query: route.query }">
              <span v-if="programCast(program).length" class="program-admin-cast-line" :aria-label="t('固定参与成员')"><i v-for="member in programCast(program)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
             <div>
                 <div class="program-admin-tags"><span class="program-kind" :class="`program-kind-${program.category}`">{{ programType(program) }}</span><span v-if="program.parent_id" class="program-parent-title-key" :title="program.title">{{ program.title }}</span><span class="program-status" :class="`status-${program.status}`">{{ programStatus(program) }}</span></div>
                 <h3>{{ program.parent_id ? program.subprogram_name : program.title }}</h3>
                 <p>{{ scheduleLabel(program) }} · {{ t("已播") }} {{ program.episode_count }} {{ t("期") }}</p>
-                <p v-if="program.search_hits?.length" class="program-search-hits">{{ t("命中单集：") }}{{ program.search_hits.map(searchHitLabel).join("、") }}</p>
              </div>
-            <span class="program-readonly-arrow" aria-hidden="true">→</span>
-          </RouterLink>
-        </div>
+             <span class="program-readonly-arrow" aria-hidden="true">→</span>
+            </RouterLink>
+            <details v-if="showSearchHits(program)" class="program-search-hits">
+              <summary>{{ t("命中单集（{count}）", { count: program.search_hits.length }) }}</summary>
+              <ul class="program-search-hit-list">
+                <li v-for="hit in program.search_hits" :key="hit.id">{{ searchHitLabel(hit) }}</li>
+              </ul>
+            </details>
+           </div>
+         </div>
       </section>
     </template>
 

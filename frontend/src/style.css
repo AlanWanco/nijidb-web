@@ -5203,11 +5203,14 @@ html[data-theme="mocha"] .dp__theme_dark {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 18px;
-  border-top: 1px solid var(--line);
   padding: 18px 0 18px 14px;
   color: inherit;
   text-decoration: none;
   transition: background 160ms ease, padding 160ms ease;
+}
+
+.program-readonly-result {
+  border-top: 1px solid var(--line);
 }
 
 .program-readonly-item:hover {
@@ -5235,11 +5238,31 @@ html[data-theme="mocha"] .dp__theme_dark {
   font-size: 12px;
 }
 
-.program-readonly-item .program-search-hits {
-  margin-top: 5px;
+.program-search-hits {
+  margin: -6px 0 0;
+  padding: 0 14px 15px;
   color: var(--accent);
   font-size: 11px;
   line-height: 1.55;
+}
+
+.program-search-hits summary {
+  cursor: pointer;
+  font-weight: 600;
+  list-style-position: outside;
+}
+
+.program-search-hit-list {
+  margin: 5px 0 0;
+  padding-left: 17px;
+}
+
+.program-search-hit-list li + li {
+  margin-top: 2px;
+}
+
+.program-readonly-item.is-subprogram + .program-search-hits {
+  padding-left: 40px;
 }
 
 .program-readonly-arrow {
@@ -5413,10 +5436,17 @@ html[data-theme="mocha"] .dp__theme_dark {
   align-items: stretch;
 }
 
+.program-admin-page.occurrence-focused > .program-occurrence-editor {
+  overflow: visible;
+}
+
 .program-admin-page.occurrence-focused .occurrence-list {
   min-height: 0;
-  height: var(--occurrence-list-height, min(680px, calc(100vh - 270px)));
-  max-height: var(--occurrence-list-height, min(680px, calc(100vh - 270px)));
+  position: sticky;
+  top: 104px;
+  align-self: start;
+  height: min(870px, calc(100vh - 128px));
+  max-height: min(870px, calc(100vh - 128px));
 }
 
 .program-occurrence-editor .section-heading {
@@ -5714,6 +5744,10 @@ html[data-theme="mocha"] .dp__theme_dark {
 
   .program-admin-page.occurrence-focused > .program-occurrence-editor {
     order: 4;
+  }
+
+  .program-admin-page.occurrence-focused > .program-occurrence-editor {
+    overflow: hidden;
   }
 
   .programs-topline {
@@ -6108,6 +6142,8 @@ html[data-theme="mocha"] .dp__theme_dark {
   }
 
   .program-admin-page.occurrence-focused .occurrence-list {
+    position: static;
+    top: auto;
     height: auto;
     max-height: 270px;
   }

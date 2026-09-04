@@ -5431,7 +5431,9 @@ html[data-theme="mocha"] .dp__theme_dark {
    top: 12px;
    bottom: 12px;
    align-items: stretch;
+   gap: 0;
    justify-content: initial;
+   border-radius: 0;
    z-index: 1;
    pointer-events: none;
 }

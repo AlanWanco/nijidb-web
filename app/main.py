@@ -553,6 +553,7 @@ PROGRAM_PLATFORMS = {"tv", "network"}
 PROGRAM_DELIVERIES = {"live", "recorded"}
 PROGRAM_FREQUENCIES = {"weekly", "monthly", "individual", "single"}
 OCCURRENCE_STATUSES = {"scheduled", "rescheduled", "cancelled", "deleted"}
+EPISODE_START_MAX = 9999
 PROGRAM_FORECAST_DAYS = 183
 PROGRAM_TIMEZONES = {
     "Asia/Tokyo": "东京时间",
@@ -583,6 +584,13 @@ def integer_value(value: Any, label: str, minimum: int, maximum: int) -> int:
     if not minimum <= result <= maximum:
         raise ValueError(f"{label}范围为 {minimum}–{maximum}")
     return result
+
+
+def stored_episode_start(value: Any) -> int:
+    try:
+        return integer_value(value, "首集编号", 0, EPISODE_START_MAX)
+    except ValueError:
+        return 1
 
 
 def occurrence_shift_days(value: Any) -> int:
@@ -732,7 +740,8 @@ def program_payload(
     payload["weekday"] = int(payload.get("weekday") or 0)
     payload["parent_id"] = str(payload.get("parent_id") or "").strip()
     payload["subprogram_name"] = str(payload.get("subprogram_name") or "主节目").strip() or "主节目"
-    payload["episode_start"] = 0 if str(payload.get("episode_start", 1)).strip() == "0" else 1
+    raw_episode_start = payload.get("episode_start", 1)
+    payload["episode_start"] = 1 if raw_episode_start in (None, "") else stored_episode_start(raw_episode_start)
     payload["occurrences"] = occurrences or []
     payload["periods"] = periods if periods else ([legacy_period(payload)] if payload.get("start_date") else [])
     payload["timezone"] = payload["periods"][0].get("timezone", "Asia/Tokyo") if payload["periods"] else "Asia/Tokyo"
@@ -857,7 +866,7 @@ def normalized_program(values: dict[str, Any]) -> dict[str, Any]:
     parent_id = str(values.get("parent_id") or "").strip()
     subprogram_name = str(values.get("subprogram_name") or "").strip()
     raw_episode_start = values.get("episode_start", 1)
-    episode_start = 1 if raw_episode_start in (None, "") else integer_value(raw_episode_start, "首集编号", 0, 1)
+    episode_start = 1 if raw_episode_start in (None, "") else integer_value(raw_episode_start, "首集编号", 0, EPISODE_START_MAX)
     if not parent_id:
         subprogram_name = "主节目"
     elif not subprogram_name or subprogram_name == "主节目":
@@ -983,7 +992,7 @@ def program_json_metadata() -> dict[str, Any]:
             "program.id": "导出时保留的节目 ID，仅用于预览匹配覆盖目标；新建导入时会忽略。",
             "program": "节目基本资料和排期时期；规范 JSON 至少提供一个 periods，按 start_date 分段。一个文件只描述一个节目系列。",
             "program.delivery": "默认播出方式：live 或 recorded。",
-            "program.episode_start": "首集编号只能是 0 或 1，默认是 1；设为 0 时第一个非 EX 单集显示为第 0 期，之后按规则递增。EX 始终不占期。",
+            "program.episode_start": "首集编号支持 0 到 9999，默认是 1；第一个非 EX 单集从该编号开始，之后按规则递增。EX 始终不占期。",
             "program.people": "节目固定参与成员、主持人或常驻嘉宾数组。推荐使用以下 14 个虹咲成员日文原名以启用成员筛选和彩色标记：大西亜玖璃、相良茉優、前田佳織里、久保田未夢、村上奈津実、鬼頭明里、楠木ともり、林鼓子、指出毬亜、田中ちえ美、小泉萌香、内田秀、法元明菜、矢野妃菜喜。其他主持人或嘉宾也可直接填写姓名，会被保存和显示，但不会被识别为虹咲成员。",
             "program.periods[].frequency": "weekly、monthly、individual 或 single。",
             "program.periods[].week_interval": "周更间隔；填写 2 表示隔周。",
@@ -1012,7 +1021,7 @@ def program_json_metadata() -> dict[str, Any]:
             "期数不是 occurrences 的输入字段；EX 不占期。允许空号：不要为了补齐 #5/#7 之间的编号而伪造没有内容的单集或强行补连号，真实日期占位和后续单集按系统规则自然处理。标题中的【#N】只能作为核对提示。",
             "所有 JSON 日期和时间规范上均使用 Asia/Tokyo（UTC+09:00）；occurrences 不单独声明 timezone，使用其匹配 period 的 timezone。外部 API 若返回 UTC，必须先转换为东京时间再导入；跨午夜要进位日期，例如 UTC 15:30 是次日 00:30（Asia/Tokyo）。",
             "规范 JSON 至少提供一段 periods；第一段 periods[0].start_date 是节目第一期日期且不能为空，后续时期按 start_date 分段。end_date 可空表示连载中，不要填写最后一条单集日期。",
-            "episode_start=0 是有效设置，适用于首集按第 0 期编号的节目；此时普通单集从 0 开始递增，EX 仍不占期。不要为了把编号改成 1 而修改日期或伪造单集。",
+            "episode_start 支持非负自定义编号，适用于首集不是第 0 或第 1 期的节目；普通单集从该编号开始递增，EX 仍不占期。不要为了修改编号而修改日期或伪造单集。",
             "EX 统一用于番外、アフタートーク、特別版、公开录音和 guest 加更，不占期；普通期的 special 使用空字符串。直播场次和直播存档使用 delivery=live，并可在 note 写“生配信アーカイブ”；不要把直播回看误标为 recorded。",
             "一个 JSON 文件只描述一个节目系列；如果内容混入其他节目（例如“ふわふわ曖昧dream”），应拆分为独立文件，或明确标记为另一个节目，不要硬塞进当前节目。",
             "program.people 用于节目级固定成员、主持人和常驻嘉宾；单期临时嘉宾使用 occurrences[].guests，固定虹咲成员本期缺席使用 occurrences[].absent_members。",
@@ -1773,7 +1782,7 @@ def import_occurrence_episode_numbers(records: list[dict[str, Any]], episode_sta
 
 
 def program_episode_start(program: dict[str, Any]) -> int:
-    return 0 if str(program.get("episode_start", 1)).strip() == "0" else 1
+    return stored_episode_start(program.get("episode_start", 1))
 
 
 def program_update_status(program: dict[str, Any]) -> str:

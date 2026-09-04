@@ -130,6 +130,8 @@ function blankOccurrence() {
 
 const form = reactive(blankProgram());
 const occurrenceDraft = reactive(blankOccurrence());
+const episodeStartMode = ref("one");
+const episodeStartCustom = ref("");
 const peopleOptions = computed(() => castCandidates);
 const occurrenceGuestOptions = NIJIGASAKI_CAST;
 const occurrenceAbsentCast = computed(() => NIJIGASAKI_CAST.filter(member => castMemberMatches(occurrenceDraft.absent_members, member)));
@@ -297,6 +299,42 @@ function periodScheduleLabel(period) {
   }
   const interval = period.week_interval > 1 ? t("每{count}周", { count: period.week_interval }) : t("每周");
   return `${interval}${weekday}${time}`;
+}
+
+function normalizeEpisodeStart(value) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 && parsed <= 9999 ? parsed : 1;
+}
+
+function syncEpisodeStartControls(value) {
+  const normalized = normalizeEpisodeStart(value);
+  form.episode_start = normalized;
+  episodeStartMode.value = normalized === 0 ? "zero" : normalized === 1 ? "one" : "custom";
+  episodeStartCustom.value = episodeStartMode.value === "custom" ? String(normalized) : "";
+}
+
+function setEpisodeStartMode(mode) {
+  episodeStartMode.value = mode;
+  if (mode === "zero") {
+    form.episode_start = 0;
+    episodeStartCustom.value = "";
+  } else if (mode === "one") {
+    form.episode_start = 1;
+    episodeStartCustom.value = "";
+  } else {
+    if (!episodeStartCustom.value && Number(form.episode_start) > 1) episodeStartCustom.value = String(form.episode_start);
+    form.episode_start = episodeStartCustom.value;
+  }
+}
+
+function episodeStartPayload() {
+  if (episodeStartMode.value === "zero") return 0;
+  if (episodeStartMode.value === "one") return 1;
+  const raw = episodeStartCustom.value.trim();
+  if (!/^\d+$/.test(raw)) throw new Error(t("自定义首集编号必须是 0 到 9999 的整数"));
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed > 9999) throw new Error(t("自定义首集编号必须是 0 到 9999 的整数"));
+  return parsed;
 }
 
 function formatLabel(program) {
@@ -554,6 +592,7 @@ async function openRequestedProgram() {
 }
 
 function applyProgram(program) {
+  const episodeStart = normalizeEpisodeStart(program.episode_start);
   Object.assign(form, {
     title: program.title || "",
     parent_id: program.parent_id || "",
@@ -563,7 +602,7 @@ function applyProgram(program) {
     platform: program.platform || "network",
     delivery: program.delivery || "recorded",
     auto_generate: program.auto_generate !== false,
-    episode_start: Number(program.episode_start) === 0 ? 0 : 1,
+    episode_start: episodeStart,
     people: [...(program.people || [])],
     official_url: program.official_url || "",
     description: program.description || "",
@@ -579,6 +618,7 @@ function applyProgram(program) {
       };
     }),
   });
+  syncEpisodeStartControls(episodeStart);
 }
 
 function legacyPeriod(program) {
@@ -602,6 +642,8 @@ function resetOccurrenceDraft() {
 
 function resetForm() {
   Object.assign(form, blankProgram());
+  episodeStartMode.value = "one";
+  episodeStartCustom.value = "";
   editingId.value = "";
   editorOpen.value = false;
   activePanel.value = "list";
@@ -795,7 +837,7 @@ function programBody() {
      platform: form.platform,
       delivery: form.delivery,
      auto_generate: form.auto_generate,
-       episode_start: Number(form.episode_start) === 0 ? 0 : 1,
+        episode_start: episodeStartPayload(),
        people: [...form.people],
       official_url: form.official_url,
       description: form.description,
@@ -1237,14 +1279,20 @@ onUnmounted(() => {
              <button type="button" :class="{ selected: form.delivery === 'recorded' }" @click="form.delivery = 'recorded'">{{ t("录播") }}</button>
           </div>
         </div>
-        <div class="program-form-field">
-           <span class="program-field-label">{{ t("首集编号") }}</span>
-           <div class="choice-tags" role="radiogroup" :aria-label="t('首集编号')">
-             <button type="button" :class="{ selected: form.episode_start === 0 }" @click="form.episode_start = 0">{{ t("第 0 期") }}</button>
-             <button type="button" :class="{ selected: form.episode_start === 1 }" @click="form.episode_start = 1">{{ t("第 1 期") }}</button>
-          </div>
-           <small>{{ t("设置节目正篇的起始期数；EX 特别节目不占用正篇编号。") }}</small>
-        </div>
+         <div class="program-form-field">
+            <span class="program-field-label">{{ t("首集编号") }}</span>
+            <div class="choice-tags" role="radiogroup" :aria-label="t('首集编号')">
+              <button type="button" :class="{ selected: episodeStartMode === 'zero' }" @click="setEpisodeStartMode('zero')">{{ t("第 0 期") }}</button>
+              <button type="button" :class="{ selected: episodeStartMode === 'one' }" @click="setEpisodeStartMode('one')">{{ t("第 1 期") }}</button>
+              <button type="button" :class="{ selected: episodeStartMode === 'custom' }" @click="setEpisodeStartMode('custom')">{{ t("自定义") }}</button>
+            </div>
+            <label v-if="episodeStartMode === 'custom'" class="program-custom-episode-start">
+              <span>{{ t("自定义首集编号") }}</span>
+              <input v-model="episodeStartCustom" type="number" min="0" max="9999" step="1" :aria-label="t('自定义首集编号')" :placeholder="t('请输入期数')">
+              <em>{{ t("期") }}</em>
+            </label>
+            <small>{{ t("设置节目正篇的起始期数；EX 特别节目不占用正篇编号。") }}</small>
+         </div>
 
         <div class="program-form-field program-field-wide">
            <span class="program-field-label">{{ t("固定参与成员 / 主持") }}</span>

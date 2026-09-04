@@ -34,8 +34,13 @@ const eventernoteLoading = ref(false);
 const eventernoteError = ref("");
 const calendarRef = ref(null);
 const viewMode = ref("calendar");
-const filters = reactive({ cast: [], delivery: "" });
-const showEventernote = ref(false);
+const deliveryOptions = [
+  { value: "live", label: "直播" },
+  { value: "recorded", label: "录播" },
+  { value: "event", label: "Event" },
+];
+const defaultDeliveryValues = ["live", "recorded"];
+const filters = reactive({ cast: [], delivery: [...defaultDeliveryValues] });
 const today = new Date();
 const castFilterDetails = ref(null);
 const adminAuthenticated = ref(false);
@@ -61,7 +66,8 @@ const monthOptions = Array.from({ length: 12 }, (_, index) => ({
   label: `${index + 1} 月`,
 }));
 
-const calendarEvents = computed(() => showEventernote.value
+const eventernoteSelected = computed(() => filters.delivery.includes("event"));
+const calendarEvents = computed(() => eventernoteSelected.value
   ? [...allEvents.value, ...eventernoteEvents.value]
   : allEvents.value);
 const filteredEvents = computed(() => calendarEvents.value.filter(eventMatchesFilters));
@@ -83,7 +89,9 @@ const filteredProgramCount = computed(() => new Set(
     .map(event => event.extendedProps?.programId),
 ).size);
 const allCastSelected = computed(() => filters.cast.length === NIJIGASAKI_CAST.length);
-const activeFilterCount = computed(() => Number(filters.cast.length > 0 && !allCastSelected.value) + Number(Boolean(filters.delivery)));
+const deliveryFilterActive = computed(() => filters.delivery.length !== defaultDeliveryValues.length
+  || defaultDeliveryValues.some(value => !filters.delivery.includes(value)));
+const activeFilterCount = computed(() => Number(filters.cast.length > 0 && !allCastSelected.value) + Number(deliveryFilterActive.value));
 const castFilterLabel = computed(() => {
   if (!filters.cast.length || allCastSelected.value) return t("全部 Cast");
   return t("已选 {count} 位", { count: filters.cast.length });
@@ -148,7 +156,7 @@ watch(locale, nextLocale => {
   calendarOptions.locale = nextLocale === "en" ? enGbLocale : nextLocale === "ja" ? jaLocale : zhCnLocale;
 });
 
-watch(showEventernote, enabled => {
+watch(eventernoteSelected, enabled => {
   eventernoteRequestId += 1;
   eventernoteLoading.value = false;
   eventernoteError.value = "";
@@ -336,7 +344,7 @@ function normalizeEventernoteEvent(item) {
       people,
       guests: [],
       absentMembers: [],
-      delivery: "live",
+      delivery: "event",
       occurrenceStatus: "",
       aired: new Date(startTime ? start : `${date}T00:00:00+09:00`).getTime() <= Date.now(),
       note: [item.place_name, item.raw_time_text].filter(Boolean).join(" · "),
@@ -346,7 +354,9 @@ function normalizeEventernoteEvent(item) {
 
 function eventMatchesFilters(event) {
   const props = event.extendedProps || {};
-  if (filters.delivery && props.delivery !== filters.delivery) return false;
+  if (!filters.delivery.length) return false;
+  if (props.isEventernote) return filters.delivery.includes("event");
+  if (!filters.delivery.includes(props.delivery)) return false;
   if (!filters.cast.length || allCastSelected.value) return true;
   const cast = eventCast(event);
   return filters.cast.some(selectedName => {
@@ -387,7 +397,7 @@ function eventStateClass(event) {
 
 function clearFilters() {
   filters.cast = [];
-  filters.delivery = "";
+  filters.delivery = [...defaultDeliveryValues];
 }
 
 function toggleCastFilter(name) {
@@ -542,19 +552,19 @@ function renderEventContent(info) {
 }
 
 async function loadEventernoteEvents(range = calendarRequestRange.value) {
-  if (!showEventernote.value || !range) return;
+  if (!eventernoteSelected.value || !range) return;
   const requestId = ++eventernoteRequestId;
   eventernoteLoading.value = true;
   eventernoteError.value = "";
   try {
     const params = new URLSearchParams({ from_date: range.fromDate, to_date: range.toDate });
     const data = await api(`/api/eventernote/events?${params}`);
-    if (requestId !== eventernoteRequestId || !showEventernote.value) return;
+    if (requestId !== eventernoteRequestId || !eventernoteSelected.value) return;
     eventernoteEvents.value = (Array.isArray(data.items) ? data.items : [])
       .map(normalizeEventernoteEvent)
       .filter(Boolean);
   } catch (requestError) {
-    if (requestId !== eventernoteRequestId || !showEventernote.value) return;
+    if (requestId !== eventernoteRequestId || !eventernoteSelected.value) return;
     eventernoteEvents.value = [];
     eventernoteError.value = requestError.message || t("Eventernote 数据加载失败");
   } finally {
@@ -575,7 +585,7 @@ async function loadCalendar(info) {
     const data = await api(`/api/programs/calendar?${params}`);
     programs.value = data.programs;
     allEvents.value = data.events;
-    if (showEventernote.value) await loadEventernoteEvents();
+    if (eventernoteSelected.value) await loadEventernoteEvents();
     else eventernoteEvents.value = [];
     if (selectedEvent.value && !selectedProgram.value && !selectedEvent.value.isEventernote) closeDrawer();
   } catch (requestError) {
@@ -695,14 +705,16 @@ onUnmounted(() => {
                   </div>
                 </details>
               </div>
-             <label class="program-calendar-filter">{{ t("播出方式") }}
-               <select v-model="filters.delivery" :aria-label="t('按播出方式筛选')">
-                 <option value="">{{ t("直播与录播") }}</option>
-                 <option value="live">{{ t("直播") }}</option>
-                 <option value="recorded">{{ t("录播") }}</option>
-               </select>
-             </label>
-             <button type="button" class="secondary program-action-button program-eventernote-toggle" :class="{ selected: showEventernote }" :aria-pressed="showEventernote" @click="showEventernote = !showEventernote">{{ eventernoteLoading ? t("读取 Eventernote 数据……") : showEventernote ? t("隐藏 Eventernote 数据") : t("显示 Eventernote 数据") }}</button>
+             <div class="program-calendar-filter program-delivery-filter">
+               <span class="program-calendar-filter-label">{{ t("播出方式") }}</span>
+               <div class="program-delivery-options" role="group" :aria-label="t('按播出方式筛选')">
+                 <label v-for="option in deliveryOptions" :key="option.value" class="program-delivery-option" :class="{ selected: filters.delivery.includes(option.value) }">
+                   <input v-model="filters.delivery" type="checkbox" :value="option.value">
+                   <span>{{ t(option.label) }}</span>
+                   <small v-if="option.value === 'event' && eventernoteLoading" aria-live="polite">{{ t("读取 Eventernote 数据……") }}</small>
+                 </label>
+               </div>
+             </div>
              <button v-if="activeFilterCount" type="button" class="secondary program-action-button program-clear-filter" @click="clearFilters">{{ t("清除筛选") }}</button>
             </div>
             <div class="program-calendar-jump">

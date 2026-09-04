@@ -1191,13 +1191,13 @@ onUnmounted(() => {
       </div>
 
       <div class="program-form-grid">
-           <label class="program-field-wide">{{ t("节目名称") }}<input v-model="form.title" :readonly="Boolean(form.parent_id)" required :placeholder="t('例如：虹咲学园放送室')"><small v-if="form.parent_id">{{ t("子节目名称继承自主节目，排期和内容配置仍可独立修改。") }}</small></label>
+            <label class="program-field-wide">{{ t("节目名称") }}<input v-model="form.title" :readonly="Boolean(form.parent_id)" required :placeholder="t('例如：虹咲学园放送室')"><small v-if="form.parent_id">{{ t("子节目标签归属于主节目，排期和内容配置仍可独立修改。") }}</small></label>
            <div v-if="form.parent_id" class="program-form-field">
               <span class="program-field-label">{{ t("节目层级") }}</span>
               <div class="program-readonly-control">{{ t("子节目") }} · {{ parentProgramTitle }}</div>
               <small>{{ t("父节目固定为当前编辑的主节目；如需归属其他主节目，请从对应主节目编辑页添加。") }}</small>
           </div>
-            <label v-if="form.parent_id" class="program-form-field"><span class="program-field-label">{{ t("子节目名称") }}</span><input v-model="form.subprogram_name" required :placeholder="t('例如：嘉宾回')"><small>{{ t("显示在同一个节目名称下，用于区分不同子节目。") }}</small></label>
+             <label v-if="form.parent_id" class="program-form-field"><span class="program-field-label">{{ t("子节目标签") }}</span><input v-model="form.subprogram_name" required :placeholder="t('例如：嘉宾回')"><small>{{ t("显示为主节目下的标签，用于区分不同子节目。") }}</small></label>
 
           <div class="program-form-field">
            <span class="program-field-label">{{ t("节目类型") }}</span>

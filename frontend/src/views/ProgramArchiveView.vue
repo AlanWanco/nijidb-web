@@ -300,8 +300,8 @@ onUnmounted(() => document.removeEventListener("click", closeCastFilter));
           <RouterLink v-for="program in filteredPrograms" :key="program.id" class="program-readonly-item" :to="`/programs/archive/${encodeURIComponent(program.id)}`">
              <span v-if="programCast(program).length" class="program-admin-cast-line" :aria-label="t('固定参与成员')"><i v-for="member in programCast(program)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
             <div>
-               <div class="program-admin-tags"><span class="program-kind" :class="`program-kind-${program.category}`">{{ programType(program) }}</span><span class="program-subprogram-key">{{ program.subprogram_name || t("主节目") }}</span><span class="program-status" :class="`status-${program.status}`">{{ programStatus(program) }}</span></div>
-              <h3>{{ program.title }}</h3>
+                <div class="program-admin-tags"><span class="program-kind" :class="`program-kind-${program.category}`">{{ programType(program) }}</span><span v-if="program.parent_id" class="program-parent-title-key" :title="program.title">{{ program.title }}</span><span class="program-status" :class="`status-${program.status}`">{{ programStatus(program) }}</span></div>
+               <h3>{{ program.parent_id ? program.subprogram_name : program.title }}</h3>
                <p>{{ scheduleLabel(program) }} · {{ t("已播") }} {{ program.episode_count }} {{ t("期") }}</p>
             </div>
             <span class="program-readonly-arrow" aria-hidden="true">→</span>

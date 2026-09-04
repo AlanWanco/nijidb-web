@@ -329,18 +329,18 @@ input:focus-visible {
 .palette-menu {
   position: absolute;
   top: calc(100% + 10px);
-  left: 50%;
+  right: 0;
   z-index: 20;
   display: grid;
   gap: 12px;
-  width: 260px;
+  width: min(260px, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
   padding: 14px;
   border: 1px solid var(--line);
   border-radius: 14px;
   background: var(--surface);
   box-shadow: 0 14px 32px #1b1d3830;
   color: var(--ink);
-  transform: translateX(-50%);
 }
 
 .palette-menu strong {
@@ -376,15 +376,21 @@ input:focus-visible {
 
 @media (max-width: 700px) {
   .palette-menu {
-    right: -8px;
-    left: auto;
-    width: 240px;
+    right: 0;
+    width: min(240px, calc(100vw - 32px));
     padding: 12px;
-    transform: none;
   }
 
   .palette-swatches {
+    grid-template-columns: repeat(7, minmax(0, 1fr));
     gap: 10px;
+  }
+
+  .palette-swatch {
+    width: 100%;
+    min-width: 0;
+    height: auto;
+    aspect-ratio: 1;
   }
 }
 
@@ -4464,8 +4470,26 @@ html[data-theme="mocha"] .dp__theme_dark {
 }
 
 .program-admin-item h3 {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
   margin: 7px 0 4px;
   font-size: 16px;
+}
+
+.program-parent-title-key {
+  display: inline-flex;
+  max-width: min(100%, 34ch);
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--line) 82%, var(--accent));
+  border-radius: 999px;
+  padding: 4px 8px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .program-admin-item p {
@@ -5612,8 +5636,16 @@ html[data-theme="mocha"] .dp__theme_dark {
   .program-cast-filter-panel {
     position: relative;
     top: auto;
-    width: auto;
+    width: 100%;
+    max-width: 100%;
     margin-top: 8px;
+  }
+
+  .program-cast-filter,
+  .program-cast-filter-details {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
   }
 
   .program-calendar-jump-label {

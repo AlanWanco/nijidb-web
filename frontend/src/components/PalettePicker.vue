@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { PALETTES } from "../theme";
 import { t } from "../i18n";
 
@@ -10,6 +10,7 @@ const props = defineProps({
 
 const emit = defineEmits(["select"]);
 const open = ref(false);
+const pickerRef = ref(null);
 const palette = computed(() => PALETTES[props.flavor]);
 const flavorName = computed(() => props.flavor === "latte" ? "Latte" : "Mocha");
 const selectedColor = computed(() => palette.value.find(([key]) => key === props.selected) || palette.value[3]);
@@ -18,10 +19,17 @@ function choose(key) {
   emit("select", key);
   open.value = false;
 }
+
+function closeOnOutsideClick(event) {
+  if (open.value && !pickerRef.value?.contains(event.target)) open.value = false;
+}
+
+onMounted(() => document.addEventListener("click", closeOnOutsideClick));
+onUnmounted(() => document.removeEventListener("click", closeOnOutsideClick));
 </script>
 
 <template>
-  <details class="palette-picker" :open="open" @toggle="open = $event.currentTarget.open">
+  <details ref="pickerRef" class="palette-picker" :open="open" @toggle="open = $event.currentTarget.open">
     <summary class="icon-button" :aria-label="t('选择 Catppuccin 主题色')" :title="t('选择 Catppuccin 主题色')">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="7" cy="7" r="2.3"/><circle cx="17" cy="7" r="2.3"/><circle cx="7" cy="17" r="2.3"/><circle cx="17" cy="17" r="2.3"/></svg>
     </summary>

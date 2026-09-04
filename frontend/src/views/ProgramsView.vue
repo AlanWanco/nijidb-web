@@ -650,7 +650,7 @@ onUnmounted(() => {
              <button v-for="event in group.events" :key="event.id" type="button" class="program-list-event" :class="eventStateClass(event)" @click="openEvent(event)">
                <span v-if="eventCast(event).length" class="program-list-cast-line" :aria-label="t('出场成员')"><i v-for="member in eventCast(event)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
                <span class="program-list-time">{{ eventTime(event) || t("全天") }}</span>
-              <span class="program-list-main"><strong>{{ event.title }}</strong><small>{{ eventDeliveryLabel(event) }} · {{ occurrenceAirStatus(event.extendedProps) }}</small></span>
+               <span class="program-list-main"><strong>{{ event.title }}</strong><small>{{ eventDeliveryLabel(event) }} · {{ occurrenceAirStatus(event.extendedProps) }}</small></span>
                <span v-if="eventCast(event).length" class="program-list-cast" :aria-label="t('出场成员')"><i v-for="member in eventCast(event)" :key="member.name" :style="{ '--cast-color': member.color }" :title="member.name"></i></span>
               <span class="program-list-arrow" aria-hidden="true">→</span>
             </button>
@@ -697,10 +697,7 @@ onUnmounted(() => {
         <p v-if="selectedProgram.description" class="program-description">{{ selectedProgram.description }}</p>
         <dl class="program-meta">
             <dt>{{ t("节目状态") }}</dt><dd>{{ programStatus(selectedProgram) }}</dd>
-            <template v-if="selectedProgram.parent_id">
-               <dt>{{ t("子节目名称") }}</dt><dd>{{ selectedProgram.subprogram_name }}</dd>
-            </template>
-             <dt>{{ t("节目属性") }}</dt><dd>{{ formatLabel(selectedProgram) }}</dd>
+              <dt>{{ t("节目属性") }}</dt><dd>{{ formatLabel(selectedProgram) }}</dd>
            <dt>{{ t("更新排期") }}</dt><dd>{{ scheduleLabel(selectedProgram) }}</dd>
            <dt>{{ t("已播期数") }}</dt><dd>{{ selectedProgram.episode_count }} {{ t("期") }}</dd>
             <dt>{{ t("参与成员") }}</dt>

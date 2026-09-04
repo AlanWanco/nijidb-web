@@ -245,8 +245,8 @@ input:focus-visible {
 }
 
 .language-picker-icon {
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
   fill: none;
   stroke: currentColor;
   stroke-linecap: round;

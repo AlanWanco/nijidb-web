@@ -1103,12 +1103,34 @@ function savedOccurrenceRow(previous, saved) {
   };
 }
 
+function occurrenceSortValue(row, key) {
+  return String(row[key] || "");
+}
+
+function synchronizeOccurrenceRows() {
+  const orderedByOriginal = occurrenceRows.value
+    .map((row, index) => ({ row, index }))
+    .sort((left, right) => occurrenceSortValue(left.row, "original_date").localeCompare(occurrenceSortValue(right.row, "original_date"))
+      || occurrenceSortValue(left.row, "original_time").localeCompare(occurrenceSortValue(right.row, "original_time"))
+      || Number(left.row.id || 0) - Number(right.row.id || 0)
+      || left.index - right.index);
+  let episode = normalizeEpisodeStart(form.episode_start);
+  orderedByOriginal.forEach(({ row }) => {
+    row.episode = episode;
+    if (!["cancelled", "deleted"].includes(row.status) && row.special !== "EX") episode += 1;
+  });
+  occurrenceRows.value = [...occurrenceRows.value].sort((left, right) => occurrenceSortValue(left, "date").localeCompare(occurrenceSortValue(right, "date"))
+    || occurrenceSortValue(left, "time").localeCompare(occurrenceSortValue(right, "time"))
+    || occurrenceSortValue(left, "original_date").localeCompare(occurrenceSortValue(right, "original_date"))
+    || Number(left.id || 0) - Number(right.id || 0));
+}
+
 function updateSavedOccurrence(rowKey, saved) {
   const index = occurrenceRows.value.findIndex(row => (saved.id && String(row.id) === String(saved.id)) || occurrenceRowKey(row) === rowKey);
   if (index < 0) return null;
-  const updated = savedOccurrenceRow(occurrenceRows.value[index], saved);
-  occurrenceRows.value.splice(index, 1, updated);
-  return updated;
+  occurrenceRows.value.splice(index, 1, savedOccurrenceRow(occurrenceRows.value[index], saved));
+  synchronizeOccurrenceRows();
+  return occurrenceRows.value.find(row => saved.id && String(row.id) === String(saved.id)) || null;
 }
 
 function occurrenceDraftSignature() {
@@ -1208,6 +1230,7 @@ async function deleteOccurrence() {
           time: row.original_time,
           aired: false,
         });
+        synchronizeOccurrenceRows();
       }
     } else {
       const data = await api(`/api/admin/programs/${editingId.value}/occurrences`, {

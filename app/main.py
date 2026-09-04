@@ -2012,9 +2012,45 @@ def replace_imported_program_row(
     replace_program_periods(conn, target_id, values["periods"], updated_at)
 
 
-def program_rows() -> list[dict[str, Any]]:
+def program_rows(query: str = "") -> list[dict[str, Any]]:
+    search = query.strip()
     with db() as conn:
-        program_rows = conn.execute("SELECT * FROM programs ORDER BY category, title COLLATE NOCASE, CASE WHEN parent_id = '' THEN 0 ELSE 1 END, subprogram_name COLLATE NOCASE").fetchall()
+        search_where = ""
+        search_params: tuple[str, ...] = ()
+        if search:
+            search_where = """
+            WHERE instr(
+                lower(
+                    coalesce(p.title, '') || ' ' ||
+                    coalesce(p.subprogram_name, '') || ' ' ||
+                    coalesce(p.description, '') || ' ' ||
+                    coalesce(p.people, '') || ' ' ||
+                    coalesce(p.official_url, '')
+                ),
+                lower(?)
+            ) > 0
+            OR EXISTS (
+                SELECT 1
+                FROM program_occurrences AS o
+                WHERE o.program_id = p.id
+                  AND instr(
+                      lower(
+                          coalesce(o.title, '') || ' ' ||
+                          coalesce(o.note, '') || ' ' ||
+                          coalesce(o.guests, '') || ' ' ||
+                          coalesce(o.source_url, '') || ' ' ||
+                          coalesce(o.mirror_url, '') || ' ' ||
+                          coalesce(o.subtitle_url, '')
+                      ),
+                      lower(?)
+                  ) > 0
+            )
+            """
+            search_params = (search, search)
+        program_rows = conn.execute(
+            f"SELECT p.* FROM programs AS p {search_where} ORDER BY p.category, p.title COLLATE NOCASE, CASE WHEN p.parent_id = '' THEN 0 ELSE 1 END, p.subprogram_name COLLATE NOCASE",
+            search_params,
+        ).fetchall()
         period_rows = conn.execute("SELECT * FROM program_periods ORDER BY start_date, id").fetchall()
         occurrence_rows = conn.execute("SELECT * FROM program_occurrences ORDER BY original_date, id").fetchall()
     periods_grouped: dict[str, list[dict[str, Any]]] = {}
@@ -2812,8 +2848,8 @@ async def api_release_detail(release_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/programs")
-async def api_programs() -> dict[str, Any]:
-    return {"programs": program_rows()}
+async def api_programs(q: str = "") -> dict[str, Any]:
+    return {"programs": program_rows(q), "q": q.strip()}
 
 
 @app.get("/api/programs/calendar")

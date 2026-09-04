@@ -46,8 +46,10 @@ const castFilterLabel = computed(() => {
   if (!castFilter.value.length || allCastSelected.value) return t("全部 Cast");
   return t("已选 {count} 位", { count: castFilter.value.length });
 });
-const filteredPrograms = computed(() => programs.value.filter(programMatchesFilters));
+const filteredPrograms = computed(() => programs.value.filter(programMatchesCast));
 const visibleOccurrences = computed(() => occurrences.value.filter(row => row.status !== "deleted"));
+let programSearchTimer;
+let programSearchRequest = 0;
 
 function programType(program) {
   return program.category === "official" ? t("官方节目") : t("个人节目");
@@ -132,18 +134,6 @@ function programMatchesCast(program) {
   });
 }
 
-function programMatchesFilters(program) {
-  const query = keyword.value.trim().toLocaleLowerCase();
-  if (query) {
-    const text = [program.title, program.subprogram_name, program.description, ...(program.people || [])]
-      .filter(Boolean)
-      .join(" ")
-      .toLocaleLowerCase();
-    if (!text.includes(query)) return false;
-  }
-  return programMatchesCast(program);
-}
-
 function toggleCastFilter(name) {
   castFilter.value = castFilter.value.includes(name)
     ? castFilter.value.filter(item => item !== name)
@@ -190,17 +180,23 @@ async function loadOccurrences() {
 }
 
 async function loadPrograms() {
+  const requestId = ++programSearchRequest;
   loading.value = true;
   error.value = "";
   try {
-    const data = await api("/api/programs");
+    const params = new URLSearchParams();
+    if (keyword.value.trim()) params.set("q", keyword.value.trim());
+    const query = params.toString();
+    const data = await api(`/api/programs${query ? `?${query}` : ""}`);
+    if (requestId !== programSearchRequest) return;
     programs.value = data.programs || [];
     if (detailMode.value && !selectedProgram.value) error.value = t("节目不存在或已被删除");
     await loadOccurrences();
   } catch (requestError) {
+    if (requestId !== programSearchRequest) return;
     error.value = requestError.message || t("节目列表加载失败");
   } finally {
-    loading.value = false;
+    if (requestId === programSearchRequest) loading.value = false;
   }
 }
 
@@ -238,6 +234,12 @@ watch(programId, () => {
   }
 });
 
+watch(keyword, () => {
+  if (detailMode.value) return;
+  window.clearTimeout(programSearchTimer);
+  programSearchTimer = window.setTimeout(() => loadPrograms(), 220);
+});
+
 onMounted(() => {
   loadPrograms();
   checkAdminSession();
@@ -245,6 +247,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => document.removeEventListener("click", closeCastFilter));
+onUnmounted(() => window.clearTimeout(programSearchTimer));
 </script>
 
 <template>
@@ -268,14 +271,14 @@ onUnmounted(() => document.removeEventListener("click", closeCastFilter));
         <div class="section-heading">
            <div><p class="eyebrow">CURRENT ENTRIES</p><h2>{{ t("已录入节目") }}</h2></div>
           <div class="program-readonly-list-actions">
-            <span class="section-count">{{ filteredPrograms.length }}<small v-if="keyword || castFilter.length"> / {{ programs.length }}</small></span>
+             <span class="section-count">{{ filteredPrograms.length }}<small v-if="castFilter.length && !allCastSelected"> / {{ programs.length }}</small></span>
              <button type="button" class="secondary program-action-button" @click="openAdminEditor(newAdminProgramPath)">{{ t("新建节目") }}</button>
           </div>
         </div>
         <div class="program-readonly-tools">
           <label class="program-readonly-search">
              <span>{{ t("关键词") }}</span>
-             <input v-model="keyword" type="search" :placeholder="t('搜索节目、子节目或成员')" :aria-label="t('搜索节目、子节目或成员')">
+             <input v-model="keyword" type="search" :placeholder="t('搜索节目、子节目、成员、单集标题或备注')" :aria-label="t('搜索节目、子节目、成员、单集标题或备注')">
           </label>
           <div class="program-calendar-filter program-cast-filter program-readonly-cast-filter">
              <span class="program-calendar-filter-label">{{ t("按 Cast 筛选") }}</span>

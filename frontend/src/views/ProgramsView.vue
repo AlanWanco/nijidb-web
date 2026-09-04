@@ -355,8 +355,11 @@ function normalizeEventernoteEvent(item) {
 function eventMatchesFilters(event) {
   const props = event.extendedProps || {};
   if (!filters.delivery.length) return false;
-  if (props.isEventernote) return filters.delivery.includes("event");
-  if (!filters.delivery.includes(props.delivery)) return false;
+  if (props.isEventernote) {
+    if (!filters.delivery.includes("event")) return false;
+  } else if (!filters.delivery.includes(props.delivery)) {
+    return false;
+  }
   if (!filters.cast.length || allCastSelected.value) return true;
   const cast = eventCast(event);
   return filters.cast.some(selectedName => {

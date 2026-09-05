@@ -571,11 +571,15 @@ watch(() => occurrenceBody(), () => {
   queueOccurrenceAutoSave();
 }, { deep: true });
 
+async function refreshPrograms() {
+  const data = await api("/api/programs");
+  programs.value = data.programs;
+}
+
 async function loadPrograms() {
   loading.value = true;
   try {
-    const data = await api("/api/programs");
-    programs.value = data.programs;
+    await refreshPrograms();
     return true;
   } catch (requestError) {
     showError(requestError);
@@ -694,12 +698,17 @@ function startNewProgram() {
   error.value = "";
 }
 
+async function refreshOccurrences(programId) {
+  if (!programId) return;
+  const data = await api(`/api/admin/programs/${programId}/occurrences`);
+  occurrenceRows.value = data.occurrences;
+}
+
 async function loadOccurrences(programId) {
   if (!programId) return;
   occurrenceLoading.value = true;
   try {
-    const data = await api(`/api/admin/programs/${programId}/occurrences`);
-    occurrenceRows.value = data.occurrences;
+    await refreshOccurrences(programId);
   } catch (requestError) {
     showError(requestError);
   } finally {
@@ -1001,7 +1010,7 @@ function editOccurrence(row) {
     status: row.status || "scheduled",
     special: row.special || "",
     adjusted_date: row.adjusted_date || (row.status === "rescheduled" ? row.original_date || "" : ""),
-     adjusted_time: row.adjusted_time || row.original_time || "",
+     adjusted_time: row.adjusted_time || (row.status === "rescheduled" ? row.original_time || "" : ""),
      note: row.note || "",
      guests: [...(row.guests || [])],
      absent_members: [...(row.absent_members || [])],
@@ -1110,20 +1119,23 @@ function savedOccurrenceRow(previous, saved) {
   const originalTime = saved.original_time ?? previous?.original_time ?? "";
   const adjustedDate = saved.adjusted_date || "";
   const adjustedTime = saved.adjusted_time || "";
+  const effectiveDate = saved.date ?? (status === "rescheduled" && adjustedDate ? adjustedDate : originalDate);
+  const effectiveTime = saved.time ?? (status === "rescheduled" && adjustedTime ? adjustedTime : originalTime);
   return {
     ...previous,
     ...saved,
     id: saved.id || previous?.id || "",
-    date: status === "rescheduled" && adjustedDate ? adjustedDate : originalDate,
-    time: status === "rescheduled" && adjustedTime ? adjustedTime : originalTime,
+    date: effectiveDate,
+    time: effectiveTime,
     delivery: saved.delivery || previous?.delivery || form.delivery,
-    delivery_override: saved.delivery || "",
+    delivery_override: saved.delivery_override ?? saved.delivery ?? previous?.delivery_override ?? "",
     status,
-    generated: false,
-    individual: previous?.individual ?? occurrenceDraft.individual,
-    materialized: Boolean(saved.materialized),
-    manual: !saved.generated_date && !Boolean(saved.materialized),
-    timezone: previous?.timezone || occurrenceDraft.timezone || form.periods[0]?.timezone || "Asia/Tokyo",
+    generated: typeof saved.generated === "boolean" ? saved.generated : false,
+    individual: typeof saved.individual === "boolean" ? saved.individual : previous?.individual ?? occurrenceDraft.individual,
+    materialized: saved.materialized == null ? Boolean(previous?.materialized) : Boolean(saved.materialized),
+    manual: typeof saved.manual === "boolean" ? saved.manual : !saved.generated_date && !Boolean(saved.materialized),
+    timezone: saved.timezone || previous?.timezone || occurrenceDraft.timezone || form.periods[0]?.timezone || "Asia/Tokyo",
+    aired: typeof saved.aired === "boolean" ? saved.aired : Boolean(previous?.aired),
   };
 }
 
@@ -1196,21 +1208,34 @@ async function saveOccurrence({ auto = false } = {}) {
       : `/api/admin/programs/${editingId.value}/occurrences`;
     const data = await api(path, { method: draftId ? "PATCH" : "POST", body });
     const saved = data.occurrence;
-    const updated = saved ? updateSavedOccurrence(rowKey, saved) : null;
-    if (occurrenceEditingRowKey.value === rowKey && saved) {
+    const wasCurrent = occurrenceEditingRowKey.value === rowKey;
+    const draftUnchanged = wasCurrent && occurrenceDraftSignature() === draftSignature;
+    if (saved) updateSavedOccurrence(rowKey, saved);
+    if (wasCurrent && saved) {
       occurrenceDraft.id = saved.id || occurrenceDraft.id;
       occurrenceDraft.generated = false;
       occurrenceDraft.materialized = Boolean(saved.materialized);
-      occurrenceEditingRowKey.value = updated ? occurrenceRowKey(updated) : occurrenceEditingRowKey.value;
+    }
+
+    // The mutation response only describes this row. Reload the generated list as well,
+    // because a status/date change can affect episode numbers and following weekly slots.
+    await Promise.all([refreshPrograms(), refreshOccurrences(editingId.value)]);
+    const refreshed = saved
+      ? occurrenceRows.value.find(row => (saved.id && String(row.id) === String(saved.id)) || occurrenceRowKey(row) === rowKey)
+      : null;
+    const currentSelection = wasCurrent && occurrenceEditingRowKey.value === rowKey;
+    if (currentSelection && saved) {
+      occurrenceEditingRowKey.value = refreshed ? occurrenceRowKey(refreshed) : occurrenceEditingRowKey.value;
+      if (draftUnchanged && refreshed) editOccurrence(refreshed);
     }
     if (auto) {
-      if (occurrenceDraftSignature() === draftSignature) {
-        occurrenceDraftBaseline = draftSignature;
+      if (currentSelection && draftUnchanged) {
+        occurrenceDraftBaseline = occurrenceDraftSignature();
         occurrenceAutoSaveState.value = "saved";
       }
     } else {
       message.value = draftId ? t("单集排期已更新") : t("单集排期已添加");
-      occurrenceDraftBaseline = occurrenceDraftSignature();
+      if (currentSelection && draftUnchanged) occurrenceDraftBaseline = occurrenceDraftSignature();
       await restoreOccurrencePosition(position);
     }
     return true;
@@ -1234,36 +1259,18 @@ async function deleteOccurrence() {
   occurrenceAutoSaveTimer = 0;
   occurrenceAutoSaveQueued = false;
   const position = captureOccurrencePosition();
-  const rowKey = occurrenceEditingRowKey.value || occurrenceRowKey(occurrenceDraft);
   const draftId = occurrenceDraft.id;
   occurrenceSaving.value = true;
   try {
-    let saved = null;
     if (draftId) {
       await api(`/api/admin/programs/${editingId.value}/occurrences/${draftId}`, { method: "DELETE" });
-      const index = occurrenceRows.value.findIndex(row => String(row.id) === String(draftId) || occurrenceRowKey(row) === rowKey);
-      if (index >= 0) {
-        const row = occurrenceRows.value[index];
-        occurrenceRows.value.splice(index, 1, {
-          ...row,
-          status: "deleted",
-          adjusted_date: "",
-          adjusted_time: "",
-          shift_following_days: 0,
-          date: row.original_date,
-          time: row.original_time,
-          aired: false,
-        });
-        synchronizeOccurrenceRows();
-      }
     } else {
-      const data = await api(`/api/admin/programs/${editingId.value}/occurrences`, {
+      await api(`/api/admin/programs/${editingId.value}/occurrences`, {
         method: "POST",
         body: occurrenceBody({ status: "deleted", adjusted_date: "", adjusted_time: "", shift_following_days: 0 }),
       });
-      saved = data.occurrence;
     }
-    if (saved) updateSavedOccurrence(rowKey, saved);
+    await Promise.all([refreshPrograms(), refreshOccurrences(editingId.value)]);
     resetOccurrenceDraft();
     await restoreOccurrencePosition(position);
     message.value = t("单集已删除");
@@ -1301,7 +1308,7 @@ async function clearOccurrenceList() {
   error.value = "";
   try {
     const data = await api(`/api/admin/programs/${editingId.value}/occurrences`, { method: "DELETE" });
-    await loadOccurrences(editingId.value);
+    await Promise.all([refreshPrograms(), refreshOccurrences(editingId.value)]);
     resetOccurrenceDraft();
     message.value = t("已清空 {count} 条单集覆盖", { count: data.deleted_count || 0 });
   } catch (requestError) {

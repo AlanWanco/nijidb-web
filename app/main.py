@@ -3628,6 +3628,16 @@ def program_occurrence_list(program: dict[str, Any], start: str = "", end: str =
     }
 
 
+def hydrated_program_occurrence(program_id: str, occurrence_id: int) -> dict[str, Any] | None:
+    program = next((item for item in program_rows() if item["id"] == program_id), None)
+    if not program:
+        return None
+    return next(
+        (item for item in program_occurrence_list(program)["occurrences"] if str(item.get("id")) == str(occurrence_id)),
+        None,
+    )
+
+
 @app.get("/api/admin/programs/{program_id}/occurrences")
 async def api_program_occurrences(program_id: str, request: Request, start: str = "", end: str = "") -> dict[str, Any]:
     require_api_admin(request)
@@ -3667,9 +3677,11 @@ async def api_create_occurrence(program_id: str, request: Request) -> dict[str, 
             cursor = insert_occurrence_row(conn, values)
         except sqlite3.IntegrityError as exc:
             raise HTTPException(409, "该播出日期和时间已经有单集调整") from exc
-        row = conn.execute("SELECT * FROM program_occurrences WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        occurrence_id = cursor.lastrowid
+        row = conn.execute("SELECT * FROM program_occurrences WHERE id = ?", (occurrence_id,)).fetchone()
     log_database_activity("program", f"新增单集：{program['title']}（{values['original_date']}）")
-    return {"occurrence": occurrence_payload(row)}
+    occurrence = hydrated_program_occurrence(program_id, occurrence_id) or occurrence_payload(row)
+    return {"occurrence": occurrence}
 
 
 @app.post("/api/admin/programs/{program_id}/occurrences/restore-rescheduled")
@@ -3756,7 +3768,8 @@ async def api_update_occurrence(program_id: str, occurrence_id: int, request: Re
             raise HTTPException(409, "该播出日期和时间已经有单集调整") from exc
         row = conn.execute("SELECT * FROM program_occurrences WHERE id = ?", (occurrence_id,)).fetchone()
     log_database_activity("program", f"修改单集：{program['title']}（{values['original_date']}）")
-    return {"occurrence": occurrence_payload(row)}
+    occurrence = hydrated_program_occurrence(program_id, occurrence_id) or occurrence_payload(row)
+    return {"occurrence": occurrence}
 
 
 @app.delete("/api/admin/programs/{program_id}/occurrences/{occurrence_id}")
@@ -3770,11 +3783,13 @@ async def api_delete_occurrence(program_id: str, occurrence_id: int, request: Re
                WHERE id = ? AND program_id = ?""",
             (datetime.now(timezone.utc).isoformat(), occurrence_id, program_id),
         )
+        row = conn.execute("SELECT * FROM program_occurrences WHERE id = ? AND program_id = ?", (occurrence_id, program_id)).fetchone()
     if result.rowcount == 0:
         raise HTTPException(404, "单集排期不存在")
     if program:
         log_database_activity("program", f"删除单集：{program['title']}（编号 {occurrence_id}）")
-    return {"message": "单集已删除"}
+    occurrence = hydrated_program_occurrence(program_id, occurrence_id) or occurrence_payload(row)
+    return {"message": "单集已删除", "occurrence": occurrence}
 
 
 @app.get("/rainbow.svg", include_in_schema=False)

@@ -153,6 +153,12 @@ const relatedSubprogramCount = computed(() => {
   const rootId = form.parent_id || editingId.value;
   return programs.value.filter(program => program.parent_id === rootId).length;
 });
+const relatedSubprograms = computed(() => {
+  if (!editingId.value || form.parent_id) return [];
+  return programs.value
+    .filter(program => program.parent_id === editingId.value)
+    .sort((left, right) => String(left.subprogram_name || "").localeCompare(String(right.subprogram_name || "")));
+});
 const generatedOccurrenceCount = computed(() => occurrenceRows.value.filter(row => row.generated).length);
 const materializedOccurrenceCount = computed(() => occurrenceRows.value.filter(row => row.materialized && row.status !== "deleted").length);
 const deletedOccurrenceCount = computed(() => occurrenceRows.value.filter(row => row.status === "deleted").length);
@@ -711,6 +717,15 @@ async function editProgram(program) {
   error.value = "";
   await loadOccurrences(program.id);
   window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+async function returnToParentProgram() {
+  const parent = programs.value.find(program => program.id === form.parent_id);
+  if (!parent) {
+    error.value = t("所属主节目不存在或已被删除");
+    return;
+  }
+  await editProgram(parent);
 }
 
 function setPeriodFrequency(period, value) {
@@ -1399,11 +1414,12 @@ onUnmounted(() => {
 
     <form v-if="activePanel === 'edit' && editorOpen" class="settings-card program-editor program-panel-content" @submit.prevent="saveProgram()">
       <div class="form-heading">
-        <span class="form-number">{{ editingId ? "02" : "01" }}</span>
+         <span class="form-number">{{ editingId && !form.parent_id ? "02" : "01" }}</span>
          <div><p class="form-kicker">MANUAL ENTRY</p><h2>{{ editingId ? t("编辑节目") : t("添加节目") }}</h2></div>
-        <div v-if="editingId && !form.parent_id" class="form-heading-actions">
-           <button type="button" class="secondary program-action-button" @click="newSubprogramFromEditor">{{ t("添加子节目") }}</button>
-        </div>
+         <div v-if="editingId" class="form-heading-actions">
+            <button v-if="form.parent_id" type="button" class="secondary program-action-button program-subprogram-link program-subprogram-back" @click="returnToParentProgram">↩ {{ t("返回主节目") }}</button>
+            <button v-else type="button" class="secondary program-action-button" @click="newSubprogramFromEditor">{{ t("添加子节目") }}</button>
+         </div>
       </div>
 
       <div class="program-form-grid">
@@ -1473,8 +1489,22 @@ onUnmounted(() => {
            <small>{{ t("这里填写批量排期下固定出现的虹咲成员、主持人或常驻嘉宾；单期临时嘉宾请在下方单集编辑。") }}</small>
         </div>
           <label class="program-field-wide">{{ t("相关链接") }}<input v-model="form.official_url" type="url" placeholder="https://"><small>{{ t("节目层面的补充链接；源地址、搬运地址和字幕地址请在单集编辑中填写。") }}</small></label>
-          <label class="program-field-wide">{{ t("节目简介") }}<textarea v-model="form.description" rows="3" :placeholder="t('可选')"></textarea></label>
-      </div>
+           <label class="program-field-wide">{{ t("节目简介") }}<textarea v-model="form.description" rows="3" :placeholder="t('可选')"></textarea></label>
+           <div v-if="editingId && !form.parent_id" class="program-subprogram-panel program-field-wide">
+             <div class="program-subprogram-panel-heading">
+               <div><span class="program-field-label">{{ t("子节目") }}</span><small>{{ relatedSubprograms.length ? t("选择子节目进入独立编辑页") : t("当前主节目还没有子节目") }}</small></div>
+               <span class="program-subprogram-count">{{ relatedSubprograms.length }}</span>
+             </div>
+             <div v-if="relatedSubprograms.length" class="program-subprogram-list">
+               <button v-for="subprogram in relatedSubprograms" :key="subprogram.id" type="button" class="program-subprogram-link" @click="editProgram(subprogram)">
+                 <strong>{{ subprogram.subprogram_name }}</strong>
+                 <small>{{ scheduleLabel(subprogram) }} · {{ t("已播") }} {{ subprogram.episode_count }} {{ t("期") }}</small>
+                 <span aria-hidden="true">↗</span>
+               </button>
+             </div>
+             <button v-else type="button" class="secondary program-action-button program-subprogram-add" @click="newSubprogramFromEditor">＋ {{ t("添加子节目") }}</button>
+           </div>
+       </div>
 
       <div class="program-schedule">
           <div class="form-heading subsection-heading"><span class="form-number">02</span><div><p class="form-kicker">BROADCAST PERIODS</p><h2>{{ t("排期时期") }}</h2></div></div>

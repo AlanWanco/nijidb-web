@@ -3952,6 +3952,107 @@ footer {
   line-height: 1.35;
 }
 
+.program-subprogram-panel {
+  margin: 12px 0 8px;
+  border: 1px solid color-mix(in srgb, var(--line) 76%, var(--accent));
+  border-radius: 16px;
+  padding: 15px 17px 17px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent-soft) 76%, var(--surface)), var(--surface));
+}
+
+.program-subprogram-panel-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
+.program-subprogram-panel-heading .program-field-label {
+  margin-bottom: 2px;
+}
+
+.program-subprogram-panel-heading small {
+  display: block;
+  margin-top: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+.program-subprogram-count {
+  display: grid;
+  min-width: 28px;
+  min-height: 28px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--line));
+  border-radius: 999px;
+  color: var(--accent);
+  font: 600 11px var(--mono);
+}
+
+.program-subprogram-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+
+.program-subprogram-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--line));
+  border-radius: 999px;
+  padding: 8px 12px 8px 14px;
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.25;
+  text-align: left;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+}
+
+.program-subprogram-link strong {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.program-subprogram-link small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.program-subprogram-link > span {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 15px;
+  line-height: 1;
+}
+
+.program-subprogram-link:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  box-shadow: 0 5px 16px color-mix(in srgb, var(--accent) 16%, transparent);
+  transform: translateY(-1px);
+}
+
+.program-subprogram-back {
+  white-space: nowrap;
+}
+
+.program-subprogram-add {
+  margin-top: 2px;
+}
+
 .program-form-grid textarea,
 .occurrence-form textarea {
   min-height: 72px;
@@ -5965,6 +6066,25 @@ html[data-theme="mocha"] .dp__theme_dark {
 
   .program-period-card {
     padding: 15px 13px 5px;
+  }
+
+  .program-subprogram-panel {
+    padding: 14px 13px 15px;
+  }
+
+  .program-subprogram-list {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .program-subprogram-link {
+    width: 100%;
+    justify-content: space-between;
+    border-radius: 15px;
+  }
+
+  .program-subprogram-link small {
+    flex: 1 1 auto;
   }
 
   .program-admin-item {

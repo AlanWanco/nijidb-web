@@ -44,8 +44,11 @@ docker run --rm --mount source=nijidb-data,target=/data \
 后端和前端分开启动，Vue 页面由 Vite 提供热更新，修改前端组件或样式时不需要重启服务：
 
 ```bash
+# 安装锁定的 Python 依赖
+uv sync --locked
+
 # 终端一：FastAPI，后端代码修改自动重载
-uvicorn app.main:app --reload --port 8000
+uv run --locked uvicorn app.main:app --reload --port 8000
 
 # 终端二：Vue + Vite，前端修改即时 HMR
 cd frontend

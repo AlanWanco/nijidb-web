@@ -404,7 +404,13 @@ onUnmounted(() => window.clearTimeout(programSearchTimer));
                  <span v-if="occurrenceCast(row).length" class="program-readonly-episode-cast-line" role="img" :aria-label="`${t('出场成员')}：${occurrenceCast(row).map(member => member.name).join('、')}`" :title="occurrenceCast(row).map(member => member.name).join('、')"><i v-for="member in occurrenceCast(row)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
                 <div class="program-readonly-episode-heading"><strong>{{ episodeLabel(row) }}</strong><span class="program-status" :class="occurrenceStateClass(row)">{{ occurrenceStatus(row) }}</span><strong v-if="row.title" class="program-readonly-episode-title">{{ row.title }}</strong></div>
                  <time>{{ dateLabel(row.date) }}{{ row.time ? ` · ${row.time}` : ` · ${t("全天")}` }}</time>
-                 <small>{{ occurrenceSourceLabel(row) }} · {{ row.delivery === "live" ? t("直播") : t("录播") }}{{ row.guests?.length ? ` · ${t("嘉宾")} ${row.guests.length} ${t("人")}` : "" }}{{ row.absent_members?.length ? ` · ${t("缺席")} ${row.absent_members.length} ${t("人")}` : "" }}</small>
+                 <small>{{ occurrenceSourceLabel(row) }} · {{ row.delivery === "live" ? t("直播") : t("录播") }}{{ row.absent_members?.length ? ` · ${t("缺席")} ${row.absent_members.length} ${t("人")}` : "" }}</small>
+                 <template v-if="row.guests?.length">
+                   <p>{{ t("本期嘉宾") }}</p>
+                   <div class="program-guest-tags">
+                     <span v-for="guest in row.guests" :key="guest">{{ guest }}</span>
+                   </div>
+                 </template>
                <div v-if="occurrenceLinkItems(row).length" class="program-episode-links">
                  <template v-for="link in occurrenceLinkItems(row)" :key="link.key">
                    <a v-if="link.href" class="program-meta-link" :href="link.href" target="_blank" rel="noopener noreferrer">{{ link.label }}：{{ link.display }} ↗</a>

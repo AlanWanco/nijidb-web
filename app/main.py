@@ -40,8 +40,9 @@ PASSWORD_ITERATIONS = 310_000
 BACKUP_MAX_BYTES = 32 * 1024 * 1024
 BACKUP_RETENTION_COUNT = 30
 PROGRAM_JSON_FORMAT = "nijidb-program"
-PROGRAM_JSON_VERSION = 2
+PROGRAM_JSON_VERSION = 3
 PROGRAM_IMPORT_MAX_OCCURRENCES = 2000
+PROGRAM_IMPORT_PARENT_MARKER = "__nijidb_import_parent__"
 NIJIGASAKI_NAME_ALIASES = {
     "大西亚玖璃": "大西亜玖璃",
     "相良茉优": "相良茉優",
@@ -966,6 +967,13 @@ def import_payload_options(payload: dict[str, Any]) -> dict[str, str]:
     if schedule_mode not in {"individual", "generated"}:
         raise ValueError("import_options.schedule_mode 必须是 individual 或 generated")
 
+    program_scope = import_choice(payload.get("_program_scope"), {
+        "主节目": "main", "主节目组": "main", "main": "main",
+        "子节目": "subprogram", "subprogram": "subprogram",
+    }) or "main"
+    if program_scope not in {"main", "subprogram"}:
+        raise ValueError("_program_scope 必须是 main 或 subprogram")
+
     target_mode = import_choice(raw_options.get("target_mode"), {
         "新建": "new", "new": "new", "覆盖": "overwrite", "覆盖已有": "overwrite", "overwrite": "overwrite",
     }) or "new"
@@ -973,10 +981,13 @@ def import_payload_options(payload: dict[str, Any]) -> dict[str, str]:
         raise ValueError("import_options.target_mode 必须是 new 或 overwrite")
     source_program_id = str(raw_program.get("id") or "").strip() if isinstance(raw_program, dict) else ""
     target_program_id = str(raw_options.get("target_program_id") or "").strip()
+    target_parent_program_id = str(raw_options.get("target_parent_program_id") or "").strip()
     return {
         "schedule_mode": schedule_mode,
         "target_mode": target_mode,
         "target_program_id": target_program_id,
+        "target_parent_program_id": target_parent_program_id,
+        "program_scope": program_scope,
         "source_program_id": source_program_id,
     }
 
@@ -985,12 +996,16 @@ def program_json_metadata() -> dict[str, Any]:
     return {
         "_format": PROGRAM_JSON_FORMAT,
         "_version": PROGRAM_JSON_VERSION,
-        "_description": "Nijidb 单独节目导入导出格式；一个 JSON 文件只描述一个节目及其单集资料。",
+        "_description": "Nijidb 节目导入导出格式；一个 JSON 文件描述一个主节目、其子节目及单集资料。",
         "_field_notes": {
             "import_options.schedule_mode": "individual（默认）：以 occurrences 为最终逐期数据，不自动生成；generated：按 periods 自动生成，occurrences 只作为已保存的覆盖和例外。",
             "import_options.target_mode": "new（默认）：新建节目；overwrite：覆盖 target_program_id 指定的已有节目。覆盖前必须在网页预览中再次确认。",
-            "program.id": "导出时保留的节目 ID，仅用于预览匹配覆盖目标；新建导入时会忽略。",
-            "program": "节目基本资料和排期时期；规范 JSON 至少提供一个 periods，按 start_date 分段。一个文件只描述一个节目系列。",
+            "import_options.target_parent_program_id": "仅用于子节目 JSON；指定导入后所属的主节目 ID。",
+            "_program_scope": "main（默认）：program 加 subprograms 组成一个主节目组；subprogram：program 仅描述一个子节目，并通过 parent_program 定位原主节目。",
+            "program.id": "导出时保留的节目 ID，仅用于预览匹配覆盖目标或识别组合文件中的子节目；新建导入时会忽略。",
+            "program": "主节目基本资料和排期时期；规范 JSON 至少提供一个 periods，按 start_date 分段。",
+            "subprograms": "子节目数组；每项包含 program 和 occurrences，并在导入时自动挂到本文件的主节目下。没有子节目时为空数组。",
+            "parent_program": "子节目 JSON 的原主节目定位信息；导入时可以在预览中改选实际所属主节目。",
             "program.delivery": "默认播出方式：live 或 recorded。",
             "program.episode_start": "首集编号支持 0 到 9999，默认是 1；第一个非 EX 单集从该编号开始，之后按规则递增。EX 始终不占期。",
             "program.people": "节目固定参与成员、主持人或常驻嘉宾数组。推荐使用以下 14 个虹咲成员日文原名以启用成员筛选和彩色标记：大西亜玖璃、相良茉優、前田佳織里、久保田未夢、村上奈津実、鬼頭明里、楠木ともり、林鼓子、指出毬亜、田中ちえ美、小泉萌香、内田秀、法元明菜、矢野妃菜喜。其他主持人或嘉宾也可直接填写姓名，会被保存和显示，但不会被识别为虹咲成员。",
@@ -1023,12 +1038,13 @@ def program_json_metadata() -> dict[str, Any]:
             "规范 JSON 至少提供一段 periods；第一段 periods[0].start_date 是节目第一期日期且不能为空，后续时期按 start_date 分段。end_date 可空表示连载中，不要填写最后一条单集日期。",
             "episode_start 支持非负自定义编号，适用于首集不是第 0 或第 1 期的节目；普通单集从该编号开始递增，EX 仍不占期。不要为了修改编号而修改日期或伪造单集。",
             "EX 统一用于番外、アフタートーク、特別版、公开录音和 guest 加更，不占期；普通期的 special 使用空字符串。直播场次和直播存档使用 delivery=live，并可在 note 写“生配信アーカイブ”；不要把直播回看误标为 recorded。",
-            "一个 JSON 文件只描述一个节目系列；如果内容混入其他节目（例如“ふわふわ曖昧dream”），应拆分为独立文件，或明确标记为另一个节目，不要硬塞进当前节目。",
+            "一个 JSON 文件描述一个主节目及其子节目；不属于该主节目系列的内容（例如“ふわふわ曖昧dream”）应拆分为独立文件。",
             "program.people 用于节目级固定成员、主持人和常驻嘉宾；单期临时嘉宾使用 occurrences[].guests，固定虹咲成员本期缺席使用 occurrences[].absent_members。",
             "schedule_mode 缺省为 individual：导入的 occurrences 是准确的最终逐期数据，program.auto_generate 会被关闭，不会凭 periods 生成额外单集。",
             "需要继续按排期规则生成时，将 schedule_mode 设置为 generated；此时 program.auto_generate 会开启，occurrences 作为已保存覆盖和例外。",
             "导出默认是 individual 完整逐期快照，适合交给 AI 优化内容后覆盖导回；也可以选择 generated 规则加当前自动生成结果和例外导出。自动生成结果按系统现有约半年的生成窗口写入。",
             "target_mode 缺省为 new；覆盖导入必须指定 target_program_id，并在网页导入预览中明确选择覆盖目标。",
+            "子节目 JSON 导入必须在预览中选择一个已有的主节目；new 会在该主节目下新建子节目，overwrite 会覆盖该主节目下同名或同 ID 的子节目。",
             "JSON 可以保留这些说明字段；导入器也兼容 // 和 /* */ 注释。",
         ],
     }
@@ -1040,6 +1056,7 @@ def program_json_template() -> dict[str, Any]:
         "schedule_mode": "individual",
         "target_mode": "new",
         "target_program_id": "",
+        "target_parent_program_id": "",
     }
     payload["program"] = {
         "title": "示例节目",
@@ -1144,6 +1161,7 @@ def program_json_template() -> dict[str, Any]:
             "absent_members": [],
         },
     ]
+    payload["subprograms"] = []
     return payload
 
 
@@ -1166,15 +1184,20 @@ def normalize_import_periods(values: dict[str, Any]) -> dict[str, Any]:
     return source
 
 
-def normalize_import_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
+def normalize_import_payload(
+    payload: dict[str, Any],
+    raw_program_override: dict[str, Any] | None = None,
+    raw_occurrences_override: list[Any] | None = None,
+    parent_id_override: str | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
     if not isinstance(payload, dict):
         raise ValueError("JSON 根对象格式无效")
     options = import_payload_options(payload)
-    raw_program = payload.get("program") if isinstance(payload.get("program"), dict) else payload
+    raw_program = raw_program_override if raw_program_override is not None else (payload.get("program") if isinstance(payload.get("program"), dict) else payload)
     if not isinstance(raw_program, dict):
         raise ValueError("JSON 中缺少 program 对象")
     program_source = dict(raw_program)
-    raw_occurrences = payload.get("occurrences")
+    raw_occurrences = raw_occurrences_override if raw_occurrences_override is not None else payload.get("occurrences")
     if raw_occurrences is None:
         raw_occurrences = payload.get("episodes", program_source.pop("occurrences", []))
     if not isinstance(raw_occurrences, list):
@@ -1184,8 +1207,11 @@ def normalize_import_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], l
 
     program_source.pop("id", None)
     program_source["auto_generate"] = options["schedule_mode"] == "generated"
-    program_source["parent_id"] = ""
-    program_source["subprogram_name"] = "主节目"
+    if parent_id_override is None or not parent_id_override:
+        program_source["parent_id"] = ""
+        program_source["subprogram_name"] = "主节目"
+    else:
+        program_source["parent_id"] = parent_id_override
     program_source["category"] = import_choice(program_source.get("category"), {
         "官方": "official", "官方节目": "official", "official": "official",
         "个人": "personal", "个人节目": "personal", "personal": "personal",
@@ -1295,27 +1321,72 @@ def normalize_import_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], l
     return program_values, occurrences, warnings
 
 
-def import_preview_payload(
-    program: dict[str, Any],
-    occurrences: list[dict[str, Any]],
-    warnings: list[str],
-    options: dict[str, str],
-    matches: list[dict[str, Any]],
-) -> dict[str, Any]:
-    payload = program_json_metadata()
-    payload["import_options"] = {
-        "schedule_mode": options["schedule_mode"],
-        "target_mode": "new",
-        "target_program_id": "",
-    }
-    payload["source_program_id"] = options["source_program_id"]
-    payload["matches"] = matches
-    payload["program"] = {
+def import_payload_entries(payload: dict[str, Any]) -> list[tuple[dict[str, Any], list[Any], bool]]:
+    if not isinstance(payload, dict):
+        raise ValueError("JSON 根对象格式无效")
+    raw_program = payload.get("program") if isinstance(payload.get("program"), dict) else payload
+    if not isinstance(raw_program, dict):
+        raise ValueError("JSON 中缺少 program 对象")
+    raw_occurrences = payload.get("occurrences")
+    if raw_occurrences is None:
+        raw_occurrences = payload.get("episodes", raw_program.get("occurrences", []))
+    if import_payload_options(payload)["program_scope"] == "subprogram":
+        if payload.get("subprograms"):
+            raise ValueError("子节目 JSON 不能再包含 subprograms")
+        return [(raw_program, raw_occurrences, True)]
+    entries: list[tuple[dict[str, Any], list[Any], bool]] = [(raw_program, raw_occurrences, False)]
+    raw_subprograms = payload.get("subprograms", [])
+    if not isinstance(raw_subprograms, list):
+        raise ValueError("subprograms 必须是对象数组")
+    for index, raw_subprogram in enumerate(raw_subprograms, start=1):
+        if not isinstance(raw_subprogram, dict):
+            raise ValueError(f"第 {index} 个子节目格式无效")
+        child_program = raw_subprogram.get("program") if isinstance(raw_subprogram.get("program"), dict) else raw_subprogram
+        if not isinstance(child_program, dict):
+            raise ValueError(f"第 {index} 个子节目缺少 program 对象")
+        child_occurrences = raw_subprogram.get("occurrences")
+        if child_occurrences is None:
+            child_occurrences = child_program.get("episodes", child_program.get("occurrences", []))
+        entries.append((child_program, child_occurrences, True))
+    return entries
+
+
+def normalize_import_bundle(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    entries = import_payload_entries(payload)
+    raw_occurrence_count = sum(len(occurrences) for _, occurrences, _ in entries if isinstance(occurrences, list))
+    if raw_occurrence_count > PROGRAM_IMPORT_MAX_OCCURRENCES:
+        raise ValueError(f"单次导入最多支持 {PROGRAM_IMPORT_MAX_OCCURRENCES} 期单集")
+    normalized_entries: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for index, (raw_program, raw_occurrences, is_subprogram) in enumerate(entries):
+        program, occurrences, entry_warnings = normalize_import_payload(
+            payload,
+            raw_program_override=raw_program,
+            raw_occurrences_override=raw_occurrences,
+            parent_id_override=PROGRAM_IMPORT_PARENT_MARKER if is_subprogram else "",
+        )
+        if is_subprogram:
+            prefix = f"子节目「{program['subprogram_name']}」："
+            warnings.extend(f"{prefix}{warning}" for warning in entry_warnings)
+        else:
+            warnings.extend(entry_warnings)
+        normalized_entries.append({
+            "program": program,
+            "occurrences": occurrences,
+            "is_subprogram": is_subprogram,
+            "source_program_id": str(raw_program.get("id") or "").strip(),
+        })
+    return normalized_entries, warnings
+
+
+def import_preview_entry(program: dict[str, Any], occurrences: list[dict[str, Any]]) -> dict[str, Any]:
+    preview_program = {
         key: program[key]
         for key in ("title", "category", "format", "platform", "delivery", "auto_generate", "episode_start", "official_url", "description", "periods")
     }
-    payload["program"]["people"] = program_people(program.get("people", []))
-    payload["occurrences"] = []
+    if program.get("parent_id"):
+        preview_program["subprogram_name"] = program.get("subprogram_name") or ""
+    preview_occurrences = []
     episode_numbers = import_occurrence_episode_numbers(occurrences, program_episode_start(program))
     for index, occurrence in enumerate(occurrences):
         item = {
@@ -1325,9 +1396,51 @@ def import_preview_payload(
         item["episode"] = episode_numbers[index]
         item["guests"] = program_people(occurrence.get("guests", []))
         item["absent_members"] = program_people(occurrence.get("absent_members", []))
-        payload["occurrences"].append(item)
+        preview_occurrences.append(item)
+    return {
+        "program": preview_program,
+        "occurrences": preview_occurrences,
+        "counts": {"periods": len(program["periods"]), "occurrences": len(occurrences)},
+    }
+
+
+def import_preview_payload(
+    program: dict[str, Any],
+    occurrences: list[dict[str, Any]],
+    warnings: list[str],
+    options: dict[str, str],
+    matches: list[dict[str, Any]],
+    subprogram_entries: list[dict[str, Any]] | None = None,
+    scope: str = "main",
+    parent_program: dict[str, Any] | None = None,
+    parent_choices: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    payload = program_json_metadata()
+    payload["_program_scope"] = scope
+    payload["import_options"] = {
+        "schedule_mode": options["schedule_mode"],
+        "target_mode": "new",
+        "target_program_id": "",
+        "target_parent_program_id": options.get("target_parent_program_id", ""),
+    }
+    if scope == "subprogram" and parent_choices and not payload["import_options"]["target_parent_program_id"]:
+        payload["import_options"]["target_parent_program_id"] = parent_choices[0]["id"]
+    payload["source_program_id"] = options["source_program_id"]
+    payload["matches"] = matches
+    payload["parent_program"] = parent_program or {}
+    payload["parent_choices"] = parent_choices or []
+    root_preview = import_preview_entry(program, occurrences)
+    root_preview["program"]["people"] = program_people(program.get("people", []))
+    payload.update(root_preview)
+    payload["subprograms"] = []
+    for entry in subprogram_entries or []:
+        child_preview = import_preview_entry(entry["program"], entry["occurrences"])
+        child_preview["program"]["people"] = program_people(entry["program"].get("people", []))
+        payload["subprograms"].append(child_preview)
     payload["warnings"] = warnings
-    payload["counts"] = {"periods": len(program["periods"]), "occurrences": len(occurrences)}
+    payload["counts"]["programs"] = 1 + len(payload["subprograms"])
+    payload["counts"]["subprograms"] = len(payload["subprograms"])
+    payload["counts"]["occurrences_total"] = sum(item["counts"]["occurrences"] for item in [root_preview, *payload["subprograms"]])
     return payload
 
 
@@ -1347,6 +1460,28 @@ def program_import_matches(source_program_id: str, title: str) -> list[dict[str,
             "subprogram_name": row["subprogram_name"] or "主节目",
             "display_name": f"{row['title']} · {row['subprogram_name']}" if row["parent_id"] else row["title"],
             "match": "id" if source_program_id and row["id"] == source_program_id else "title",
+        }
+        for row in rows
+    ]
+
+
+def main_program_import_choices(source_program_id: str, title: str) -> list[dict[str, Any]]:
+    with db() as conn:
+        rows = conn.execute(
+            """SELECT id, title
+               FROM programs
+               WHERE parent_id = ''
+               ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END,
+                        CASE WHEN title = ? THEN 0 ELSE 1 END,
+                        title COLLATE NOCASE""",
+            (source_program_id, title),
+        ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "title": row["title"],
+            "display_name": row["title"],
+            "match": "id" if source_program_id and row["id"] == source_program_id else "title" if row["title"] == title else "available",
         }
         for row in rows
     ]
@@ -1376,6 +1511,97 @@ def validate_program_group(conn: sqlite3.Connection, values: dict[str, Any], cur
     if sibling:
         raise ValueError("同一个主节目下不能重复使用子节目名称")
     return values
+
+
+def prepare_import_bundle(
+    conn: sqlite3.Connection,
+    entries: list[dict[str, Any]],
+    options: dict[str, str],
+) -> list[dict[str, Any]]:
+    overwrite = options["target_mode"] == "overwrite"
+    if entries[0]["is_subprogram"]:
+        parent_id = options["target_parent_program_id"]
+        parent = conn.execute("SELECT id, title, parent_id FROM programs WHERE id = ?", (parent_id,)).fetchone() if parent_id else None
+        if not parent:
+            raise ValueError("子节目导入需要选择一个存在的主节目")
+        if parent["parent_id"]:
+            raise ValueError("子节目只能挂在主节目下")
+        entry = entries[0]
+        child_values = {
+            **entry["program"],
+            "parent_id": parent["id"],
+            "title": parent["title"],
+        }
+        existing_children = conn.execute(
+            "SELECT id, subprogram_name, created_at FROM programs WHERE parent_id = ?",
+            (parent["id"],),
+        ).fetchall()
+        target_child = next(
+            (row for row in existing_children if row["id"] == entry["source_program_id"]),
+            None,
+        )
+        if not target_child:
+            target_child = next((row for row in existing_children if row["subprogram_name"] == child_values["subprogram_name"]), None)
+        if overwrite and not target_child:
+            raise ValueError("覆盖导入没有找到该主节目下对应的子节目")
+        target_child_id = target_child["id"] if target_child else f"program-{secrets.token_hex(6)}"
+        if target_child:
+            child_values = validate_program_group(conn, {**child_values, "id": target_child_id}, target_child_id)
+        else:
+            child_values = validate_program_group(conn, {**child_values, "id": target_child_id})
+        return [{
+            "program": child_values,
+            "occurrences": entry["occurrences"],
+            "overwrite": bool(target_child),
+            "created_at": target_child["created_at"] if target_child else "",
+            "is_subprogram": True,
+        }]
+
+    root_target_id = options["target_program_id"] if overwrite else f"program-{secrets.token_hex(6)}"
+    existing_root = conn.execute("SELECT id, created_at FROM programs WHERE id = ?", (root_target_id,)).fetchone() if overwrite else None
+    if overwrite and not existing_root:
+        raise ValueError("覆盖导入需要选择一个存在的目标节目")
+
+    root_values = {**entries[0]["program"], "parent_id": "", "id": root_target_id}
+    root_values = validate_program_group(conn, root_values, root_target_id if overwrite else "")
+    prepared = [{
+        "program": root_values,
+        "occurrences": entries[0]["occurrences"],
+        "overwrite": overwrite,
+        "created_at": existing_root["created_at"] if existing_root else "",
+        "is_subprogram": False,
+    }]
+
+    existing_children = conn.execute(
+        "SELECT id, subprogram_name, created_at FROM programs WHERE parent_id = ?",
+        (root_target_id,),
+    ).fetchall() if overwrite else []
+    used_names: set[str] = set()
+    for entry in entries[1:]:
+        child_values = {**entry["program"], "parent_id": root_target_id, "title": root_values["title"]}
+        child_name = child_values["subprogram_name"]
+        if child_name in used_names:
+            raise ValueError(f"组合导入包含重复的子节目名称：{child_name}")
+        used_names.add(child_name)
+        target_child = next(
+            (row for row in existing_children if row["id"] == entry["source_program_id"]),
+            None,
+        )
+        if not target_child:
+            target_child = next((row for row in existing_children if row["subprogram_name"] == child_name), None)
+        target_child_id = target_child["id"] if target_child else f"program-{secrets.token_hex(6)}"
+        if target_child:
+            child_values = validate_program_group(conn, {**child_values, "id": target_child_id}, target_child_id)
+        else:
+            child_values["id"] = target_child_id
+        prepared.append({
+            "program": child_values,
+            "occurrences": entry["occurrences"],
+            "overwrite": bool(target_child),
+            "created_at": target_child["created_at"] if target_child else "",
+            "is_subprogram": True,
+        })
+    return prepared
 
 
 def seed_program_periods(conn: sqlite3.Connection) -> None:
@@ -2113,47 +2339,75 @@ def program_json_occurrence_item(occurrence: dict[str, Any], freeze_effective_da
     return item
 
 
-def program_json_export(program: dict[str, Any], mode: str = "individual") -> dict[str, Any]:
+def program_json_export_entry(program: dict[str, Any], mode: str, today: date) -> dict[str, Any]:
+    exported_program = {
+        key: program.get(key)
+        for key in ("title", "category", "format", "platform", "delivery", "auto_generate", "episode_start", "people", "official_url", "description", "periods")
+    }
+    exported_program["id"] = program.get("id", "")
+    exported_program["parent_id"] = program.get("parent_id", "")
+    exported_program["subprogram_name"] = program.get("subprogram_name") or "主节目"
+    start = calendar_date(program.get("start_date", ""), today)
+    end = calendar_date(program.get("end_date", ""), today + timedelta(days=PROGRAM_FORECAST_DAYS))
+    if mode == "individual":
+        exported_program["auto_generate"] = False
+        records = program_occurrence_list(program, start.isoformat(), end.isoformat())["occurrences"]
+        occurrences = [program_json_occurrence_item(record, True) for record in records]
+    else:
+        exported_program["auto_generate"] = True
+        records = program_occurrence_list({**program, "auto_generate": True}, start.isoformat(), end.isoformat())["occurrences"]
+        occurrences = [program_json_occurrence_item(occurrence, False) for occurrence in records]
+    return {"program": exported_program, "occurrences": occurrences}
+
+
+def program_json_export(
+    program: dict[str, Any],
+    mode: str = "individual",
+    program_group: list[dict[str, Any]] | None = None,
+    scope: str = "main",
+    parent_program: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if mode not in {"individual", "generated"}:
         raise ValueError("导出模式必须是 individual 或 generated")
+    if scope not in {"main", "subprogram"}:
+        raise ValueError("导出范围必须是 main 或 subprogram")
+    group = program_group or [program]
+    root = program if scope == "subprogram" else next((item for item in group if not item.get("parent_id")), program)
+    children = sorted(
+        [item for item in group if item.get("id") != root.get("id")],
+        key=lambda item: str(item.get("subprogram_name") or ""),
+    ) if scope == "main" else []
+    today = datetime.now(JAPAN_TZ).date()
+    root_entry = program_json_export_entry(root, mode, today)
     payload = program_json_metadata()
     payload["_exported_at"] = datetime.now(timezone.utc).isoformat()
+    payload["_program_scope"] = scope
     payload["import_options"] = {
         "schedule_mode": mode,
         "target_mode": "new",
         "target_program_id": "",
+        "target_parent_program_id": parent_program.get("id", "") if scope == "subprogram" and parent_program else "",
     }
-    payload["program"] = {
-        key: program.get(key)
-        for key in ("title", "category", "format", "platform", "delivery", "auto_generate", "episode_start", "people", "official_url", "description", "periods")
-    }
-    payload["program"]["id"] = program.get("id", "")
+    payload["program"] = root_entry["program"]
+    payload["occurrences"] = root_entry["occurrences"]
+    payload["subprograms"] = [program_json_export_entry(child, mode, today) for child in children]
+    if scope == "subprogram":
+        parent = parent_program or {}
+        payload["parent_program"] = {
+            "id": parent.get("id", ""),
+            "title": parent.get("title", root.get("title", "")),
+        }
     if mode == "individual":
-        payload["program"]["auto_generate"] = False
         payload["_export_notes"] = [
             "这是完整逐期快照；自动生成的单集也会展开写入 occurrences。",
             "快照按当前实际播出日期冻结；由前期改期级联产生的日期会转换为本期独立的 rescheduled 记录。",
             "导入此文件后默认关闭自动生成，不会因 periods 重新生成或再次级联提前/顺延。",
         ]
-        today = datetime.now(JAPAN_TZ).date()
-        start = calendar_date(program.get("start_date", ""), today)
-        end = calendar_date(program.get("end_date", ""), today + timedelta(days=PROGRAM_FORECAST_DAYS))
-        records = program_occurrence_list(program, start.isoformat(), end.isoformat())["occurrences"]
-        payload["occurrences"] = [program_json_occurrence_item(record, True) for record in records]
     else:
-        payload["program"]["auto_generate"] = True
         payload["_export_notes"] = [
             "这是排期规则加当前自动生成结果和已保存例外；自动生成单集会写入 occurrences，并标记 generated=true。",
             "导入此文件后会按 periods 自动生成；没有补充内容的 generated=true 记录不会重复保存，有内容的记录会作为覆盖保留。",
             "当前自动生成结果按系统现有约半年的生成窗口导出。",
-        ]
-        today = datetime.now(JAPAN_TZ).date()
-        start = calendar_date(program.get("start_date", ""), today)
-        end = calendar_date(program.get("end_date", ""), today + timedelta(days=PROGRAM_FORECAST_DAYS))
-        records = program_occurrence_list({**program, "auto_generate": True}, start.isoformat(), end.isoformat())["occurrences"]
-        payload["occurrences"] = [
-            program_json_occurrence_item(occurrence, False)
-            for occurrence in records
         ]
     return payload
 
@@ -3112,11 +3366,18 @@ async def api_program_json_template(request: Request) -> dict[str, Any]:
 @app.get("/api/admin/programs/{program_id}/export")
 async def api_export_program(program_id: str, request: Request, mode: str = "individual") -> dict[str, Any]:
     require_api_admin(request)
-    program = next((item for item in program_rows() if item["id"] == program_id), None)
+    programs = program_rows()
+    program = next((item for item in programs if item["id"] == program_id), None)
     if not program:
         raise HTTPException(404, "节目不存在")
     try:
-        return program_json_export(program, mode)
+        if program.get("parent_id"):
+            parent_program = next((item for item in programs if item["id"] == program["parent_id"]), None)
+            if not parent_program:
+                raise ValueError("子节目所属的主节目不存在")
+            return program_json_export(program, mode, [program], "subprogram", parent_program)
+        program_group = [item for item in programs if item["id"] == program["id"] or item.get("parent_id") == program["id"]]
+        return program_json_export(program, mode, program_group)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -3132,12 +3393,30 @@ async def api_preview_program_import(request: Request) -> dict[str, Any]:
         raise HTTPException(400, "请求格式无效")
     try:
         options = import_payload_options(payload)
-        program, occurrences, warnings = normalize_import_payload(payload)
-        validate_program_occurrence_slots({**program, "occurrences": occurrences})
+        entries, warnings = normalize_import_bundle(payload)
+        for entry in entries:
+            validate_program_occurrence_slots({**entry["program"], "occurrences": entry["occurrences"]})
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    matches = program_import_matches(options["source_program_id"], program["title"])
-    return import_preview_payload(program, occurrences, warnings, options, matches)
+    root_entry = entries[0]
+    scope = options["program_scope"]
+    matches = [] if scope == "subprogram" else program_import_matches(options["source_program_id"], root_entry["program"]["title"])
+    parent_program = payload.get("parent_program") if isinstance(payload.get("parent_program"), dict) else {}
+    parent_choices = main_program_import_choices(
+        str(parent_program.get("id") or "").strip(),
+        str(parent_program.get("title") or root_entry["program"]["title"]).strip(),
+    ) if scope == "subprogram" else []
+    return import_preview_payload(
+        root_entry["program"],
+        root_entry["occurrences"],
+        warnings,
+        options,
+        matches,
+        entries[1:],
+        scope,
+        parent_program,
+        parent_choices,
+    )
 
 
 @app.post("/api/admin/programs/import")
@@ -3151,48 +3430,54 @@ async def api_import_program(request: Request) -> dict[str, Any]:
         raise HTTPException(400, "请求格式无效")
     try:
         options = import_payload_options(payload)
-        program_values, occurrence_values, warnings = normalize_import_payload(payload)
+        entries, warnings = normalize_import_bundle(payload)
         with db() as conn:
-            target_id = options["target_program_id"] if options["target_mode"] == "overwrite" else ""
-            existing = conn.execute("SELECT id, created_at FROM programs WHERE id = ?", (target_id,)).fetchone() if target_id else None
-            if options["target_mode"] == "overwrite" and not existing:
-                raise ValueError("覆盖导入需要选择一个存在的目标节目")
-            program_values = validate_program_group(conn, program_values, target_id)
-        validate_program_occurrence_slots({**program_values, "occurrences": occurrence_values})
+            prepared = prepare_import_bundle(conn, entries, options)
+        for entry in prepared:
+            validate_program_occurrence_slots({**entry["program"], "occurrences": entry["occurrences"]})
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
     now = datetime.now(timezone.utc).isoformat()
-    overwrite = options["target_mode"] == "overwrite"
-    target_id = options["target_program_id"] if overwrite else f"program-{secrets.token_hex(6)}"
-    program_values.update({"id": target_id, "created_at": existing["created_at"] if overwrite else now, "updated_at": now})
     automatic_backup_path: Path | None = None
     try:
         async with sync_lock:
             automatic_backup_path = create_persistent_database_backup("before-json-import")
             with db() as conn:
-                if overwrite:
-                    replace_imported_program_row(conn, program_values, target_id, program_values["created_at"], now)
-                else:
-                    insert_program_row(conn, program_values)
-                for occurrence in occurrence_values:
-                    values = {
-                        **occurrence,
-                        "program_id": program_values["id"],
-                        "created_at": now,
+                for entry in prepared:
+                    program_values = {
+                        **entry["program"],
+                        "created_at": entry["created_at"] or now,
                         "updated_at": now,
                     }
-                    insert_occurrence_row(conn, values)
+                    target_id = program_values["id"]
+                    if entry["overwrite"]:
+                        replace_imported_program_row(conn, program_values, target_id, program_values["created_at"], now)
+                    else:
+                        insert_program_row(conn, program_values)
+                    for occurrence in entry["occurrences"]:
+                        values = {
+                            **occurrence,
+                            "program_id": target_id,
+                            "created_at": now,
+                            "updated_at": now,
+                        }
+                        insert_occurrence_row(conn, values)
     except sqlite3.IntegrityError as exc:
         raise HTTPException(409, "导入的单集存在重复播出日期和时间") from exc
 
+    root_program_values = prepared[0]["program"]
+    overwrite = options["target_mode"] == "overwrite"
+    imported_occurrences = sum(len(entry["occurrences"]) for entry in prepared)
     action = "覆盖节目" if overwrite else "导入节目"
-    log_database_activity("program", f"{action}：{program_values['title']}（{len(occurrence_values)} 期）")
-    program = next(item for item in program_rows() if item["id"] == program_values["id"])
+    log_database_activity("program", f"{action}：{root_program_values['title']}（{len(prepared)} 个节目，{imported_occurrences} 期）")
+    program = next(item for item in program_rows() if item["id"] == root_program_values["id"])
     return {
         "program": program,
         "warnings": warnings,
-        "imported_occurrences": len(occurrence_values),
+        "imported_programs": len(prepared),
+        "imported_subprograms": sum(1 for entry in prepared if entry["is_subprogram"]),
+        "imported_occurrences": imported_occurrences,
         "overwritten": overwrite,
         "automatic_backup": {"filename": automatic_backup_path.name} if automatic_backup_path else None,
     }

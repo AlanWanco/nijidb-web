@@ -49,6 +49,7 @@ const importFileName = ref("");
 const importSubmitting = ref(false);
 const importTargetMode = ref("new");
 const importTargetProgramId = ref("");
+const importTargetParentProgramId = ref("");
 const exportModeDialog = ref(false);
 const message = ref("");
 const error = ref("");
@@ -147,6 +148,11 @@ const filteredPrograms = computed(() => programs.value.filter(programMatchesFilt
 const customPeople = computed(() => form.people.filter(person => !castCandidates.includes(person)));
 const occurrenceOriginalLocked = computed(() => Boolean(!occurrenceDraft.individual && (occurrenceDraft.generated || occurrenceDraft.id)));
 const parentProgramTitle = computed(() => programs.value.find(program => program.id === form.parent_id)?.title || form.title || t("当前主节目"));
+const relatedSubprogramCount = computed(() => {
+  if (!editingId.value) return 0;
+  const rootId = form.parent_id || editingId.value;
+  return programs.value.filter(program => program.parent_id === rootId).length;
+});
 const generatedOccurrenceCount = computed(() => occurrenceRows.value.filter(row => row.generated).length);
 const materializedOccurrenceCount = computed(() => occurrenceRows.value.filter(row => row.materialized && row.status !== "deleted").length);
 const deletedOccurrenceCount = computed(() => occurrenceRows.value.filter(row => row.status === "deleted").length);
@@ -456,6 +462,7 @@ async function handleImportFile(event) {
     importFileName.value = file.name;
     importTargetMode.value = "new";
     importTargetProgramId.value = preview.matches?.[0]?.id || "";
+    importTargetParentProgramId.value = preview.import_options?.target_parent_program_id || preview.parent_choices?.[0]?.id || "";
   } catch (requestError) {
     showError(requestError instanceof SyntaxError ? new Error(t("JSON 格式无效，请检查括号、逗号或字符串")) : requestError);
   }
@@ -467,6 +474,7 @@ function closeImportPreview() {
   importFileName.value = "";
   importTargetMode.value = "new";
   importTargetProgramId.value = "";
+  importTargetParentProgramId.value = "";
 }
 
 function importDeliveryLabel(value) {
@@ -507,6 +515,7 @@ async function submitImport() {
       ...(body.import_options || {}),
       target_mode: importTargetMode.value,
       target_program_id: importTargetMode.value === "overwrite" ? importTargetProgramId.value : "",
+      target_parent_program_id: importPreview.value._program_scope === "subprogram" ? importTargetParentProgramId.value : "",
     };
     const data = await api("/api/admin/programs/import", { method: "POST", body });
     const saved = data.program;
@@ -517,7 +526,7 @@ async function submitImport() {
     activePanel.value = "edit";
     applyProgram(saved);
     await loadOccurrences(saved.id);
-    message.value = `${data.overwritten ? t("已覆盖") : t("已导入")}「${saved.title}」${data.imported_occurrences ? `，${data.imported_occurrences} ${t("期")} ${t("单集")}` : ""}`;
+    message.value = `${data.overwritten ? t("已覆盖") : t("已导入")}「${saved.title}」${data.imported_subprograms ? `，${data.imported_subprograms} ${t("个子节目")}` : ""}${data.imported_occurrences ? `，${data.imported_occurrences} ${t("期")} ${t("单集")}` : ""}`;
     if (data.automatic_backup?.filename) message.value += `；${t("导入前已自动备份当前数据库")}`;
     if (data.warnings?.length) message.value += `；${data.warnings.length} ${t("条导入提示")}`;
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -1671,28 +1680,41 @@ onUnmounted(() => {
          </div>
          <section class="program-json-target-section">
             <div class="program-json-preview-heading"><div><p class="form-kicker">IMPORT TARGET</p><h3>{{ t("导入目标") }}</h3></div></div>
-           <div class="program-json-target-options">
-              <label class="program-json-target-option" :class="{ selected: importTargetMode === 'new' }"><input v-model="importTargetMode" type="radio" value="new"><span><strong>{{ t("新建节目") }}</strong><small>{{ t("保留原节目不变，创建一个新的节目记录。") }}</small></span></label>
-              <label class="program-json-target-option" :class="{ selected: importTargetMode === 'overwrite' }"><input v-model="importTargetMode" type="radio" value="overwrite" :disabled="!importPreview.matches?.length"><span><strong>{{ t("覆盖已有节目") }}</strong><small>{{ importPreview.matches?.length ? t("用当前 JSON 完整替换所选节目的资料、排期和单集。") : t("没有找到同 ID 或同名称的已有节目。") }}</small></span></label>
-           </div>
-            <label v-if="importTargetMode === 'overwrite'" class="program-json-target-select">{{ t("选择覆盖目标") }}<select v-model="importTargetProgramId" required><option v-for="match in importPreview.matches" :key="match.id" :value="match.id">{{ match.display_name }} · {{ match.match === "id" ? t("ID 匹配") : t("名称匹配") }}</option></select></label>
-            <p v-if="importTargetMode === 'overwrite'" class="program-json-danger-note">{{ t("覆盖会删除目标节目原有的排期和单集，再写入本次 JSON；此操作不可自动撤销，请确认目标无误。") }}</p>
+            <div v-if="importPreview._program_scope === 'subprogram'" class="program-json-target-select">
+              <label>{{ t("所属主节目") }}<select v-model="importTargetParentProgramId" required><option value="" disabled>{{ t("请选择主节目") }}</option><option v-for="parent in importPreview.parent_choices" :key="parent.id" :value="parent.id">{{ parent.display_name }}{{ parent.match === "id" ? ` · ${t("原主节目 ID 匹配")}` : parent.match === "title" ? ` · ${t("原主节目名称匹配")}` : "" }}</option></select></label>
+              <small v-if="importPreview.parent_program?.title">{{ t("导出时所属主节目") }}：{{ importPreview.parent_program.title }}；{{ t("可以改选其他主节目") }}</small>
+            </div>
+            <div class="program-json-target-options">
+               <label class="program-json-target-option" :class="{ selected: importTargetMode === 'new' }"><input v-model="importTargetMode" type="radio" value="new"><span><strong>{{ importPreview._program_scope === 'subprogram' ? t("在主节目下新建子节目") : t("新建节目") }}</strong><small>{{ importPreview._program_scope === 'subprogram' ? t("保留原节目不变，在所选主节目下创建一个新的子节目。") : t("保留原节目不变，创建一个新的节目记录。") }}</small></span></label>
+               <label class="program-json-target-option" :class="{ selected: importTargetMode === 'overwrite' }"><input v-model="importTargetMode" type="radio" value="overwrite" :disabled="importPreview._program_scope === 'subprogram' ? !importPreview.parent_choices?.length : !importPreview.matches?.length"><span><strong>{{ importPreview._program_scope === 'subprogram' ? t("覆盖主节目下的子节目") : t("覆盖已有节目") }}</strong><small v-if="importPreview._program_scope === 'subprogram'">{{ importPreview.parent_choices?.length ? t("覆盖所选主节目下同名或同 ID 的子节目。") : t("没有找到可选的主节目。") }}</small><small v-else>{{ importPreview.matches?.length ? t("用当前 JSON 完整替换所选节目的资料、排期和单集。") : t("没有找到同 ID 或同名称的已有节目。") }}</small></span></label>
+            </div>
+             <label v-if="importTargetMode === 'overwrite' && importPreview._program_scope !== 'subprogram'" class="program-json-target-select">{{ t("选择覆盖目标") }}<select v-model="importTargetProgramId" required><option v-for="match in importPreview.matches" :key="match.id" :value="match.id">{{ match.display_name }} · {{ match.match === "id" ? t("ID 匹配") : t("名称匹配") }}</option></select></label>
+             <p v-if="importTargetMode === 'overwrite'" class="program-json-danger-note">{{ importPreview._program_scope === 'subprogram' ? t("覆盖会删除所选子节目原有的排期和单集，再写入本次 JSON；此操作不可自动撤销，请确认目标无误。") : t("覆盖会删除目标节目原有的排期和单集，再写入本次 JSON；此操作不可自动撤销，请确认目标无误。") }}</p>
          </section>
          <div class="program-json-summary">
            <div><span class="program-field-label">{{ t("节目名称") }}</span><strong>{{ importPreview.program.title }}</strong></div>
+            <div v-if="importPreview._program_scope === 'subprogram'"><span class="program-field-label">{{ t("子节目标签") }}</span><strong>{{ importPreview.program.subprogram_name }}</strong></div>
            <div><span class="program-field-label">{{ t("类型") }}</span><strong>{{ importPreview.program.category === "official" ? t("官方节目") : t("个人节目") }}</strong></div>
            <div><span class="program-field-label">{{ t("形式") }}</span><strong>{{ formatLabel(importPreview.program) }}</strong></div>
            <div><span class="program-field-label">{{ t("成员") }}</span><strong>{{ importPreview.program.people?.join("、") || t("未填写") }}</strong></div>
         </div>
-        <section class="program-json-preview-section">
-           <div class="program-json-preview-heading"><div><p class="form-kicker">BROADCAST PERIODS</p><h3>{{ t("排期时期") }}</h3></div><span class="section-count">{{ importPreview.counts.periods }}</span></div>
+         <section class="program-json-preview-section">
+            <div class="program-json-preview-heading"><div><p class="form-kicker">BROADCAST PERIODS</p><h3>{{ t("排期时期") }}</h3></div><span class="section-count">{{ importPreview.counts.periods }}</span></div>
           <div class="program-json-period-list">
             <article v-for="(period, index) in importPreview.program.periods" :key="`${period.start_date}-${index}`" class="program-json-period-item">
                <strong>{{ t("时期 {count}", { count: index + 1 }) }}</strong><span>{{ periodScheduleLabel(period) }}</span><small>{{ period.start_date }} → {{ period.end_date || t("进行中") }}</small>
             </article>
-          </div>
-        </section>
-         <section class="program-json-preview-section">
+           </div>
+         </section>
+         <section v-if="importPreview.subprograms?.length" class="program-json-preview-section">
+            <div class="program-json-preview-heading"><div><p class="form-kicker">SUBPROGRAMS</p><h3>{{ t("子节目") }}</h3></div><span class="section-count">{{ importPreview.subprograms.length }}</span></div>
+            <div class="program-json-period-list">
+              <article v-for="subprogram in importPreview.subprograms" :key="subprogram.program.id || subprogram.program.subprogram_name" class="program-json-period-item">
+                <strong>{{ subprogram.program.subprogram_name }}</strong><span>{{ formatLabel(subprogram.program) }}</span><small>{{ subprogram.counts.periods }} {{ t("排期时期") }} · {{ subprogram.counts.occurrences }} {{ t("单集") }}</small>
+              </article>
+            </div>
+         </section>
+          <section class="program-json-preview-section">
            <div class="program-json-preview-heading"><div><p class="form-kicker">EPISODE CONTENT</p><h3>{{ t("单集内容") }}</h3></div><span class="section-count">{{ importPreview.counts.occurrences }}</span></div>
            <div v-if="importPreview.occurrences.length" class="program-json-occurrence-list">
              <article v-for="(occurrence, index) in importPreview.occurrences" :key="`${occurrence.original_date}-${index}`" class="program-json-occurrence-item">
@@ -1715,7 +1737,7 @@ onUnmounted(() => {
         </div>
         <div class="actions program-json-dialog-actions">
            <button type="button" class="secondary program-action-button" :disabled="importSubmitting" @click="closeImportPreview">{{ t("取消") }}</button>
-            <button type="button" class="program-action-button" :disabled="importSubmitting || (importTargetMode === 'overwrite' && !importTargetProgramId)" @click="submitImport">{{ importSubmitting ? t("导入中……") : importTargetMode === "overwrite" ? t("确认覆盖导入") : t("确认新建导入") }}</button>
+             <button type="button" class="program-action-button" :disabled="importSubmitting || (importPreview._program_scope === 'subprogram' ? !importTargetParentProgramId : importTargetMode === 'overwrite' && !importTargetProgramId)" @click="submitImport">{{ importSubmitting ? t("导入中……") : importTargetMode === "overwrite" ? t("确认覆盖导入") : t("确认新建导入") }}</button>
          </div>
           </div>
         </section>
@@ -1724,7 +1746,7 @@ onUnmounted(() => {
      <div v-if="exportModeDialog" class="program-json-modal" role="dialog" aria-modal="true" aria-labelledby="program-json-export-title" @click.self="closeExportModeDialog">
        <section class="program-json-dialog program-json-mode-dialog">
          <div class="program-json-dialog-heading">
-            <div><p class="eyebrow">JSON EXPORT / MODE</p><h2 id="program-json-export-title">{{ t("选择导出方式") }}</h2><small>{{ t("两种文件都可以交给 AI 优化；导入时会根据 JSON 中的模式处理排期。") }}</small></div>
+             <div><p class="eyebrow">JSON EXPORT / MODE</p><h2 id="program-json-export-title">{{ t("选择导出方式") }}</h2><small>{{ t("两种文件都可以交给 AI 优化；导入时会根据 JSON 中的模式处理排期。") }}</small><small v-if="form.parent_id">{{ t("当前只导出这个子节目，并记录所属主节目；导入时可以重新选择主节目。") }}</small><small v-else-if="relatedSubprogramCount">{{ t("导出文件会同时包含该主节目及其全部子节目。") }}</small></div>
             <button type="button" class="secondary program-action-button" @click="closeExportModeDialog">{{ t("关闭") }}</button>
          </div>
          <div class="program-json-export-options">

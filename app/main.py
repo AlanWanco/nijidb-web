@@ -1822,9 +1822,18 @@ def program_occurrence_records(program: dict[str, Any], range_start: date, range
         (str(row.get("generated_date") or row["original_date"]), str(row.get("original_time") or "").strip()): row
         for row in override_rows
     }
+    # Individual schedules use generated_date as the stable anchor. If an auto-generated
+    # occurrence's original time is edited, its new time no longer matches the period's
+    # schedule_time, so the exact (date, time) lookup must fall back to that anchor.
+    generated_date_overrides: dict[str, list[dict[str, Any]]] = {}
+    for row in override_rows:
+        generated_date = str(row.get("generated_date") or "").strip()
+        if generated_date:
+            generated_date_overrides.setdefault(generated_date, []).append(row)
     periods = program.get("periods") or ([legacy_period(program)] if program.get("start_date") else [])
     records: list[dict[str, Any]] = []
     base_date_keys: set[tuple[str, str]] = set()
+    individual_base_date_values: set[str] = set()
     if boolean_value(program.get("auto_generate"), True):
         for period in periods:
             period_start = date.fromisoformat(period["start_date"])
@@ -1834,14 +1843,21 @@ def program_occurrence_records(program: dict[str, Any], range_start: date, range
                 continue
             base_dates = period_recurring_dates(period, period_generation_end)
             schedule_time = str(period.get("schedule_time") or "").strip()
+            if period.get("frequency") == "individual":
+                individual_base_date_values.update(item.isoformat() for item in base_dates)
             base_date_keys.update((item.isoformat(), schedule_time) for item in base_dates)
             schedule_shift_days = 0
             can_shift_following = period.get("frequency") == "weekly" and int(period.get("week_interval") or 1) == 2
             for original in base_dates:
+                override = overrides.get((original.isoformat(), schedule_time)) or overrides.get((original.isoformat(), ""))
+                if not override and period.get("frequency") == "individual":
+                    anchored_overrides = generated_date_overrides.get(original.isoformat(), [])
+                    if len(anchored_overrides) == 1:
+                        override = anchored_overrides[0]
                 record = occurrence_record(
                     program,
                     original,
-                    overrides.get((original.isoformat(), schedule_time)) or overrides.get((original.isoformat(), "")),
+                    override,
                     schedule_time,
                     period.get("timezone", "Asia/Tokyo"),
                     period.get("frequency", "weekly"),
@@ -1856,7 +1872,7 @@ def program_occurrence_records(program: dict[str, Any], range_start: date, range
         row_time = str(row.get("original_time") or "").strip()
         if (generated_date, row_time) in base_date_keys or (not row_time and any(
             date_value == generated_date for date_value, _ in base_date_keys
-        )):
+        )) or (generated_date and generated_date in individual_base_date_values):
             continue
         original = date.fromisoformat(row["original_date"])
         anchor = date.fromisoformat(generated_date)

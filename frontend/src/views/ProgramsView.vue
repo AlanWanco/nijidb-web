@@ -15,6 +15,7 @@ import { occurrenceLinkItems, programAdminPath, relatedLinkItem } from "../progr
 const weekdayNames = computed(() => locale.value === "en"
   ? ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
   : locale.value === "ja" ? ["月", "火", "水", "木", "金", "土", "日"] : ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]);
+const screenshotDayLabelGap = 10;
 const timezoneLabels = {
   "Asia/Tokyo": "东京时间",
   "Asia/Shanghai": "中国标准时间",
@@ -702,7 +703,8 @@ function screenshotDayHeight(target) {
     return Math.max(bottom, rect.bottom - targetRect.top);
   }, 0);
   const bottomPadding = Math.max(Number.parseFloat(frameStyle.paddingBottom) || 0, 12);
-  return Math.round(Math.min(targetRect.height, Math.max(minimumHeight, contentBottom + bottomPadding)));
+  const labelGap = target.querySelector(".fc-daygrid-event") ? screenshotDayLabelGap : 0;
+  return Math.round(Math.min(targetRect.height, Math.max(minimumHeight, contentBottom + bottomPadding + labelGap)));
 }
 
 async function captureCalendarImage(target, fileName, copyToClipboard = false, screenshotLabel = "") {
@@ -718,6 +720,7 @@ async function captureCalendarImage(target, fileName, copyToClipboard = false, s
     const rootStyle = getComputedStyle(document.documentElement);
     const borderColor = targetStyle.borderTopColor || rootStyle.getPropertyValue("--line").trim() || "#313244";
     const isSingleDay = target.classList.contains("fc-daygrid-day");
+    const hasDayEvents = isSingleDay && Boolean(target.querySelector(".fc-daygrid-event"));
     const dayHeight = isSingleDay ? screenshotDayHeight(target) : undefined;
     const renderedImagePromise = renderScreenshot(target, {
       backgroundColor,
@@ -731,6 +734,7 @@ async function captureCalendarImage(target, fileName, copyToClipboard = false, s
         }
         if (cloned.classList.contains("program-calendar-sticky-nav")) cloned.style.display = "none";
         if (isSingleDay && cloned.classList.contains("fc-daygrid-day-number")) cloned.style.visibility = "hidden";
+        if (hasDayEvents && cloned.classList.contains("fc-daygrid-day-top")) cloned.style.setProperty("margin-bottom", `${screenshotDayLabelGap}px`, "important");
         if (isSingleDay && cloned.classList.contains("fc-daygrid-day")) {
           cloned.style.setProperty("border", "0", "important");
           cloned.style.setProperty("height", `${dayHeight}px`, "important");

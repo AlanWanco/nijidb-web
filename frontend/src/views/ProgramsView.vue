@@ -16,6 +16,7 @@ const weekdayNames = computed(() => locale.value === "en"
   ? ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
   : locale.value === "ja" ? ["月", "火", "水", "木", "金", "土", "日"] : ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]);
 const screenshotDayLabelGap = 10;
+const screenshotDesktopViewportWidth = 1280;
 const timezoneLabels = {
   "Asia/Tokyo": "东京时间",
   "Asia/Shanghai": "中国标准时间",
@@ -768,6 +769,7 @@ async function captureCalendarImage(target, fileName, copyToClipboard = false, s
       });
     } else {
       const renderHtml2Canvas = await loadHtml2Canvas();
+      const useDesktopScreenshotLayout = window.matchMedia("(max-width: 700px)").matches;
       renderedImagePromise = renderHtml2Canvas(target, {
         backgroundColor: null,
         ignoreElements: element => element.dataset?.screenshotControl === "true",
@@ -780,9 +782,14 @@ async function captureCalendarImage(target, fileName, copyToClipboard = false, s
           clonedDocument.querySelectorAll(".program-calendar-sticky-nav").forEach(nav => {
             nav.style.display = "none";
           });
+          clonedDocument.querySelectorAll(".fc-daygrid-body, .fc-scrollgrid-sync-table").forEach(node => {
+            node.style.setProperty("width", "100%", "important");
+          });
         },
         scale: Math.min(window.devicePixelRatio || 1, 2),
         useCORS: true,
+        windowWidth: useDesktopScreenshotLayout ? screenshotDesktopViewportWidth : window.innerWidth,
+        windowHeight: window.innerHeight,
       }).then(canvas => opaqueCanvas(canvas, backgroundColor).toDataURL("image/png"));
     }
     const imagePromise = screenshotLabel

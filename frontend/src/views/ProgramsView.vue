@@ -90,7 +90,7 @@ const calendarAnimationClass = ref("");
 let calendarAnimationFrame = 0;
 let calendarAnimationTimer = 0;
 let screenshotMessageTimer = 0;
-let html2canvasLoader = null;
+let screenshotRendererLoader = null;
 let eventernoteRequestId = 0;
 const calendarRequestRange = ref(null);
 const requestedMonth = computed(() => routeMonth(route.params.month));
@@ -573,12 +573,6 @@ function setScreenshotMessage(message, kind = "success") {
   }, 4500);
 }
 
-function canvasBlob(canvas) {
-  return new Promise((resolve, reject) => {
-    canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error(t("无法生成图片"))), "image/png");
-  });
-}
-
 function screenshotBackground(target) {
   const background = getComputedStyle(target).backgroundColor;
   return background && background !== "transparent" ? background : "#ffffff";
@@ -594,26 +588,23 @@ function clipboardSupport() {
   return { clipboard, ClipboardItemConstructor };
 }
 
-function opaqueCanvas(canvas, backgroundColor) {
-  const output = document.createElement("canvas");
-  output.width = canvas.width;
-  output.height = canvas.height;
-  const context = output.getContext("2d");
-  context.fillStyle = backgroundColor;
-  context.fillRect(0, 0, output.width, output.height);
-  context.drawImage(canvas, 0, 0);
-  return output;
+function dataUrlBlob(dataUrl) {
+  const [header, encoded] = dataUrl.split(",", 2);
+  const binary = atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return new Blob([bytes], { type: header.match(/^data:([^;]+)/)?.[1] || "image/png" });
 }
 
-function copyCanvasToClipboard(canvasPromise) {
+function copyImageToClipboard(imagePromise) {
   const { clipboard, ClipboardItemConstructor } = clipboardSupport();
-  const blobPromise = canvasPromise.then(canvasBlob);
+  const blobPromise = imagePromise.then(dataUrlBlob);
   return clipboard.write([new ClipboardItemConstructor({ "image/png": blobPromise })]);
 }
 
-function loadHtml2Canvas() {
-  if (!html2canvasLoader) html2canvasLoader = import("html2canvas-pro").then(module => module.default);
-  return html2canvasLoader;
+function loadScreenshotRenderer() {
+  if (!screenshotRendererLoader) screenshotRendererLoader = import("modern-screenshot").then(module => module.domToPng);
+  return screenshotRendererLoader;
 }
 
 async function captureCalendarImage(target, fileName, copyToClipboard = false) {
@@ -623,32 +614,23 @@ async function captureCalendarImage(target, fileName, copyToClipboard = false) {
   document.body.classList.add("program-screenshot-capturing");
   try {
     await new Promise(resolve => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve)));
-    const renderHtml2Canvas = await loadHtml2Canvas();
+    const renderScreenshot = await loadScreenshotRenderer();
     const backgroundColor = screenshotBackground(target);
-    const renderedCanvasPromise = renderHtml2Canvas(target, {
+    const imagePromise = renderScreenshot(target, {
       backgroundColor,
-      ignoreElements: element => element.dataset?.screenshotControl === "true",
-      foreignObjectRendering: true,
-      logging: false,
-      onclone: clonedDocument => {
-        clonedDocument.querySelectorAll(".program-calendar-sticky-header").forEach(header => {
-          header.style.position = "static";
-          header.style.top = "auto";
-        });
-      },
+      filter: element => element.dataset?.screenshotControl !== "true",
       scale: Math.min(window.devicePixelRatio || 1, 2),
-      useCORS: true,
+      style: { backgroundColor },
     });
-    const canvasPromise = renderedCanvasPromise.then(canvas => opaqueCanvas(canvas, backgroundColor));
-    const clipboardPromise = copyToClipboard ? copyCanvasToClipboard(canvasPromise) : null;
-    const canvas = await canvasPromise;
+    const clipboardPromise = copyToClipboard ? copyImageToClipboard(imagePromise) : null;
+    const dataUrl = await imagePromise;
     if (copyToClipboard) {
       await clipboardPromise;
       setScreenshotMessage(t("日历截图已复制到剪贴板"));
     } else {
       const link = document.createElement("a");
       link.download = fileName;
-      link.href = canvas.toDataURL("image/png");
+      link.href = dataUrl;
       link.click();
       setScreenshotMessage(t("日历截图已下载"));
     }
@@ -861,8 +843,8 @@ async function openAdminEditor(path) {
 
 onMounted(() => {
   checkAdminSession();
-  void loadHtml2Canvas().catch(() => {
-    html2canvasLoader = null;
+  void loadScreenshotRenderer().catch(() => {
+    screenshotRendererLoader = null;
   });
   document.addEventListener("click", closeCastFilter);
 });

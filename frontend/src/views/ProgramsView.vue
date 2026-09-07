@@ -619,25 +619,28 @@ function addScreenshotLabel(dataUrl, target, label) {
     const image = new Image();
     image.onload = () => {
       const scale = image.width / Math.max(target.getBoundingClientRect().width, 1);
+      const outerPadding = Math.round(15 * scale);
       const canvas = document.createElement("canvas");
-      canvas.width = image.width;
-      canvas.height = image.height;
+      canvas.width = image.width + outerPadding * 2;
+      canvas.height = image.height + outerPadding * 2;
       const context = canvas.getContext("2d");
       const rootStyle = getComputedStyle(document.documentElement);
       const backgroundColor = screenshotBackground(target);
       const accentColor = rootStyle.getPropertyValue("--accent").trim() || "#8839ef";
       const fontFamily = getComputedStyle(target).fontFamily;
-      const fontSize = Math.max(14, Math.round(15 * scale));
+      const dateNumber = target.querySelector(".fc-daygrid-day-number");
+      const dateFontSize = Number.parseFloat(dateNumber ? getComputedStyle(dateNumber).fontSize : "") || 14;
+      const fontSize = Math.max(1, Math.round(dateFontSize * scale));
       const paddingX = Math.round(13 * scale);
       const paddingY = Math.round(7 * scale);
       const height = Math.round((fontSize / scale + paddingY * 2 / scale) * scale);
       context.fillStyle = backgroundColor;
       context.fillRect(0, 0, canvas.width, canvas.height);
-      context.drawImage(image, 0, 0);
+      context.drawImage(image, outerPadding, outerPadding);
       context.font = `700 ${fontSize}px ${fontFamily}`;
       const width = Math.ceil(context.measureText(label).width + paddingX * 2);
-      const x = Math.round(12 * scale);
-      const y = Math.round(10 * scale);
+      const x = outerPadding + Math.round(12 * scale);
+      const y = outerPadding + Math.round(10 * scale);
       roundedRect(context, x, y, width, height, Math.round(height / 2));
       context.fillStyle = backgroundColor;
       context.fill();
@@ -705,6 +708,7 @@ async function captureCalendarImage(target, fileName, copyToClipboard = false, s
           cloned.style.top = "auto";
         }
         if (cloned.classList.contains("program-calendar-sticky-nav")) cloned.style.display = "none";
+        if (isSingleDay && cloned.classList.contains("fc-daygrid-day-number")) cloned.style.visibility = "hidden";
         if (isSingleDay && cloned.classList.contains("fc-daygrid-day")) {
           cloned.style.setProperty("height", `${dayHeight}px`, "important");
         }

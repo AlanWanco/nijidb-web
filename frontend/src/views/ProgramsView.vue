@@ -91,6 +91,7 @@ const calendarAnimationClass = ref("");
 let calendarAnimationFrame = 0;
 let calendarAnimationTimer = 0;
 let screenshotMessageTimer = 0;
+let html2canvasLoader = null;
 let screenshotRendererLoader = null;
 let eventernoteRequestId = 0;
 const calendarRequestRange = ref(null);
@@ -579,6 +580,17 @@ function screenshotBackground(target) {
   return background && background !== "transparent" ? background : "#ffffff";
 }
 
+function opaqueCanvas(canvas, backgroundColor) {
+  const output = document.createElement("canvas");
+  output.width = canvas.width;
+  output.height = canvas.height;
+  const context = output.getContext("2d");
+  context.fillStyle = backgroundColor;
+  context.fillRect(0, 0, output.width, output.height);
+  context.drawImage(canvas, 0, 0);
+  return output;
+}
+
 function clipboardSupport() {
   if (!window.isSecureContext) throw new Error(t("复制图片需要 HTTPS 安全连接"));
   const clipboard = navigator.clipboard;
@@ -688,6 +700,11 @@ function loadScreenshotRenderer() {
   return screenshotRendererLoader;
 }
 
+function loadHtml2Canvas() {
+  if (!html2canvasLoader) html2canvasLoader = import("html2canvas-pro").then(module => module.default);
+  return html2canvasLoader;
+}
+
 function screenshotDayHeight(target) {
   const targetRect = target.getBoundingClientRect();
   const frame = target.querySelector(".fc-daygrid-day-frame");
@@ -714,7 +731,6 @@ async function captureCalendarImage(target, fileName, copyToClipboard = false, s
   document.body.classList.add("program-screenshot-capturing");
   try {
     await new Promise(resolve => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve)));
-    const renderScreenshot = await loadScreenshotRenderer();
     const backgroundColor = screenshotBackground(target);
     const targetStyle = getComputedStyle(target);
     const rootStyle = getComputedStyle(document.documentElement);
@@ -722,33 +738,53 @@ async function captureCalendarImage(target, fileName, copyToClipboard = false, s
     const isSingleDay = target.classList.contains("fc-daygrid-day");
     const hasDayEvents = isSingleDay && Boolean(target.querySelector(".fc-daygrid-event"));
     const dayHeight = isSingleDay ? screenshotDayHeight(target) : undefined;
-    const renderedImagePromise = renderScreenshot(target, {
-      backgroundColor,
-      height: dayHeight,
-      filter: element => element.dataset?.screenshotControl !== "true",
-      onCloneEachNode: cloned => {
-        if (cloned.nodeType !== 1) return;
-        if (cloned.classList.contains("program-calendar-sticky-header")) {
-          cloned.style.position = "static";
-          cloned.style.top = "auto";
-        }
-        if (cloned.classList.contains("program-calendar-sticky-nav")) cloned.style.display = "none";
-        if (isSingleDay && cloned.classList.contains("fc-daygrid-day-number")) cloned.style.visibility = "hidden";
-        if (hasDayEvents && cloned.classList.contains("fc-daygrid-day-top")) cloned.style.setProperty("margin-bottom", `${screenshotDayLabelGap}px`, "important");
-        if (isSingleDay && cloned.classList.contains("fc-daygrid-day")) {
-          cloned.style.setProperty("border", "0", "important");
-          cloned.style.setProperty("height", `${dayHeight}px`, "important");
-        }
-        if (isSingleDay && cloned.classList.contains("fc-daygrid-day-frame")) {
-          cloned.style.setProperty("height", `${dayHeight}px`, "important");
-          cloned.style.setProperty("min-height", "0", "important");
-        }
-      },
-      scale: isSingleDay
-        ? Math.min((window.devicePixelRatio || 1) * 1.5, 3)
-        : Math.min(window.devicePixelRatio || 1, 2),
-      style: { backgroundColor },
-    });
+    let renderedImagePromise;
+    if (isSingleDay) {
+      const renderScreenshot = await loadScreenshotRenderer();
+      renderedImagePromise = renderScreenshot(target, {
+        backgroundColor,
+        height: dayHeight,
+        filter: element => element.dataset?.screenshotControl !== "true",
+        onCloneEachNode: cloned => {
+          if (cloned.nodeType !== 1) return;
+          if (cloned.classList.contains("program-calendar-sticky-header")) {
+            cloned.style.position = "static";
+            cloned.style.top = "auto";
+          }
+          if (cloned.classList.contains("program-calendar-sticky-nav")) cloned.style.display = "none";
+          if (cloned.classList.contains("fc-daygrid-day-number")) cloned.style.visibility = "hidden";
+          if (hasDayEvents && cloned.classList.contains("fc-daygrid-day-top")) cloned.style.setProperty("margin-bottom", `${screenshotDayLabelGap}px`, "important");
+          if (cloned.classList.contains("fc-daygrid-day")) {
+            cloned.style.setProperty("border", "0", "important");
+            cloned.style.setProperty("height", `${dayHeight}px`, "important");
+          }
+          if (cloned.classList.contains("fc-daygrid-day-frame")) {
+            cloned.style.setProperty("height", `${dayHeight}px`, "important");
+            cloned.style.setProperty("min-height", "0", "important");
+          }
+        },
+        scale: Math.min((window.devicePixelRatio || 1) * 1.5, 3),
+        style: { backgroundColor },
+      });
+    } else {
+      const renderHtml2Canvas = await loadHtml2Canvas();
+      renderedImagePromise = renderHtml2Canvas(target, {
+        backgroundColor: null,
+        ignoreElements: element => element.dataset?.screenshotControl === "true",
+        logging: false,
+        onclone: clonedDocument => {
+          clonedDocument.querySelectorAll(".program-calendar-sticky-header").forEach(header => {
+            header.style.position = "static";
+            header.style.top = "auto";
+          });
+          clonedDocument.querySelectorAll(".program-calendar-sticky-nav").forEach(nav => {
+            nav.style.display = "none";
+          });
+        },
+        scale: Math.min(window.devicePixelRatio || 1, 2),
+        useCORS: true,
+      }).then(canvas => opaqueCanvas(canvas, backgroundColor).toDataURL("image/png"));
+    }
     const imagePromise = screenshotLabel
       ? renderedImagePromise.then(dataUrl => addScreenshotLabel(dataUrl, target, screenshotLabel))
       : renderedImagePromise;

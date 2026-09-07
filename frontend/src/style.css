@@ -6061,6 +6061,10 @@ html[data-theme="mocha"] .dp__theme_dark {
     min-height: 61px;
   }
 
+  .program-calendar-day-screenshot {
+    display: none;
+  }
+
   .program-calendar-touch-zone {
     touch-action: pan-y;
   }

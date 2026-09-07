@@ -2820,6 +2820,21 @@ footer {
   padding-left: 14px;
 }
 
+.program-screenshot-status {
+  margin: -5px 0 12px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.program-screenshot-status.error {
+  color: var(--danger, #b04d58);
+}
+
+.program-calendar-capture {
+  min-width: 0;
+  background: var(--surface);
+}
+
 .program-calendar-sticky-header {
   position: sticky;
   top: 82px;
@@ -2866,6 +2881,39 @@ footer {
   background: var(--accent-soft);
   color: var(--accent);
   transform: none;
+}
+
+.program-calendar-sticky-month {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.program-calendar-screenshot {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 7px 10px;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: none;
+  font-size: 11px;
+}
+
+.program-calendar-screenshot:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  transform: none;
+}
+
+.program-screenshot-capturing [data-screenshot-control] {
+  visibility: hidden !important;
 }
 
 .program-calendar-weekdays {
@@ -3188,7 +3236,65 @@ footer {
 }
 
 .program-calendar .fc-daygrid-day-frame {
+  position: relative;
   min-height: clamp(112px, 7vw, 148px);
+}
+
+.program-calendar-day-screenshot {
+  position: absolute;
+  z-index: 4;
+  top: 5px;
+  right: 6px;
+  display: inline-flex;
+  width: 26px;
+  height: 26px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0;
+  background: var(--surface);
+  color: var(--muted);
+  box-shadow: 0 3px 10px #1b1d3818;
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity 140ms ease, transform 140ms ease, border-color 140ms ease, color 140ms ease;
+  visibility: hidden;
+}
+
+.program-calendar .fc-daygrid-day:hover .program-calendar-day-screenshot,
+.program-calendar .fc-daygrid-day:focus-within .program-calendar-day-screenshot {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+  visibility: visible;
+}
+
+.program-calendar-day-screenshot:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  transform: translateY(0) scale(1.04);
+}
+
+@media (hover: none) {
+  .program-calendar-day-screenshot {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+    visibility: visible;
+  }
+
+  .program-calendar .fc-daygrid-day-number {
+    padding-right: 39px;
+  }
+}
+
+.program-calendar .fc-daygrid-day:hover .fc-daygrid-day-number,
+.program-calendar .fc-daygrid-day:focus-within .fc-daygrid-day-number {
+  padding-right: 39px;
 }
 
 .program-calendar .fc-daygrid-day.fc-day-today {

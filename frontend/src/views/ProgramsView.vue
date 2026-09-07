@@ -33,6 +33,10 @@ const error = ref("");
 const eventernoteLoading = ref(false);
 const eventernoteError = ref("");
 const calendarRef = ref(null);
+const calendarCaptureRef = ref(null);
+const screenshotBusy = ref(false);
+const screenshotMessage = ref("");
+const screenshotMessageKind = ref("success");
 const viewMode = ref("calendar");
 const deliveryOptions = [
   { value: "live", label: "直播" },
@@ -85,6 +89,8 @@ let calendarTouchStart = null;
 const calendarAnimationClass = ref("");
 let calendarAnimationFrame = 0;
 let calendarAnimationTimer = 0;
+let screenshotMessageTimer = 0;
+let html2canvasLoader = null;
 let eventernoteRequestId = 0;
 const calendarRequestRange = ref(null);
 const requestedMonth = computed(() => routeMonth(route.params.month));
@@ -171,6 +177,7 @@ const calendarOptions = reactive({
     el.setAttribute("aria-label", event.title);
     el.title = event.title;
   },
+  dayCellDidMount: addDayScreenshotButton,
   eventClassNames: ({ event }) => {
     const props = event.extendedProps || {};
     return [
@@ -552,6 +559,110 @@ function goToToday() {
   calendarApi.today();
 }
 
+function screenshotDateValue(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function setScreenshotMessage(message, kind = "success") {
+  window.clearTimeout(screenshotMessageTimer);
+  screenshotMessage.value = message;
+  screenshotMessageKind.value = kind;
+  screenshotMessageTimer = window.setTimeout(() => {
+    screenshotMessage.value = "";
+    screenshotMessageTimer = 0;
+  }, 4500);
+}
+
+function canvasBlob(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error(t("无法生成图片"))), "image/png");
+  });
+}
+
+function loadHtml2Canvas() {
+  if (!html2canvasLoader) html2canvasLoader = import("html2canvas-pro").then(module => module.default);
+  return html2canvasLoader;
+}
+
+async function captureCalendarImage(target, fileName, copyToClipboard = false) {
+  if (!target || screenshotBusy.value) return;
+  screenshotBusy.value = true;
+  screenshotMessage.value = "";
+  document.body.classList.add("program-screenshot-capturing");
+  try {
+    await new Promise(resolve => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve)));
+    const renderHtml2Canvas = await loadHtml2Canvas();
+    const canvas = await renderHtml2Canvas(target, {
+      backgroundColor: null,
+      ignoreElements: element => element.dataset?.screenshotControl === "true",
+      logging: false,
+      onclone: clonedDocument => {
+        clonedDocument.querySelectorAll(".program-calendar-sticky-header").forEach(header => {
+          header.style.position = "static";
+          header.style.top = "auto";
+        });
+      },
+      scale: Math.min(window.devicePixelRatio || 1, 2),
+      useCORS: true,
+    });
+    if (copyToClipboard) {
+      if (!navigator.clipboard?.write || typeof window.ClipboardItem === "undefined") {
+        throw new Error(t("当前浏览器不支持复制图片"));
+      }
+      const blob = await canvasBlob(canvas);
+      await navigator.clipboard.write([new window.ClipboardItem({ "image/png": blob })]);
+      setScreenshotMessage(t("日历截图已复制到剪贴板"));
+    } else {
+      const link = document.createElement("a");
+      link.download = fileName;
+      link.href = canvas.toDataURL("image/png");
+      link.click();
+      setScreenshotMessage(t("日历截图已下载"));
+    }
+  } catch (captureError) {
+    setScreenshotMessage(t("截图失败：{error}", { error: captureError.message || t("未知错误") }), "error");
+  } finally {
+    document.body.classList.remove("program-screenshot-capturing");
+    screenshotBusy.value = false;
+  }
+}
+
+function downloadCalendarScreenshot() {
+  captureCalendarImage(calendarCaptureRef.value, screenshotFileName(visibleMonth.value), false);
+}
+
+function copyCalendarScreenshot() {
+  captureCalendarImage(calendarCaptureRef.value, screenshotFileName(visibleMonth.value), true);
+}
+
+function screenshotFileName(value) {
+  return `nijidb-calendar-${String(value || visibleMonth.value).replace(/[^\d-]/g, "")}.png`;
+}
+
+function addDayScreenshotButton({ date, el }) {
+  const frame = el.querySelector(".fc-daygrid-day-frame");
+  if (!frame || frame.querySelector("[data-screenshot-control]")) return;
+  const dateValue = screenshotDateValue(date);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "program-calendar-day-screenshot";
+  button.dataset.screenshotControl = "true";
+  button.setAttribute("aria-label", `${t("截图")} ${dateValue}`);
+  button.title = t("下载此日截图；右键复制到剪贴板");
+  button.textContent = "▣";
+  button.addEventListener("click", event => {
+    event.preventDefault();
+    event.stopPropagation();
+    captureCalendarImage(el, screenshotFileName(dateValue), false);
+  });
+  button.addEventListener("contextmenu", event => {
+    event.preventDefault();
+    event.stopPropagation();
+    captureCalendarImage(el, screenshotFileName(dateValue), true);
+  });
+  frame.append(button);
+}
+
 function renderEventContent(info) {
   const props = info.event.extendedProps || {};
   const isEventernote = Boolean(props.isEventernote);
@@ -720,6 +831,7 @@ onUnmounted(() => {
   document.removeEventListener("click", closeCastFilter);
   window.cancelAnimationFrame(calendarAnimationFrame);
   window.clearTimeout(calendarAnimationTimer);
+  window.clearTimeout(screenshotMessageTimer);
   eventernoteRequestId += 1;
 });
 </script>
@@ -797,6 +909,8 @@ onUnmounted(() => {
           <span><i class="program-legend-dot cancelled"></i>{{ t("已取消") }}</span>
           <small>{{ t("点击单集查看节目详情") }}</small>
          </div>
+         <p v-if="screenshotMessage" class="program-screenshot-status" :class="screenshotMessageKind" role="status">{{ screenshotMessage }}</p>
+         <div ref="calendarCaptureRef" class="program-calendar-capture">
          <div class="program-calendar-sticky-header" :aria-label="t('日历导航和星期')">
            <div class="program-calendar-sticky-heading">
              <div class="program-calendar-sticky-nav">
@@ -804,7 +918,10 @@ onUnmounted(() => {
                 <button type="button" :aria-label="t('今天')" :title="t('今天')" @click="goToToday">{{ t("今天") }}</button>
                 <button type="button" :aria-label="t('下个月')" :title="t('下个月')" @click="nextMonth">→</button>
              </div>
-             <strong>{{ visibleMonthLabel }}</strong>
+             <div class="program-calendar-sticky-month">
+               <button v-if="viewMode === 'calendar'" type="button" class="program-calendar-screenshot" :aria-label="t('截图')" :title="t('下载整张日历截图；右键复制到剪贴板')" :disabled="screenshotBusy" data-screenshot-control @click="downloadCalendarScreenshot" @contextmenu.prevent="copyCalendarScreenshot"><span aria-hidden="true">▣</span><span>{{ t("截图") }}</span></button>
+               <strong>{{ visibleMonthLabel }}</strong>
+             </div>
            </div>
             <div v-show="viewMode === 'calendar'" class="program-calendar-weekdays" :aria-label="t('星期')">
              <span v-for="weekday in weekdayNames" :key="weekday">{{ weekday }}</span>
@@ -816,6 +933,7 @@ onUnmounted(() => {
             </div>
              <p v-if="!filteredEvents.length && !loading" class="muted program-empty">{{ t("当前筛选没有匹配的节目。") }}</p>
           </div>
+         </div>
         <div v-if="viewMode === 'list'" class="program-list-view">
           <div class="program-list-heading">
              <div><p class="eyebrow">MONTHLY RUNNING ORDER</p><h3>{{ visibleMonthLabel }}{{ t("节目列表") }}</h3></div>

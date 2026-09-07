@@ -579,6 +579,38 @@ function canvasBlob(canvas) {
   });
 }
 
+function screenshotBackground(target) {
+  const background = getComputedStyle(target).backgroundColor;
+  return background && background !== "transparent" ? background : "#ffffff";
+}
+
+function clipboardSupport() {
+  if (!window.isSecureContext) throw new Error(t("复制图片需要 HTTPS 安全连接"));
+  const clipboard = navigator.clipboard;
+  const ClipboardItemConstructor = globalThis.ClipboardItem;
+  if (!clipboard?.write || typeof ClipboardItemConstructor === "undefined") {
+    throw new Error(t("当前浏览器不支持复制图片"));
+  }
+  return { clipboard, ClipboardItemConstructor };
+}
+
+function opaqueCanvas(canvas, backgroundColor) {
+  const output = document.createElement("canvas");
+  output.width = canvas.width;
+  output.height = canvas.height;
+  const context = output.getContext("2d");
+  context.fillStyle = backgroundColor;
+  context.fillRect(0, 0, output.width, output.height);
+  context.drawImage(canvas, 0, 0);
+  return output;
+}
+
+function copyCanvasToClipboard(canvasPromise) {
+  const { clipboard, ClipboardItemConstructor } = clipboardSupport();
+  const blobPromise = canvasPromise.then(canvasBlob);
+  return clipboard.write([new ClipboardItemConstructor({ "image/png": blobPromise })]);
+}
+
 function loadHtml2Canvas() {
   if (!html2canvasLoader) html2canvasLoader = import("html2canvas-pro").then(module => module.default);
   return html2canvasLoader;
@@ -592,9 +624,11 @@ async function captureCalendarImage(target, fileName, copyToClipboard = false) {
   try {
     await new Promise(resolve => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve)));
     const renderHtml2Canvas = await loadHtml2Canvas();
-    const canvas = await renderHtml2Canvas(target, {
-      backgroundColor: null,
+    const backgroundColor = screenshotBackground(target);
+    const renderedCanvasPromise = renderHtml2Canvas(target, {
+      backgroundColor,
       ignoreElements: element => element.dataset?.screenshotControl === "true",
+      foreignObjectRendering: true,
       logging: false,
       onclone: clonedDocument => {
         clonedDocument.querySelectorAll(".program-calendar-sticky-header").forEach(header => {
@@ -605,12 +639,11 @@ async function captureCalendarImage(target, fileName, copyToClipboard = false) {
       scale: Math.min(window.devicePixelRatio || 1, 2),
       useCORS: true,
     });
+    const canvasPromise = renderedCanvasPromise.then(canvas => opaqueCanvas(canvas, backgroundColor));
+    const clipboardPromise = copyToClipboard ? copyCanvasToClipboard(canvasPromise) : null;
+    const canvas = await canvasPromise;
     if (copyToClipboard) {
-      if (!navigator.clipboard?.write || typeof window.ClipboardItem === "undefined") {
-        throw new Error(t("当前浏览器不支持复制图片"));
-      }
-      const blob = await canvasBlob(canvas);
-      await navigator.clipboard.write([new window.ClipboardItem({ "image/png": blob })]);
+      await clipboardPromise;
       setScreenshotMessage(t("日历截图已复制到剪贴板"));
     } else {
       const link = document.createElement("a");
@@ -620,7 +653,10 @@ async function captureCalendarImage(target, fileName, copyToClipboard = false) {
       setScreenshotMessage(t("日历截图已下载"));
     }
   } catch (captureError) {
-    setScreenshotMessage(t("截图失败：{error}", { error: captureError.message || t("未知错误") }), "error");
+    const message = captureError.name === "NotAllowedError"
+      ? t("剪贴板写入权限被拒绝，请在浏览器提示中允许")
+      : captureError.message || t("未知错误");
+    setScreenshotMessage(t("截图失败：{error}", { error: message }), "error");
   } finally {
     document.body.classList.remove("program-screenshot-capturing");
     screenshotBusy.value = false;
@@ -825,6 +861,9 @@ async function openAdminEditor(path) {
 
 onMounted(() => {
   checkAdminSession();
+  void loadHtml2Canvas().catch(() => {
+    html2canvasLoader = null;
+  });
   document.addEventListener("click", closeCastFilter);
 });
 onUnmounted(() => {

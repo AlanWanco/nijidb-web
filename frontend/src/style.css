@@ -3168,9 +3168,9 @@ footer {
   --fc-button-hover-border-color: var(--accent);
   --fc-button-active-bg-color: var(--accent);
   --fc-button-active-border-color: var(--accent);
-  --fc-today-bg-color: var(--accent-soft);
-  --fc-page-bg-color: transparent;
-  --fc-neutral-bg-color: color-mix(in srgb, var(--surface-alt) 58%, transparent);
+  --fc-today-bg-color: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  --fc-page-bg-color: var(--surface);
+  --fc-neutral-bg-color: color-mix(in srgb, var(--surface-alt) 58%, var(--surface));
 }
 
 .program-calendar-touch-zone {
@@ -3233,9 +3233,15 @@ footer {
   overflow: visible;
   border: 1px solid var(--fc-border-color);
   border-radius: 12px;
+  background: var(--surface);
+}
+
+.program-calendar .fc-daygrid-day {
+  background: var(--surface);
 }
 
 .program-calendar .fc-daygrid-day-frame {
+  background: inherit;
   position: relative;
   min-height: clamp(112px, 7vw, 148px);
 }
@@ -3298,11 +3304,11 @@ footer {
 }
 
 .program-calendar .fc-daygrid-day.fc-day-today {
-  background: color-mix(in srgb, var(--accent-soft) 70%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
 }
 
 .program-calendar .fc-daygrid-day.fc-day-other {
-  background: color-mix(in srgb, var(--surface-alt) 34%, transparent);
+  background: color-mix(in srgb, var(--surface-alt) 34%, var(--surface));
 }
 
 .program-calendar .fc-event {
@@ -3474,7 +3480,7 @@ footer {
 
 .program-calendar .program-event-cancelled {
   border: 1px dashed var(--muted);
-  background: color-mix(in srgb, var(--surface-alt) 82%, transparent);
+  background: color-mix(in srgb, var(--surface-alt) 82%, var(--surface));
   color: var(--muted);
   box-shadow: none;
   filter: grayscale(1);

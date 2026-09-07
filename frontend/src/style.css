@@ -4776,12 +4776,6 @@ html[data-theme="mocha"] .dp__theme_dark {
   padding: clamp(20px, 4vw, 34px);
 }
 
-.program-json-dialog.program-json-mode-dialog {
-  display: block;
-  overflow: auto;
-  padding: clamp(20px, 4vw, 34px);
-}
-
 .program-json-dialog-heading,
 .program-json-preview-heading,
 .program-json-occurrence-topline {
@@ -4856,8 +4850,7 @@ html[data-theme="mocha"] .dp__theme_dark {
   margin-bottom: 14px;
 }
 
-.program-json-target-options,
-.program-json-export-options {
+.program-json-target-options {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
@@ -4920,45 +4913,6 @@ html[data-theme="mocha"] .dp__theme_dark {
 
 .program-json-occurrence-topline span.deleted {
   color: var(--pink);
-}
-
-.program-json-export-options {
-  margin-top: 24px;
-}
-
-.program-json-export-option {
-  display: grid;
-  gap: 9px;
-  min-height: 150px;
-  padding: 18px;
-  border: 1px solid var(--line);
-  border-radius: 15px;
-  background: color-mix(in srgb, var(--surface) 82%, var(--accent-soft));
-  color: var(--ink);
-  text-align: left;
-  cursor: pointer;
-}
-
-.program-json-export-option:hover,
-.program-json-export-option:focus-visible {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 4px var(--accent-soft);
-}
-
-.program-json-export-option span,
-.program-json-export-option small {
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.program-json-export-option .program-json-mode-note {
-  color: var(--accent);
-  font-size: 11px;
-}
-
-.program-json-export-option small {
-  font: 11px var(--mono);
 }
 
 .program-json-preview-heading {
@@ -6246,14 +6200,9 @@ html[data-theme="mocha"] .dp__theme_dark {
     padding: 18px;
   }
 
-  .program-json-dialog.program-json-mode-dialog {
-    padding: 18px;
-  }
-
   .program-json-summary,
   .program-json-period-list,
-  .program-json-target-options,
-  .program-json-export-options {
+  .program-json-target-options {
     grid-template-columns: 1fr;
   }
 

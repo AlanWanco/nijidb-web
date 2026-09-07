@@ -959,13 +959,14 @@ def import_payload_options(payload: dict[str, Any]) -> dict[str, str]:
     except (TypeError, ValueError):
         version = 1
     schedule_mode = import_choice(raw_options.get("schedule_mode"), {
+        "当前设置": "current", "current": "current",
         "逐期准确": "individual", "逐期数据": "individual", "individual": "individual",
         "自动生成": "generated", "规则生成": "generated", "generated": "generated",
     })
     if not schedule_mode:
         schedule_mode = "generated" if version < 2 else "individual"
-    if schedule_mode not in {"individual", "generated"}:
-        raise ValueError("import_options.schedule_mode 必须是 individual 或 generated")
+    if schedule_mode not in {"current", "individual", "generated"}:
+        raise ValueError("import_options.schedule_mode 必须是 current、individual 或 generated")
 
     program_scope = import_choice(payload.get("_program_scope"), {
         "主节目": "main", "主节目组": "main", "main": "main",
@@ -998,7 +999,7 @@ def program_json_metadata() -> dict[str, Any]:
         "_version": PROGRAM_JSON_VERSION,
         "_description": "Nijidb 节目导入导出格式；一个 JSON 文件描述一个主节目、其子节目及单集资料。",
         "_field_notes": {
-            "import_options.schedule_mode": "individual（默认）：以 occurrences 为最终逐期数据，不自动生成；generated：按 periods 自动生成，occurrences 只作为已保存的覆盖和例外。",
+            "import_options.schedule_mode": "current：按每个 program 的 auto_generate 还原导出时的当前设置；individual：以 occurrences 为最终逐期数据，不自动生成；generated：按 periods 自动生成，occurrences 只作为已保存的覆盖和例外。",
             "import_options.target_mode": "new（默认）：新建节目；overwrite：覆盖 target_program_id 指定的已有节目。覆盖前必须在网页预览中再次确认。",
             "import_options.target_parent_program_id": "仅用于子节目 JSON；指定导入后所属的主节目 ID。",
             "_program_scope": "main（默认）：program 加 subprograms 组成一个主节目组；subprogram：program 仅描述一个子节目，并通过 parent_program 定位原主节目。",
@@ -1041,8 +1042,8 @@ def program_json_metadata() -> dict[str, Any]:
             "一个 JSON 文件描述一个主节目及其子节目；不属于该主节目系列的内容（例如“ふわふわ曖昧dream”）应拆分为独立文件。",
             "program.people 用于节目级固定成员、主持人和常驻嘉宾；单期临时嘉宾使用 occurrences[].guests，固定虹咲成员本期缺席使用 occurrences[].absent_members。",
             "schedule_mode 缺省为 individual：导入的 occurrences 是准确的最终逐期数据，program.auto_generate 会被关闭，不会凭 periods 生成额外单集。",
-            "需要继续按排期规则生成时，将 schedule_mode 设置为 generated；此时 program.auto_generate 会开启，occurrences 作为已保存覆盖和例外。",
-            "导出默认是 individual 完整逐期快照，适合交给 AI 优化内容后覆盖导回；也可以选择 generated 规则加当前自动生成结果和例外导出。自动生成结果按系统现有约半年的生成窗口写入。",
+            "需要手动指定导入行为时，可将 schedule_mode 设置为 individual 或 generated；current 由导出文件使用，按每个 program 的 auto_generate 还原当前设置。",
+            "导出 JSON 会根据当前节目设置保留 auto_generate、periods 和当前生效的 occurrences；自动生成节目按系统现有约半年的生成窗口导出。",
             "target_mode 缺省为 new；覆盖导入必须指定 target_program_id，并在网页导入预览中明确选择覆盖目标。",
             "子节目 JSON 导入必须在预览中选择一个已有的主节目；new 会在该主节目下新建子节目，overwrite 会覆盖该主节目下同名或同 ID 的子节目。",
             "JSON 可以保留这些说明字段；导入器也兼容 // 和 /* */ 注释。",
@@ -1206,7 +1207,10 @@ def normalize_import_payload(
         raise ValueError(f"单次导入最多支持 {PROGRAM_IMPORT_MAX_OCCURRENCES} 期单集")
 
     program_source.pop("id", None)
-    program_source["auto_generate"] = options["schedule_mode"] == "generated"
+    schedule_mode = options["schedule_mode"]
+    if schedule_mode == "current":
+        schedule_mode = "generated" if boolean_value(program_source.get("auto_generate"), True) else "individual"
+    program_source["auto_generate"] = schedule_mode == "generated"
     if parent_id_override is None or not parent_id_override:
         program_source["parent_id"] = ""
         program_source["subprogram_name"] = "主节目"
@@ -1289,7 +1293,7 @@ def normalize_import_payload(
             item.get("guests"),
             item.get("absent_members"),
         ))
-        if options["schedule_mode"] == "generated" and generated_marker and not has_override_content:
+        if schedule_mode == "generated" and generated_marker and not has_override_content:
             skipped_generated += 1
             continue
         occurrence_values = {
@@ -1314,7 +1318,7 @@ def normalize_import_payload(
         occurrences.append(normalized_occurrence(occurrence_values))
     if skipped_generated:
         warnings.append(f"已跳过 {skipped_generated} 条未补充内容的自动生成单集，导入后仍由 periods 自动生成。")
-    if options["schedule_mode"] == "individual":
+    if schedule_mode == "individual":
         warnings.append("已按逐期准确模式导入：不会根据 periods 自动生成额外单集，也不会再次级联提前或顺延。")
     else:
         warnings.append("已按自动生成模式导入：periods 会生成排期，occurrences 中的记录作为覆盖或例外。")
@@ -2367,36 +2371,29 @@ def program_json_occurrence_item(occurrence: dict[str, Any], freeze_effective_da
     return item
 
 
-def program_json_export_entry(program: dict[str, Any], mode: str, today: date) -> dict[str, Any]:
+def program_json_export_entry(program: dict[str, Any], today: date) -> dict[str, Any]:
+    auto_generate = boolean_value(program.get("auto_generate"), True)
     exported_program = {
         key: program.get(key)
-        for key in ("title", "category", "format", "platform", "delivery", "auto_generate", "episode_start", "people", "official_url", "description", "periods")
+        for key in ("title", "category", "format", "platform", "delivery", "episode_start", "people", "official_url", "description", "periods")
     }
+    exported_program["auto_generate"] = auto_generate
     exported_program["id"] = program.get("id", "")
     exported_program["parent_id"] = program.get("parent_id", "")
     exported_program["subprogram_name"] = program.get("subprogram_name") or "主节目"
     start = calendar_date(program.get("start_date", ""), today)
     end = calendar_date(program.get("end_date", ""), today + timedelta(days=PROGRAM_FORECAST_DAYS))
-    if mode == "individual":
-        exported_program["auto_generate"] = False
-        records = program_occurrence_list(program, start.isoformat(), end.isoformat())["occurrences"]
-        occurrences = [program_json_occurrence_item(record, True) for record in records]
-    else:
-        exported_program["auto_generate"] = True
-        records = program_occurrence_list({**program, "auto_generate": True}, start.isoformat(), end.isoformat())["occurrences"]
-        occurrences = [program_json_occurrence_item(occurrence, False) for occurrence in records]
+    records = program_occurrence_list({**program, "auto_generate": auto_generate}, start.isoformat(), end.isoformat())["occurrences"]
+    occurrences = [program_json_occurrence_item(record, False) for record in records]
     return {"program": exported_program, "occurrences": occurrences}
 
 
 def program_json_export(
     program: dict[str, Any],
-    mode: str = "individual",
     program_group: list[dict[str, Any]] | None = None,
     scope: str = "main",
     parent_program: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if mode not in {"individual", "generated"}:
-        raise ValueError("导出模式必须是 individual 或 generated")
     if scope not in {"main", "subprogram"}:
         raise ValueError("导出范围必须是 main 或 subprogram")
     group = program_group or [program]
@@ -2406,37 +2403,30 @@ def program_json_export(
         key=lambda item: str(item.get("subprogram_name") or ""),
     ) if scope == "main" else []
     today = datetime.now(JAPAN_TZ).date()
-    root_entry = program_json_export_entry(root, mode, today)
+    root_entry = program_json_export_entry(root, today)
     payload = program_json_metadata()
     payload["_exported_at"] = datetime.now(timezone.utc).isoformat()
     payload["_program_scope"] = scope
     payload["import_options"] = {
-        "schedule_mode": mode,
+        "schedule_mode": "current",
         "target_mode": "new",
         "target_program_id": "",
         "target_parent_program_id": parent_program.get("id", "") if scope == "subprogram" and parent_program else "",
     }
     payload["program"] = root_entry["program"]
     payload["occurrences"] = root_entry["occurrences"]
-    payload["subprograms"] = [program_json_export_entry(child, mode, today) for child in children]
+    payload["subprograms"] = [program_json_export_entry(child, today) for child in children]
     if scope == "subprogram":
         parent = parent_program or {}
         payload["parent_program"] = {
             "id": parent.get("id", ""),
             "title": parent.get("title", root.get("title", "")),
         }
-    if mode == "individual":
-        payload["_export_notes"] = [
-            "这是完整逐期快照；自动生成的单集也会展开写入 occurrences。",
-            "快照按当前实际播出日期冻结；由前期改期级联产生的日期会转换为本期独立的 rescheduled 记录。",
-            "导入此文件后默认关闭自动生成，不会因 periods 重新生成或再次级联提前/顺延。",
-        ]
-    else:
-        payload["_export_notes"] = [
-            "这是排期规则加当前自动生成结果和已保存例外；自动生成单集会写入 occurrences，并标记 generated=true。",
-            "导入此文件后会按 periods 自动生成；没有补充内容的 generated=true 记录不会重复保存，有内容的记录会作为覆盖保留。",
-            "当前自动生成结果按系统现有约半年的生成窗口导出。",
-        ]
+    payload["_export_notes"] = [
+        "这是根据导出时当前节目设置生成的 JSON；auto_generate、periods 和当前生效的 occurrences 均按当前状态导出。",
+        "导入此文件时会按每个 program 的 auto_generate 还原当前设置；开启自动生成的节目仍按 periods 生成，occurrences 作为覆盖或例外。",
+        "开启自动生成的节目按系统现有约半年的生成窗口导出。",
+    ]
     return payload
 
 
@@ -3392,7 +3382,7 @@ async def api_program_json_template(request: Request) -> dict[str, Any]:
 
 
 @app.get("/api/admin/programs/{program_id}/export")
-async def api_export_program(program_id: str, request: Request, mode: str = "individual") -> dict[str, Any]:
+async def api_export_program(program_id: str, request: Request) -> dict[str, Any]:
     require_api_admin(request)
     programs = program_rows()
     program = next((item for item in programs if item["id"] == program_id), None)
@@ -3403,9 +3393,9 @@ async def api_export_program(program_id: str, request: Request, mode: str = "ind
             parent_program = next((item for item in programs if item["id"] == program["parent_id"]), None)
             if not parent_program:
                 raise ValueError("子节目所属的主节目不存在")
-            return program_json_export(program, mode, [program], "subprogram", parent_program)
+            return program_json_export(program, [program], "subprogram", parent_program)
         program_group = [item for item in programs if item["id"] == program["id"] or item.get("parent_id") == program["id"]]
-        return program_json_export(program, mode, program_group)
+        return program_json_export(program, program_group)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 

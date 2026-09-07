@@ -50,7 +50,6 @@ const importSubmitting = ref(false);
 const importTargetMode = ref("new");
 const importTargetProgramId = ref("");
 const importTargetParentProgramId = ref("");
-const exportModeDialog = ref(false);
 const message = ref("");
 const error = ref("");
 const occurrenceEditingRowKey = ref("");
@@ -148,11 +147,6 @@ const filteredPrograms = computed(() => programs.value.filter(programMatchesFilt
 const customPeople = computed(() => form.people.filter(person => !castCandidates.includes(person)));
 const occurrenceOriginalLocked = computed(() => Boolean(!occurrenceDraft.individual && (occurrenceDraft.generated || occurrenceDraft.id)));
 const parentProgramTitle = computed(() => programs.value.find(program => program.id === form.parent_id)?.title || form.title || t("当前主节目"));
-const relatedSubprogramCount = computed(() => {
-  if (!editingId.value) return 0;
-  const rootId = form.parent_id || editingId.value;
-  return programs.value.filter(program => program.parent_id === rootId).length;
-});
 const relatedSubprograms = computed(() => {
   if (!editingId.value || form.parent_id) return [];
   return programs.value
@@ -398,21 +392,16 @@ function exportProgramJson() {
     downloadTemplateJson();
     return;
   }
-  exportModeDialog.value = true;
+  downloadProgramJson();
 }
 
-function closeExportModeDialog() {
-  exportModeDialog.value = false;
-}
-
-async function downloadProgramJson(mode) {
+async function downloadProgramJson() {
   message.value = "";
   error.value = "";
   try {
-    const payload = await api(`/api/admin/programs/${editingId.value}/export?mode=${encodeURIComponent(mode)}`);
+    const payload = await api(`/api/admin/programs/${editingId.value}/export`);
     downloadJson(safeJsonFileName(payload.program?.title, "nijidb-program"), payload);
-    exportModeDialog.value = false;
-    message.value = mode === "individual" ? t("完整逐期 JSON 已导出") : t("排期规则 JSON 已导出");
+    message.value = t("节目 JSON 已导出");
   } catch (requestError) {
     showError(requestError);
   }
@@ -490,6 +479,7 @@ function importDeliveryLabel(value) {
 }
 
 function importScheduleModeLabel(value) {
+  if (value === "current") return t("当前节目设置");
   return value === "generated" ? t("自动生成模式") : t("逐期准确模式");
 }
 
@@ -1582,7 +1572,7 @@ onUnmounted(() => {
 
         <div class="actions program-editor-actions">
             <button class="program-action-button" :disabled="saving">{{ saving ? t("保存中……") : editingId ? t("保存修改") : t("添加节目") }}</button>
-            <button type="button" class="secondary program-action-button" :title="t('已有节目时选择完整逐期快照或排期规则导出；未保存节目时下载说明模板')" @click="exportProgramJson">{{ t("导出 JSON") }}</button>
+            <button type="button" class="secondary program-action-button" :title="t('导出当前节目设置；未保存节目时下载说明模板')" @click="exportProgramJson">{{ t("导出 JSON") }}</button>
             <button type="button" class="secondary program-action-button" :title="t('选择一个节目 JSON，先预览节目、排期和全部单集，再确认导入')" @click="openImportPicker">{{ t("导入 JSON") }}</button>
            <span class="program-editor-danger-actions">
               <button type="button" class="secondary program-action-button" :title="t('下载带字段说明和导入规则的 JSON 模板')" @click="downloadTemplateJson">{{ t("下载 JSON 说明模板") }}</button>
@@ -1780,17 +1770,5 @@ onUnmounted(() => {
         </section>
       </div>
 
-     <div v-if="exportModeDialog" class="program-json-modal" role="dialog" aria-modal="true" aria-labelledby="program-json-export-title" @click.self="closeExportModeDialog">
-       <section class="program-json-dialog program-json-mode-dialog">
-         <div class="program-json-dialog-heading">
-             <div><p class="eyebrow">JSON EXPORT / MODE</p><h2 id="program-json-export-title">{{ t("选择导出方式") }}</h2><small>{{ t("两种文件都可以交给 AI 优化；导入时会根据 JSON 中的模式处理排期。") }}</small><small v-if="form.parent_id">{{ t("当前只导出这个子节目，并记录所属主节目；导入时可以重新选择主节目。") }}</small><small v-else-if="relatedSubprogramCount">{{ t("导出文件会同时包含该主节目及其全部子节目。") }}</small></div>
-            <button type="button" class="secondary program-action-button" @click="closeExportModeDialog">{{ t("关闭") }}</button>
-         </div>
-         <div class="program-json-export-options">
-            <button type="button" class="program-json-export-option" @click="downloadProgramJson('individual')"><strong>{{ t("完整逐期快照") }}</strong><small class="program-json-mode-note">{{ t("关闭自动生成后续节目、固化已播出节目日期") }}</small><span><strong>{{ t("推荐用于已完结节目") }}</strong> {{ t("推荐用于交给 AI 优化内容后覆盖导回。展开当前有效单集，关闭自动生成，日期和状态按当前结果冻结。") }}</span><small>individual · {{ form.title }}</small></button>
-            <button type="button" class="program-json-export-option" @click="downloadProgramJson('generated')"><strong>{{ t("排期规则 + 例外") }}</strong><small class="program-json-mode-note">{{ t("打开自动生成、推荐用于继续维护自动排期") }}</small><span><strong>{{ t("推荐用于还在更新的节目") }}</strong> {{ t("推荐用于继续维护自动排期。保留 periods、改期、顺延、取消、删除和已保存的单集覆盖。") }}</span><small>generated · {{ form.title }}</small></button>
-         </div>
-       </section>
-     </div>
    </main>
 </template>

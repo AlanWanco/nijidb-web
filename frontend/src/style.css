@@ -3307,6 +3307,12 @@ footer {
   background: color-mix(in srgb, var(--accent) 10%, var(--surface));
 }
 
+.program-calendar .fc-daygrid-day.fc-day-today .fc-daygrid-day-number {
+  color: var(--accent);
+  font-weight: 800;
+  text-shadow: 0 0 3px var(--surface), 0 0 9px var(--accent);
+}
+
 .program-calendar .fc-daygrid-day.fc-day-other {
   background: color-mix(in srgb, var(--surface-alt) 34%, var(--surface));
 }

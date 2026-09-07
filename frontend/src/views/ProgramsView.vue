@@ -596,6 +596,64 @@ function dataUrlBlob(dataUrl) {
   return new Blob([bytes], { type: header.match(/^data:([^;]+)/)?.[1] || "image/png" });
 }
 
+function monthScreenshotLabel(value, includeDay = false) {
+  const [year, month, day] = String(value || "").split("-").map(Number);
+  if (!year || !month) return visibleMonthLabel.value;
+  const options = includeDay ? { year: "numeric", month: "long", day: "numeric" } : { year: "numeric", month: "long" };
+  return new Intl.DateTimeFormat(localeTag(), options).format(new Date(year, month - 1, day || 1, 12));
+}
+
+function roundedRect(context, x, y, width, height, radius) {
+  const r = Math.min(radius, width / 2, height / 2);
+  context.beginPath();
+  context.moveTo(x + r, y);
+  context.arcTo(x + width, y, x + width, y + height, r);
+  context.arcTo(x + width, y + height, x, y + height, r);
+  context.arcTo(x, y + height, x, y, r);
+  context.arcTo(x, y, x + width, y, r);
+  context.closePath();
+}
+
+function addScreenshotLabel(dataUrl, target, label) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      const scale = image.width / Math.max(target.getBoundingClientRect().width, 1);
+      const canvas = document.createElement("canvas");
+      canvas.width = image.width;
+      canvas.height = image.height;
+      const context = canvas.getContext("2d");
+      const rootStyle = getComputedStyle(document.documentElement);
+      const backgroundColor = screenshotBackground(target);
+      const accentColor = rootStyle.getPropertyValue("--accent").trim() || "#8839ef";
+      const fontFamily = getComputedStyle(target).fontFamily;
+      const fontSize = Math.max(14, Math.round(15 * scale));
+      const paddingX = Math.round(13 * scale);
+      const paddingY = Math.round(7 * scale);
+      const height = Math.round((fontSize / scale + paddingY * 2 / scale) * scale);
+      context.fillStyle = backgroundColor;
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(image, 0, 0);
+      context.font = `700 ${fontSize}px ${fontFamily}`;
+      const width = Math.ceil(context.measureText(label).width + paddingX * 2);
+      const x = Math.round(12 * scale);
+      const y = Math.round(10 * scale);
+      roundedRect(context, x, y, width, height, Math.round(height / 2));
+      context.fillStyle = backgroundColor;
+      context.fill();
+      context.lineWidth = Math.max(2, Math.round(1.5 * scale));
+      context.strokeStyle = accentColor;
+      context.stroke();
+      context.fillStyle = accentColor;
+      context.textBaseline = "middle";
+      context.fillText(label, x + paddingX, y + height / 2 + 1);
+      resolve(canvas.toDataURL("image/png"));
+    };
+    image.onerror = () => reject(new Error(t("无法生成图片")));
+    image.src = dataUrl;
+  });
+}
+
 function copyImageToClipboard(imagePromise) {
   const { clipboard, ClipboardItemConstructor } = clipboardSupport();
   const blobPromise = imagePromise.then(dataUrlBlob);
@@ -607,7 +665,7 @@ function loadScreenshotRenderer() {
   return screenshotRendererLoader;
 }
 
-async function captureCalendarImage(target, fileName, copyToClipboard = false) {
+async function captureCalendarImage(target, fileName, copyToClipboard = false, screenshotLabel = "") {
   if (!target || screenshotBusy.value) return;
   screenshotBusy.value = true;
   screenshotMessage.value = "";
@@ -616,12 +674,23 @@ async function captureCalendarImage(target, fileName, copyToClipboard = false) {
     await new Promise(resolve => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve)));
     const renderScreenshot = await loadScreenshotRenderer();
     const backgroundColor = screenshotBackground(target);
-    const imagePromise = renderScreenshot(target, {
+    const renderedImagePromise = renderScreenshot(target, {
       backgroundColor,
       filter: element => element.dataset?.screenshotControl !== "true",
+      onCloneEachNode: cloned => {
+        if (cloned.nodeType !== 1) return;
+        if (cloned.classList.contains("program-calendar-sticky-header")) {
+          cloned.style.position = "static";
+          cloned.style.top = "auto";
+        }
+        if (cloned.classList.contains("program-calendar-sticky-nav")) cloned.style.display = "none";
+      },
       scale: Math.min(window.devicePixelRatio || 1, 2),
       style: { backgroundColor },
     });
+    const imagePromise = screenshotLabel
+      ? renderedImagePromise.then(dataUrl => addScreenshotLabel(dataUrl, target, screenshotLabel))
+      : renderedImagePromise;
     const clipboardPromise = copyToClipboard ? copyImageToClipboard(imagePromise) : null;
     const dataUrl = await imagePromise;
     if (copyToClipboard) {
@@ -654,7 +723,8 @@ function copyCalendarScreenshot() {
 }
 
 function screenshotFileName(value) {
-  return `nijidb-calendar-${String(value || visibleMonth.value).replace(/[^\d-]/g, "")}.png`;
+  const timestamp = String(Math.floor(Date.now() / 1000)).padStart(10, "0");
+  return `nijidb-calendar-${String(value || visibleMonth.value).replace(/[^\d-]/g, "")}-${timestamp}.png`;
 }
 
 function addDayScreenshotButton({ date, el }) {
@@ -671,12 +741,12 @@ function addDayScreenshotButton({ date, el }) {
   button.addEventListener("click", event => {
     event.preventDefault();
     event.stopPropagation();
-    captureCalendarImage(el, screenshotFileName(dateValue), false);
+    captureCalendarImage(el, screenshotFileName(dateValue), false, monthScreenshotLabel(dateValue, true));
   });
   button.addEventListener("contextmenu", event => {
     event.preventDefault();
     event.stopPropagation();
-    captureCalendarImage(el, screenshotFileName(dateValue), true);
+    captureCalendarImage(el, screenshotFileName(dateValue), true, monthScreenshotLabel(dateValue, true));
   });
   frame.append(button);
 }

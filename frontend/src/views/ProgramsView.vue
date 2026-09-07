@@ -619,7 +619,7 @@ function addScreenshotLabel(dataUrl, target, label) {
     const image = new Image();
     image.onload = () => {
       const scale = image.width / Math.max(target.getBoundingClientRect().width, 1);
-      const outerPadding = Math.round(25 * scale);
+      const outerPadding = Math.round(20 * scale);
       const containerPadding = Math.round(15 * scale);
       const containerRadius = Math.round(40 * scale);
       const containerBorderWidth = Math.max(1, Math.round(1 * scale));

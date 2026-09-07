@@ -6061,8 +6061,14 @@ html[data-theme="mocha"] .dp__theme_dark {
     min-height: 61px;
   }
 
+  .program-calendar-screenshot,
   .program-calendar-day-screenshot {
     display: none;
+  }
+
+  .program-calendar .fc-daygrid-day-number {
+    padding-right: clamp(9px, .6vw, 12px);
+    white-space: nowrap;
   }
 
   .program-calendar-touch-zone {

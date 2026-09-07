@@ -710,6 +710,7 @@ async function captureCalendarImage(target, fileName, copyToClipboard = false, s
         if (cloned.classList.contains("program-calendar-sticky-nav")) cloned.style.display = "none";
         if (isSingleDay && cloned.classList.contains("fc-daygrid-day-number")) cloned.style.visibility = "hidden";
         if (isSingleDay && cloned.classList.contains("fc-daygrid-day")) {
+          cloned.style.setProperty("border", "0", "important");
           cloned.style.setProperty("height", `${dayHeight}px`, "important");
         }
         if (isSingleDay && cloned.classList.contains("fc-daygrid-day-frame")) {

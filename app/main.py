@@ -1386,7 +1386,7 @@ def normalize_import_bundle(payload: dict[str, Any]) -> tuple[list[dict[str, Any
 def import_preview_entry(program: dict[str, Any], occurrences: list[dict[str, Any]]) -> dict[str, Any]:
     preview_program = {
         key: program[key]
-        for key in ("title", "category", "format", "platform", "delivery", "auto_generate", "episode_start", "official_url", "description", "periods")
+        for key in ("title", "status", "category", "format", "platform", "delivery", "auto_generate", "episode_start", "official_url", "description", "periods")
     }
     if program.get("parent_id"):
         preview_program["subprogram_name"] = program.get("subprogram_name") or ""

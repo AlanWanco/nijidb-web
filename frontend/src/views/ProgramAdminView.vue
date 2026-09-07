@@ -1724,6 +1724,8 @@ onUnmounted(() => {
            <div><span class="program-field-label">{{ t("类型") }}</span><strong>{{ importPreview.program.category === "official" ? t("官方节目") : t("个人节目") }}</strong></div>
            <div><span class="program-field-label">{{ t("形式") }}</span><strong>{{ formatLabel(importPreview.program) }}</strong></div>
            <div><span class="program-field-label">{{ t("成员") }}</span><strong>{{ importPreview.program.people?.join("、") || t("未填写") }}</strong></div>
+           <div><span class="program-field-label">{{ t("是否完结") }}</span><strong>{{ programStatus(importPreview.program) }}</strong></div>
+           <div><span class="program-field-label">{{ t("是否开启自动生成后续单集") }}</span><strong>{{ importPreview.program.auto_generate ? t("是") : t("否") }}</strong></div>
         </div>
          <section class="program-json-preview-section">
             <div class="program-json-preview-heading"><div><p class="form-kicker">BROADCAST PERIODS</p><h3>{{ t("排期时期") }}</h3></div><span class="section-count">{{ importPreview.counts.periods }}</span></div>
@@ -1737,7 +1739,7 @@ onUnmounted(() => {
             <div class="program-json-preview-heading"><div><p class="form-kicker">SUBPROGRAMS</p><h3>{{ t("子节目") }}</h3></div><span class="section-count">{{ importPreview.subprograms.length }}</span></div>
             <div class="program-json-period-list">
               <article v-for="subprogram in importPreview.subprograms" :key="subprogram.program.id || subprogram.program.subprogram_name" class="program-json-period-item">
-                <strong>{{ subprogram.program.subprogram_name }}</strong><span>{{ formatLabel(subprogram.program) }}</span><small>{{ subprogram.counts.periods }} {{ t("排期时期") }} · {{ subprogram.counts.occurrences }} {{ t("单集") }}</small>
+                <strong>{{ subprogram.program.subprogram_name }}</strong><span>{{ formatLabel(subprogram.program) }}</span><small>{{ subprogram.counts.periods }} {{ t("排期时期") }} · {{ subprogram.counts.occurrences }} {{ t("单集") }} · {{ t("是否完结") }}：{{ programStatus(subprogram.program) }} · {{ t("是否开启自动生成后续单集") }}：{{ subprogram.program.auto_generate ? t("是") : t("否") }}</small>
               </article>
             </div>
          </section>

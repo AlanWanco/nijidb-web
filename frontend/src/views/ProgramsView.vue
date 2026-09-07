@@ -366,6 +366,12 @@ function eventCast(event) {
   return castColorSegments(eventPeople(event), props.absentMembers || props.absent_members);
 }
 
+function eventHasNijigasakiParticipant(event) {
+  const props = event.extendedProps || event || {};
+  if (props.isEventernote) return true;
+  return castColorSegments(props.people || []).length > 0 || eventCast(event).length > 0;
+}
+
 function eventernoteTime(value) {
   const match = String(value || "").match(/^(\d{1,2}):(\d{2})/);
   return match ? `${match[1].padStart(2, "0")}:${match[2]}` : "";
@@ -405,6 +411,7 @@ function normalizeEventernoteEvent(item) {
 function eventMatchesFilters(event) {
   const props = event.extendedProps || {};
   if (!filters.delivery.length) return false;
+  if (!eventHasNijigasakiParticipant(event)) return false;
   if (props.isEventernote) {
     if (!filters.delivery.includes("event")) return false;
   } else if (!filters.delivery.includes(props.delivery)) {

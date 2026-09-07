@@ -4950,6 +4950,11 @@ html[data-theme="mocha"] .dp__theme_dark {
   white-space: nowrap;
 }
 
+.program-json-summary strong.program-json-match-title {
+  color: var(--accent);
+  font-weight: 800;
+}
+
 .program-json-preview-section {
   margin-top: 22px;
   padding-top: 20px;

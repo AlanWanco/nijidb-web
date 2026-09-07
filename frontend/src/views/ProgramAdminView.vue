@@ -443,6 +443,11 @@ function stripJsonComments(source) {
   return result.replace(/^\uFEFF/, "");
 }
 
+function importTitleMatched(preview) {
+  const candidates = preview?._program_scope === "subprogram" ? preview.parent_choices : preview?.matches;
+  return candidates?.some(match => match.match === "title") || false;
+}
+
 async function handleImportFile(event) {
   const file = event.target.files?.[0];
   event.target.value = "";
@@ -455,7 +460,7 @@ async function handleImportFile(event) {
     importPayload.value = payload;
     importPreview.value = preview;
     importFileName.value = file.name;
-    importTargetMode.value = "new";
+    importTargetMode.value = preview._program_scope === "main" && preview.matches?.length ? "overwrite" : "new";
     importTargetProgramId.value = preview.matches?.[0]?.id || "";
     importTargetParentProgramId.value = preview.import_options?.target_parent_program_id || preview.parent_choices?.[0]?.id || "";
   } catch (requestError) {
@@ -1719,7 +1724,7 @@ onUnmounted(() => {
              <p v-if="importTargetMode === 'overwrite'" class="program-json-danger-note">{{ importPreview._program_scope === 'subprogram' ? t("覆盖会删除所选子节目原有的排期和单集，再写入本次 JSON；此操作不可自动撤销，请确认目标无误。") : t("覆盖会删除目标节目原有的排期和单集，再写入本次 JSON；此操作不可自动撤销，请确认目标无误。") }}</p>
          </section>
          <div class="program-json-summary">
-           <div><span class="program-field-label">{{ t("节目名称") }}</span><strong>{{ importPreview.program.title }}</strong></div>
+           <div><span class="program-field-label">{{ t("节目名称") }}</span><strong :class="{ 'program-json-match-title': importTitleMatched(importPreview) }">{{ importPreview.program.title }}</strong></div>
             <div v-if="importPreview._program_scope === 'subprogram'"><span class="program-field-label">{{ t("子节目标签") }}</span><strong>{{ importPreview.program.subprogram_name }}</strong></div>
            <div><span class="program-field-label">{{ t("类型") }}</span><strong>{{ importPreview.program.category === "official" ? t("官方节目") : t("个人节目") }}</strong></div>
            <div><span class="program-field-label">{{ t("形式") }}</span><strong>{{ formatLabel(importPreview.program) }}</strong></div>

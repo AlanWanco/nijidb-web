@@ -665,6 +665,24 @@ function loadScreenshotRenderer() {
   return screenshotRendererLoader;
 }
 
+function screenshotDayHeight(target) {
+  const targetRect = target.getBoundingClientRect();
+  const frame = target.querySelector(".fc-daygrid-day-frame");
+  if (!frame) return Math.round(targetRect.height);
+  const frameStyle = getComputedStyle(frame);
+  const minimumHeight = Number.parseFloat(frameStyle.minHeight) || 0;
+  const contentNodes = [
+    target.querySelector(".fc-daygrid-day-top"),
+    ...target.querySelectorAll(".fc-daygrid-event"),
+  ].filter(Boolean);
+  const contentBottom = contentNodes.reduce((bottom, node) => {
+    const rect = node.getBoundingClientRect();
+    return Math.max(bottom, rect.bottom - targetRect.top);
+  }, 0);
+  const bottomPadding = Math.max(Number.parseFloat(frameStyle.paddingBottom) || 0, 12);
+  return Math.round(Math.min(targetRect.height, Math.max(minimumHeight, contentBottom + bottomPadding)));
+}
+
 async function captureCalendarImage(target, fileName, copyToClipboard = false, screenshotLabel = "") {
   if (!target || screenshotBusy.value) return;
   screenshotBusy.value = true;
@@ -674,8 +692,11 @@ async function captureCalendarImage(target, fileName, copyToClipboard = false, s
     await new Promise(resolve => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve)));
     const renderScreenshot = await loadScreenshotRenderer();
     const backgroundColor = screenshotBackground(target);
+    const isSingleDay = target.classList.contains("fc-daygrid-day");
+    const dayHeight = isSingleDay ? screenshotDayHeight(target) : undefined;
     const renderedImagePromise = renderScreenshot(target, {
       backgroundColor,
+      height: dayHeight,
       filter: element => element.dataset?.screenshotControl !== "true",
       onCloneEachNode: cloned => {
         if (cloned.nodeType !== 1) return;
@@ -684,8 +705,17 @@ async function captureCalendarImage(target, fileName, copyToClipboard = false, s
           cloned.style.top = "auto";
         }
         if (cloned.classList.contains("program-calendar-sticky-nav")) cloned.style.display = "none";
+        if (isSingleDay && cloned.classList.contains("fc-daygrid-day")) {
+          cloned.style.setProperty("height", `${dayHeight}px`, "important");
+        }
+        if (isSingleDay && cloned.classList.contains("fc-daygrid-day-frame")) {
+          cloned.style.setProperty("height", `${dayHeight}px`, "important");
+          cloned.style.setProperty("min-height", "0", "important");
+        }
       },
-      scale: Math.min(window.devicePixelRatio || 1, 2),
+      scale: isSingleDay
+        ? Math.min((window.devicePixelRatio || 1) * 1.5, 3)
+        : Math.min(window.devicePixelRatio || 1, 2),
       style: { backgroundColor },
     });
     const imagePromise = screenshotLabel

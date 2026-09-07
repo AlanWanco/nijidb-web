@@ -619,24 +619,34 @@ function addScreenshotLabel(dataUrl, target, label) {
     const image = new Image();
     image.onload = () => {
       const scale = image.width / Math.max(target.getBoundingClientRect().width, 1);
-      const outerPadding = Math.round(15 * scale);
+      const outerPadding = Math.round(40 * scale);
+      const containerRadius = Math.round(40 * scale);
       const canvas = document.createElement("canvas");
       canvas.width = image.width + outerPadding * 2;
       canvas.height = image.height + outerPadding * 2;
       const context = canvas.getContext("2d");
       const rootStyle = getComputedStyle(document.documentElement);
+      const targetStyle = getComputedStyle(target);
       const backgroundColor = screenshotBackground(target);
       const accentColor = rootStyle.getPropertyValue("--accent").trim() || "#8839ef";
-      const fontFamily = getComputedStyle(target).fontFamily;
+      const fontFamily = targetStyle.fontFamily;
       const dateNumber = target.querySelector(".fc-daygrid-day-number");
       const dateFontSize = Number.parseFloat(dateNumber ? getComputedStyle(dateNumber).fontSize : "") || 14;
       const fontSize = Math.max(1, Math.round(dateFontSize * scale));
       const paddingX = Math.round(13 * scale);
       const paddingY = Math.round(7 * scale);
       const height = Math.round((fontSize / scale + paddingY * 2 / scale) * scale);
+      const containerX = outerPadding;
+      const containerY = outerPadding;
+      const containerWidth = image.width;
+      const containerHeight = image.height;
       context.fillStyle = backgroundColor;
       context.fillRect(0, 0, canvas.width, canvas.height);
-      context.drawImage(image, outerPadding, outerPadding);
+      context.save();
+      roundedRect(context, containerX, containerY, containerWidth, containerHeight, containerRadius);
+      context.clip();
+      context.drawImage(image, containerX, containerY);
+      context.restore();
       context.font = `700 ${fontSize}px ${fontFamily}`;
       const width = Math.ceil(context.measureText(label).width + paddingX * 2);
       const x = outerPadding + Math.round(12 * scale);
@@ -695,6 +705,9 @@ async function captureCalendarImage(target, fileName, copyToClipboard = false, s
     await new Promise(resolve => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve)));
     const renderScreenshot = await loadScreenshotRenderer();
     const backgroundColor = screenshotBackground(target);
+    const targetStyle = getComputedStyle(target);
+    const rootStyle = getComputedStyle(document.documentElement);
+    const borderColor = targetStyle.borderTopColor || rootStyle.getPropertyValue("--line").trim() || "#313244";
     const isSingleDay = target.classList.contains("fc-daygrid-day");
     const dayHeight = isSingleDay ? screenshotDayHeight(target) : undefined;
     const renderedImagePromise = renderScreenshot(target, {
@@ -716,6 +729,9 @@ async function captureCalendarImage(target, fileName, copyToClipboard = false, s
         if (isSingleDay && cloned.classList.contains("fc-daygrid-day-frame")) {
           cloned.style.setProperty("height", `${dayHeight}px`, "important");
           cloned.style.setProperty("min-height", "0", "important");
+          cloned.style.setProperty("border", `1px solid ${borderColor}`, "important");
+          cloned.style.setProperty("border-radius", "40px", "important");
+          cloned.style.setProperty("overflow", "hidden", "important");
         }
       },
       scale: isSingleDay

@@ -1796,6 +1796,15 @@ button.secondary,
   gap: 18px;
 }
 
+.settings-programs-button {
+  width: 100%;
+  min-height: 44px;
+  border-radius: 999px;
+  padding: 10px 20px;
+  font-size: 13px;
+  letter-spacing: .02em;
+}
+
 .settings-card {
   position: relative;
   overflow: hidden;

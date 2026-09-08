@@ -265,7 +265,6 @@ onMounted(loadSettings);
       <div class="settings-heading">
         <div><p class="eyebrow">CONTROL ROOM / 01</p><h1>{{ t("运行设置") }}</h1><p class="settings-intro">{{ t("调整同步节奏、通知出口与本地档案的维护方式。") }}</p></div>
         <div class="settings-heading-actions">
-          <button class="secondary" type="button" @click="router.push('/admin/programs')">{{ t("管理节目") }}</button>
           <button class="secondary" type="button" @click="logout">{{ t("退出登录") }}</button>
         </div>
       </div>
@@ -274,6 +273,7 @@ onMounted(loadSettings);
         <p v-if="message" class="success">{{ message }}</p>
         <p v-if="error" class="state error">{{ error }}</p>
         <div class="settings-stack">
+          <button class="secondary settings-programs-button" type="button" @click="router.push('/admin/programs')">{{ t("管理节目") }}</button>
           <form class="settings-card" @submit.prevent="saveSettings">
              <div class="form-heading"><span class="form-number">01</span><div><p class="form-kicker">SYNC ENGINE</p><h2>{{ t("抓取") }}</h2></div></div>
             <label>{{ t("整页目录检查（分钟）") }}<input v-model="settings.interval_minutes" type="number" min="5" max="60"><small>{{ t("检查目录顺序、新专辑和封面，范围 5–60 分钟。") }}</small></label>

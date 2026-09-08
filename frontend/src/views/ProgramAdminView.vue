@@ -524,7 +524,7 @@ async function submitImport() {
     await loadPrograms();
     editingId.value = saved.id;
     editorOpen.value = true;
-    activePanel.value = "edit";
+    setActivePanel("edit");
     applyProgram(saved);
     await loadOccurrences(saved.id);
     message.value = `${data.overwritten ? t("已覆盖") : t("已导入")}「${saved.title}」${data.imported_subprograms ? `，${data.imported_subprograms} ${t("个子节目")}` : ""}${data.imported_occurrences ? `，${data.imported_occurrences} ${t("期")} ${t("单集")}` : ""}`;
@@ -538,9 +538,33 @@ async function submitImport() {
   }
 }
 
+function syncPanelQuery(panel) {
+  const nextQuery = { ...route.query };
+  if (panel === "list") {
+    delete nextQuery.program;
+    delete nextQuery.panel;
+    delete nextQuery.occurrence;
+    delete nextQuery.date;
+  } else {
+    if (editingId.value) nextQuery.program = editingId.value;
+    else delete nextQuery.program;
+    nextQuery.panel = panel === "occurrences" ? "occurrences" : "edit";
+    if (panel !== "occurrences") {
+      delete nextQuery.occurrence;
+      delete nextQuery.date;
+    }
+  }
+  if (JSON.stringify(nextQuery) !== JSON.stringify(route.query)) router.replace({ path: route.path, query: nextQuery });
+}
+
+function setActivePanel(panel, syncUrl = true) {
+  activePanel.value = panel;
+  if (syncUrl) syncPanelQuery(panel);
+}
+
 function showPanel(panel) {
   if (panel === "occurrences" && !editingId.value) return;
-  activePanel.value = panel;
+  setActivePanel(panel);
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
@@ -590,21 +614,24 @@ async function openRequestedProgram() {
     return;
   }
   if (!requestedProgramId.value) return;
+  const requestedPanelValue = requestedPanel.value;
+  const requestedOccurrenceIdValue = requestedOccurrenceId.value;
+  const requestedOccurrenceDateValue = requestedOccurrenceDate.value;
   const program = programs.value.find(item => item.id === requestedProgramId.value);
   if (!program) {
     error.value = t("节目不存在或已被删除");
     return;
   }
-  await editProgram(program);
-  if (requestedPanel.value !== "occurrences" && !requestedOccurrenceId.value && !requestedOccurrenceDate.value) return;
+  await editProgram(program, { syncUrl: false });
+  if (requestedPanelValue !== "occurrences" && !requestedOccurrenceIdValue && !requestedOccurrenceDateValue) return;
 
-  activePanel.value = "occurrences";
-  if (!requestedOccurrenceId.value && !requestedOccurrenceDate.value) {
+  setActivePanel("occurrences");
+  if (!requestedOccurrenceIdValue && !requestedOccurrenceDateValue) {
     await focusOccurrenceEditor();
     return;
   }
-  const row = occurrenceRows.value.find(item => requestedOccurrenceId.value && String(item.id) === requestedOccurrenceId.value)
-    || occurrenceRows.value.find(item => requestedOccurrenceDate.value && item.original_date === requestedOccurrenceDate.value);
+  const row = occurrenceRows.value.find(item => requestedOccurrenceIdValue && String(item.id) === requestedOccurrenceIdValue)
+    || occurrenceRows.value.find(item => requestedOccurrenceDateValue && item.original_date === requestedOccurrenceDateValue);
   if (row) {
     editOccurrence(row);
     await focusOccurrenceEditor(row);
@@ -680,7 +707,7 @@ function resetForm() {
   episodeStartCustom.value = "";
   editingId.value = "";
   editorOpen.value = false;
-  activePanel.value = "list";
+  setActivePanel("list");
   occurrenceRows.value = [];
   resetOccurrenceDraft();
 }
@@ -688,7 +715,7 @@ function resetForm() {
 function startNewProgram() {
   resetForm();
   editorOpen.value = true;
-  activePanel.value = "edit";
+  setActivePanel("edit");
   message.value = t("正在新建主节目");
   error.value = "";
 }
@@ -711,11 +738,11 @@ async function loadOccurrences(programId) {
   }
 }
 
-async function editProgram(program) {
+async function editProgram(program, { syncUrl = true } = {}) {
   applyProgram(program);
   editorOpen.value = true;
   editingId.value = program.id;
-  activePanel.value = "edit";
+  setActivePanel("edit", syncUrl);
   resetOccurrenceDraft();
   message.value = "";
   error.value = "";
@@ -832,7 +859,7 @@ function setOccurrenceShift(days) {
 function newSubprogram(parent) {
   resetForm();
   editorOpen.value = true;
-  activePanel.value = "edit";
+  setActivePanel("edit");
   form.parent_id = parent.id;
   form.title = parent.title;
   form.subprogram_name = "";
@@ -987,7 +1014,7 @@ function editOccurrence(row) {
   occurrenceAutoSaveTimer = 0;
   occurrenceAutoSaveQueued = false;
   occurrenceDraftHydrating = true;
-  activePanel.value = "occurrences";
+  setActivePanel("occurrences");
   occurrenceEditingRowKey.value = occurrenceRowKey(row);
   Object.assign(occurrenceDraft, {
     id: row.id || "",
@@ -1078,12 +1105,12 @@ async function restoreOccurrencePosition(position) {
 }
 
 function newOccurrence() {
-  activePanel.value = "occurrences";
+  setActivePanel("occurrences");
   resetOccurrenceDraft();
 }
 
 function leaveOccurrenceFocus() {
-  activePanel.value = "edit";
+  setActivePanel("edit");
 }
 
 function occurrenceBody(overrides = {}) {

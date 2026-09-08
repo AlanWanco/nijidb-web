@@ -203,12 +203,18 @@ async function loadPrograms() {
   loading.value = true;
   error.value = "";
   try {
-    const params = new URLSearchParams();
-    if (keyword.value.trim()) params.set("q", keyword.value.trim());
-    const query = params.toString();
-    const data = await api(`/api/programs${query ? `?${query}` : ""}`);
-    if (requestId !== programSearchRequest) return;
-    programs.value = data.programs || [];
+    if (detailMode.value) {
+      const data = await api(`/api/programs/${encodeURIComponent(programId.value)}`);
+      if (requestId !== programSearchRequest) return;
+      programs.value = data.program ? [data.program] : [];
+    } else {
+      const params = new URLSearchParams();
+      if (keyword.value.trim()) params.set("q", keyword.value.trim());
+      const query = params.toString();
+      const data = await api(`/api/programs${query ? `?${query}` : ""}`);
+      if (requestId !== programSearchRequest) return;
+      programs.value = data.programs || [];
+    }
     if (detailMode.value && !selectedProgram.value) error.value = t("节目不存在或已被删除");
     await loadOccurrences();
   } catch (requestError) {
@@ -247,10 +253,7 @@ async function openAdminEditor(path) {
 }
 
 watch(programId, () => {
-  if (programs.value.length) {
-    error.value = "";
-    loadOccurrences();
-  }
+  loadPrograms();
 });
 
 watch(() => route.query.q, value => {

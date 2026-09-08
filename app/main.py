@@ -556,6 +556,10 @@ PROGRAM_FREQUENCIES = {"weekly", "monthly", "individual", "single"}
 OCCURRENCE_STATUSES = {"scheduled", "rescheduled", "cancelled", "deleted"}
 EPISODE_START_MAX = 9999
 PROGRAM_FORECAST_DAYS = 183
+PROGRAM_SUMMARY_OCCURRENCE_COLUMNS = (
+    "id, program_id, original_date, title, generated_date, original_time, shift_following_days, "
+    "status, adjusted_date, adjusted_time, special, materialized"
+)
 PROGRAM_TIMEZONES = {
     "Asia/Tokyo": "东京时间",
     "Asia/Shanghai": "中国标准时间",
@@ -697,6 +701,24 @@ def period_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def period_summary(period: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: period[key]
+        for key in (
+            "id",
+            "start_date",
+            "end_date",
+            "frequency",
+            "week_interval",
+            "week_index",
+            "weekday",
+            "schedule_time",
+            "timezone",
+        )
+        if key in period
+    }
+
+
 def occurrence_timezone(value: Any) -> ZoneInfo:
     timezone = str(value or "Asia/Tokyo")
     return ZoneInfo(timezone if timezone in PROGRAM_TIMEZONES else "Asia/Tokyo")
@@ -728,6 +750,7 @@ def program_payload(
     row: sqlite3.Row | dict[str, Any],
     occurrences: list[dict[str, Any]] | None = None,
     periods: list[dict[str, Any]] | None = None,
+    include_occurrences: bool = True,
 ) -> dict[str, Any]:
     payload = dict(row)
     payload.pop("duration_minutes", None)
@@ -749,6 +772,11 @@ def program_payload(
     payload["status"] = inferred_program_status(payload)
     payload["episode_count"] = program_episode_count(payload)
     payload["update_status"] = program_update_status(payload)
+    if not include_occurrences:
+        payload.pop("occurrences", None)
+        payload.pop("created_at", None)
+        payload.pop("updated_at", None)
+        payload["periods"] = [period_summary(period) for period in payload["periods"]]
     return payload
 
 
@@ -2275,38 +2303,67 @@ def text_search_sql(alias: str, fields: tuple[str, ...]) -> str:
     return f"instr(lower({text}), lower(?)) > 0"
 
 
-def program_rows(query: str = "") -> list[dict[str, Any]]:
+def program_rows(
+    query: str = "",
+    *,
+    include_occurrences: bool = True,
+    program_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
     search = query.strip()
     program_search_sql = text_search_sql("p", ("title", "subprogram_name", "description", "people", "official_url"))
     occurrence_search_sql = text_search_sql("o", ("title", "note", "guests", "source_url", "mirror_url", "subtitle_url"))
     matched_occurrence_ids: dict[str, set[int]] = {}
+    program_id_values = sorted(str(program_id) for program_id in program_ids) if program_ids is not None else []
+    if program_ids is not None and not program_id_values:
+        return []
+    program_id_placeholders = ", ".join("?" for _ in program_id_values)
     with db() as conn:
-        search_where = ""
-        search_params: tuple[str, ...] = ()
+        filters: list[str] = []
+        params: list[Any] = []
+        if program_id_values:
+            filters.append(f"p.id IN ({program_id_placeholders})")
+            params.extend(program_id_values)
         if search:
-            search_where = f"""
-            WHERE {program_search_sql}
-            OR EXISTS (
-                SELECT 1
-                FROM program_occurrences AS o
-                WHERE o.program_id = p.id
-                  AND o.status != 'deleted'
-                  AND {occurrence_search_sql}
-            )
-            """
-            search_params = (search, search)
+            filters.append(f"""(
+                {program_search_sql}
+                OR EXISTS (
+                    SELECT 1
+                    FROM program_occurrences AS o
+                    WHERE o.program_id = p.id
+                      AND o.status != 'deleted'
+                      AND {occurrence_search_sql}
+                )
+            )""")
+            params.extend((search, search))
+            matched_filter = ["o.status != 'deleted'", occurrence_search_sql]
+            matched_params: list[Any] = [search]
+            if program_id_values:
+                matched_filter.insert(0, f"o.program_id IN ({program_id_placeholders})")
+                matched_params = [*program_id_values, search]
             matched_rows = conn.execute(
-                f"SELECT o.program_id, o.id FROM program_occurrences AS o WHERE o.status != 'deleted' AND {occurrence_search_sql}",
-                (search,),
+                f"SELECT o.program_id, o.id FROM program_occurrences AS o WHERE {' AND '.join(matched_filter)}",
+                matched_params,
             ).fetchall()
             for row in matched_rows:
                 matched_occurrence_ids.setdefault(row["program_id"], set()).add(row["id"])
-        program_rows = conn.execute(
-            f"SELECT p.* FROM programs AS p {search_where} ORDER BY p.category, p.title COLLATE NOCASE, CASE WHEN p.parent_id = '' THEN 0 ELSE 1 END, p.subprogram_name COLLATE NOCASE",
-            search_params,
+        where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
+        program_db_rows = conn.execute(
+            f"SELECT p.* FROM programs AS p {where_sql} ORDER BY p.category, p.title COLLATE NOCASE, CASE WHEN p.parent_id = '' THEN 0 ELSE 1 END, p.subprogram_name COLLATE NOCASE",
+            params,
         ).fetchall()
-        period_rows = conn.execute("SELECT * FROM program_periods ORDER BY start_date, id").fetchall()
-        occurrence_rows = conn.execute("SELECT * FROM program_occurrences ORDER BY original_date, id").fetchall()
+        selected_program_ids = [row["id"] for row in program_db_rows]
+        selected_id_placeholders = ", ".join("?" for _ in selected_program_ids)
+        period_sql = "SELECT * FROM program_periods"
+        occurrence_columns = "*" if include_occurrences else PROGRAM_SUMMARY_OCCURRENCE_COLUMNS
+        occurrence_sql = f"SELECT {occurrence_columns} FROM program_occurrences"
+        if selected_program_ids:
+            period_sql += f" WHERE program_id IN ({selected_id_placeholders})"
+            occurrence_sql += f" WHERE program_id IN ({selected_id_placeholders})"
+        else:
+            period_sql += " WHERE 1 = 0"
+            occurrence_sql += " WHERE 1 = 0"
+        period_rows = conn.execute(f"{period_sql} ORDER BY start_date, id", selected_program_ids).fetchall()
+        occurrence_rows = conn.execute(f"{occurrence_sql} ORDER BY original_date, id", selected_program_ids).fetchall()
     periods_grouped: dict[str, list[dict[str, Any]]] = {}
     for row in period_rows:
         periods_grouped.setdefault(row["program_id"], []).append(period_payload(row))
@@ -2314,11 +2371,17 @@ def program_rows(query: str = "") -> list[dict[str, Any]]:
     for row in occurrence_rows:
         grouped.setdefault(row["program_id"], []).append(occurrence_payload(row))
     results = []
-    for row in program_rows:
-        payload = program_payload(row, grouped.get(row["id"], []), periods_grouped.get(row["id"]))
+    for row in program_db_rows:
+        occurrence_values = grouped.get(row["id"], [])
+        payload = program_payload(
+            row,
+            occurrence_values,
+            periods_grouped.get(row["id"]),
+            include_occurrences=include_occurrences,
+        )
         if search:
             matched_ids = matched_occurrence_ids.get(row["id"], set())
-            episode_numbers = import_occurrence_episode_numbers(payload["occurrences"], program_episode_start(payload))
+            episode_numbers = import_occurrence_episode_numbers(occurrence_values, program_episode_start(payload))
             payload["search_hits"] = [
                 {
                     "id": occurrence["id"],
@@ -2326,11 +2389,20 @@ def program_rows(query: str = "") -> list[dict[str, Any]]:
                     "special": occurrence.get("special", ""),
                     "title": occurrence.get("title", ""),
                 }
-                for index, occurrence in enumerate(payload["occurrences"])
+                for index, occurrence in enumerate(occurrence_values)
                 if occurrence["id"] in matched_ids
             ]
         results.append(payload)
     return results
+
+
+def program_summary(program: dict[str, Any]) -> dict[str, Any]:
+    summary = dict(program)
+    summary.pop("occurrences", None)
+    summary.pop("created_at", None)
+    summary.pop("updated_at", None)
+    summary["periods"] = [period_summary(period) for period in summary.get("periods", [])]
+    return summary
 
 
 def program_json_occurrence_item(occurrence: dict[str, Any], freeze_effective_date: bool) -> dict[str, Any]:
@@ -3134,7 +3206,7 @@ async def api_release_detail(release_id: str) -> dict[str, Any]:
 
 @app.get("/api/programs")
 async def api_programs(q: str = "") -> dict[str, Any]:
-    return {"programs": program_rows(q), "q": q.strip()}
+    return {"programs": program_rows(q, include_occurrences=False), "q": q.strip()}
 
 
 @app.get("/api/programs/calendar")
@@ -3147,9 +3219,14 @@ async def api_program_calendar(start: str = "", end: str = "") -> dict[str, Any]
         range_end -= timedelta(days=1)
     if range_end < range_start:
         raise HTTPException(400, "日历结束日期不能早于开始日期")
-    programs = program_rows()
+    programs = program_rows(include_occurrences=True)
     events = [event for program in programs for event in program_calendar_events(program, range_start, range_end)]
-    return {"events": events, "programs": programs, "start": range_start.isoformat(), "end": range_end.isoformat()}
+    return {
+        "events": events,
+        "programs": [program_summary(program) for program in programs],
+        "start": range_start.isoformat(),
+        "end": range_end.isoformat(),
+    }
 
 
 @app.get("/api/eventernote/events")
@@ -3180,7 +3257,7 @@ async def api_eventernote_events(from_date: str = "", to_date: str = "") -> dict
 
 @app.get("/api/programs/{program_id}/occurrences")
 async def api_public_program_occurrences(program_id: str, start: str = "", end: str = "") -> dict[str, Any]:
-    program = next((item for item in program_rows() if item["id"] == program_id), None)
+    program = next((item for item in program_rows(program_ids={program_id}) if item["id"] == program_id), None)
     if not program:
         raise HTTPException(404, "节目不存在")
     return program_occurrence_list(program, start, end)
@@ -3188,7 +3265,7 @@ async def api_public_program_occurrences(program_id: str, start: str = "", end: 
 
 @app.get("/api/programs/{program_id}")
 async def api_program_detail(program_id: str) -> dict[str, Any]:
-    program = next((item for item in program_rows() if item["id"] == program_id), None)
+    program = next((item for item in program_rows(program_ids={program_id}, include_occurrences=False) if item["id"] == program_id), None)
     if not program:
         raise HTTPException(404, "节目不存在")
     return {"program": program}
@@ -3384,17 +3461,24 @@ async def api_program_json_template(request: Request) -> dict[str, Any]:
 @app.get("/api/admin/programs/{program_id}/export")
 async def api_export_program(program_id: str, request: Request) -> dict[str, Any]:
     require_api_admin(request)
-    programs = program_rows()
-    program = next((item for item in programs if item["id"] == program_id), None)
-    if not program:
+    summaries = program_rows(include_occurrences=False)
+    summary = next((item for item in summaries if item["id"] == program_id), None)
+    if not summary:
         raise HTTPException(404, "节目不存在")
     try:
-        if program.get("parent_id"):
-            parent_program = next((item for item in programs if item["id"] == program["parent_id"]), None)
+        if summary.get("parent_id"):
+            parent_program = next((item for item in summaries if item["id"] == summary["parent_id"]), None)
             if not parent_program:
                 raise ValueError("子节目所属的主节目不存在")
+            program = next(item for item in program_rows(program_ids={program_id}) if item["id"] == program_id)
             return program_json_export(program, [program], "subprogram", parent_program)
-        program_group = [item for item in programs if item["id"] == program["id"] or item.get("parent_id") == program["id"]]
+        program_ids = {
+            item["id"]
+            for item in summaries
+            if item["id"] == summary["id"] or item.get("parent_id") == summary["id"]
+        }
+        program_group = program_rows(program_ids=program_ids)
+        program = next(item for item in program_group if item["id"] == program_id)
         return program_json_export(program, program_group)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -3489,7 +3573,10 @@ async def api_import_program(request: Request) -> dict[str, Any]:
     imported_occurrences = sum(len(entry["occurrences"]) for entry in prepared)
     action = "覆盖节目" if overwrite else "导入节目"
     log_database_activity("program", f"{action}：{root_program_values['title']}（{len(prepared)} 个节目，{imported_occurrences} 期）")
-    program = next(item for item in program_rows() if item["id"] == root_program_values["id"])
+    program = next(item for item in program_rows(
+        program_ids={root_program_values["id"]},
+        include_occurrences=False,
+    ) if item["id"] == root_program_values["id"])
     return {
         "program": program,
         "warnings": warnings,
@@ -3521,7 +3608,7 @@ async def api_create_program(request: Request) -> dict[str, Any]:
     with db() as conn:
         insert_program_row(conn, values)
     log_database_activity("program", f"新增节目：{values['title']}")
-    program = next(item for item in program_rows() if item["id"] == values["id"])
+    program = next(item for item in program_rows(program_ids={values["id"]}, include_occurrences=False) if item["id"] == values["id"])
     return {"program": program}
 
 
@@ -3567,7 +3654,7 @@ async def api_update_program(program_id: str, request: Request) -> dict[str, Any
         backfill_individual_occurrence_anchors(conn, program_id, old_periods, values["periods"])
         replace_program_periods(conn, program_id, values["periods"], values["updated_at"])
     log_database_activity("program", f"更新节目：{values['title']}")
-    program = next(item for item in program_rows() if item["id"] == program_id)
+    program = next(item for item in program_rows(program_ids={program_id}, include_occurrences=False) if item["id"] == program_id)
     return {"program": program}
 
 
@@ -3599,7 +3686,7 @@ async def api_update_auto_generation(program_id: str, request: Request) -> dict[
     if not isinstance(payload, dict) or "auto_generate" not in payload:
         raise HTTPException(400, "自动生成设置无效")
     auto_generate = boolean_value(payload["auto_generate"], True)
-    program = next((item for item in program_rows() if item["id"] == program_id), None)
+    program = next((item for item in program_rows(program_ids={program_id}) if item["id"] == program_id), None)
     if not program:
         raise HTTPException(404, "节目不存在")
     with db() as conn:
@@ -3647,7 +3734,7 @@ def program_occurrence_list(program: dict[str, Any], start: str = "", end: str =
 
 
 def hydrated_program_occurrence(program_id: str, occurrence_id: int) -> dict[str, Any] | None:
-    program = next((item for item in program_rows() if item["id"] == program_id), None)
+    program = next((item for item in program_rows(program_ids={program_id}) if item["id"] == program_id), None)
     if not program:
         return None
     return next(
@@ -3659,7 +3746,7 @@ def hydrated_program_occurrence(program_id: str, occurrence_id: int) -> dict[str
 @app.get("/api/admin/programs/{program_id}/occurrences")
 async def api_program_occurrences(program_id: str, request: Request, start: str = "", end: str = "") -> dict[str, Any]:
     require_api_admin(request)
-    program = next((item for item in program_rows() if item["id"] == program_id), None)
+    program = next((item for item in program_rows(program_ids={program_id}) if item["id"] == program_id), None)
     if not program:
         raise HTTPException(404, "节目不存在")
     return program_occurrence_list(program, start, end)
@@ -3678,7 +3765,7 @@ async def api_create_occurrence(program_id: str, request: Request) -> dict[str, 
         values = normalized_occurrence(payload)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    program_data = next((item for item in program_rows() if item["id"] == program_id), None)
+    program_data = next((item for item in program_rows(program_ids={program_id}) if item["id"] == program_id), None)
     if not program_data:
         raise HTTPException(404, "节目不存在")
     try:
@@ -3756,7 +3843,7 @@ async def api_update_occurrence(program_id: str, occurrence_id: int, request: Re
         raise HTTPException(400, "请求格式无效") from exc
     if not isinstance(payload, dict):
         raise HTTPException(400, "请求格式无效")
-    program_data = next((item for item in program_rows() if item["id"] == program_id), None)
+    program_data = next((item for item in program_rows(program_ids={program_id}) if item["id"] == program_id), None)
     if not program_data:
         raise HTTPException(404, "节目不存在")
     with db() as conn:

@@ -3250,7 +3250,8 @@ footer {
   position: absolute;
   z-index: 4;
   top: 5px;
-  right: 6px;
+  right: auto;
+  left: 6px;
   display: inline-flex;
   width: 26px;
   height: 26px;
@@ -3266,8 +3267,8 @@ footer {
   line-height: 1;
   opacity: 0;
   pointer-events: none;
-  transform: translateY(-2px);
-  transition: opacity 140ms ease, transform 140ms ease, border-color 140ms ease, color 140ms ease;
+  transform: translateY(-3px) scale(.94);
+  transition: opacity 180ms ease, transform 180ms ease, border-color 180ms ease, color 180ms ease;
   visibility: hidden;
 }
 
@@ -3275,7 +3276,7 @@ footer {
 .program-calendar .fc-daygrid-day:focus-within .program-calendar-day-screenshot {
   opacity: 1;
   pointer-events: auto;
-  transform: translateY(0);
+  transform: translateY(0) scale(1);
   visibility: visible;
 }
 
@@ -3294,13 +3295,13 @@ footer {
   }
 
   .program-calendar .fc-daygrid-day-number {
-    padding-right: 39px;
+    padding-left: 39px;
   }
 }
 
 .program-calendar .fc-daygrid-day:hover .fc-daygrid-day-number,
 .program-calendar .fc-daygrid-day:focus-within .fc-daygrid-day-number {
-  padding-right: 39px;
+  padding-left: 39px;
 }
 
 .program-calendar .fc-daygrid-day.fc-day-today {
@@ -6068,6 +6069,7 @@ html[data-theme="mocha"] .dp__theme_dark {
 
   .program-calendar .fc-daygrid-day-number {
     padding-right: clamp(9px, .6vw, 12px);
+    padding-left: clamp(9px, .6vw, 12px);
     white-space: nowrap;
   }
 

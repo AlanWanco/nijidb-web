@@ -4864,6 +4864,11 @@ html[data-theme="mocha"] .dp__theme_dark {
   align-items: center;
 }
 
+.program-editor-header-actions {
+  align-items: center;
+  justify-content: flex-end;
+}
+
 .program-editor-danger-actions {
   display: flex;
   flex-wrap: wrap;
@@ -6309,6 +6314,16 @@ html[data-theme="mocha"] .dp__theme_dark {
   .settings-heading-actions,
   .program-editor-danger-actions {
     width: 100%;
+  }
+
+  .program-editor .form-heading {
+    flex-wrap: wrap;
+  }
+
+  .program-editor-header-actions {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-end;
   }
 
   .program-admin-actions {

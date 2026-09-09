@@ -1445,9 +1445,10 @@ onUnmounted(() => {
       <div class="form-heading">
          <span class="form-number">{{ editingId && !form.parent_id ? "02" : "01" }}</span>
          <div><p class="form-kicker">MANUAL ENTRY</p><h2>{{ editingId ? t("编辑节目") : t("添加节目") }}</h2></div>
-         <div v-if="editingId" class="form-heading-actions">
-            <button v-if="form.parent_id" type="button" class="secondary program-action-button program-subprogram-link program-subprogram-back" @click="returnToParentProgram">↩ {{ t("返回主节目") }}</button>
-            <button v-else type="button" class="secondary program-action-button" @click="newSubprogramFromEditor">{{ t("添加子节目") }}</button>
+         <div class="form-heading-actions program-editor-header-actions">
+            <button type="button" class="secondary program-action-button" :title="t('选择一个节目 JSON，先预览节目、排期和全部单集，再确认导入')" @click="openImportPicker">{{ t("导入 JSON") }}</button>
+            <button type="button" class="secondary program-action-button" :title="t('导出当前节目设置；未保存节目时下载说明模板')" @click="exportProgramJson">{{ t("导出 JSON") }}</button>
+            <button v-if="editingId && form.parent_id" type="button" class="secondary program-action-button program-subprogram-link program-subprogram-back" @click="returnToParentProgram">↩ {{ t("返回主节目") }}</button>
          </div>
       </div>
 
@@ -1531,7 +1532,7 @@ onUnmounted(() => {
                  <span aria-hidden="true">↗</span>
                </button>
              </div>
-             <button v-else type="button" class="secondary program-action-button program-subprogram-add" @click="newSubprogramFromEditor">＋ {{ t("添加子节目") }}</button>
+             <button type="button" class="secondary program-action-button program-subprogram-add" @click="newSubprogramFromEditor">＋ {{ t("添加子节目") }}</button>
            </div>
        </div>
 
@@ -1604,10 +1605,7 @@ onUnmounted(() => {
 
         <div class="actions program-editor-actions">
             <button class="program-action-button" :disabled="saving">{{ saving ? t("保存中……") : editingId ? t("保存修改") : t("添加节目") }}</button>
-            <button type="button" class="secondary program-action-button" :title="t('导出当前节目设置；未保存节目时下载说明模板')" @click="exportProgramJson">{{ t("导出 JSON") }}</button>
-            <button type="button" class="secondary program-action-button" :title="t('选择一个节目 JSON，先预览节目、排期和全部单集，再确认导入')" @click="openImportPicker">{{ t("导入 JSON") }}</button>
            <span class="program-editor-danger-actions">
-              <button type="button" class="secondary program-action-button" :title="t('下载带字段说明和导入规则的 JSON 模板')" @click="downloadTemplateJson">{{ t("下载 JSON 说明模板") }}</button>
               <button v-if="editingId" type="button" class="danger program-action-button" :disabled="deletingId === editingId" @click="deleteProgram({ id: editingId, title: form.title })">{{ deletingId === editingId ? t("删除中……") : t("删除节目") }}</button>
            </span>
            <input ref="importFileInput" class="program-json-file-input" type="file" accept=".json,application/json" @change="handleImportFile">

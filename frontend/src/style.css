@@ -4883,13 +4883,17 @@ html[data-theme="mocha"] .dp__theme_dark {
 .settings-card .program-editor-actions {
   position: sticky;
   z-index: 35;
-  bottom: 0;
+  right: 0;
+  bottom: 16px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 27px 0 0 auto;
   border: 1px solid color-mix(in srgb, var(--line) 76%, var(--accent));
-  border-bottom: 0;
-  border-radius: 17px 17px 0 0;
-  padding: 12px clamp(20px, 4vw, 34px) calc(12px + env(safe-area-inset-bottom));
+  border-radius: 999px;
+  padding: 8px 12px;
   background: color-mix(in srgb, var(--surface) 96%, var(--accent-soft));
-  box-shadow: 0 -8px 25px #1b1d3818;
+  box-shadow: 0 10px 25px #1b1d3828;
+  backdrop-filter: blur(12px);
 }
 
 .settings-card .program-editor-actions .program-editor-danger-actions {

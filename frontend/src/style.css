@@ -2654,6 +2654,14 @@ footer {
   border-radius: 50%;
 }
 
+.program-category-dot.official {
+  background: #5979ad;
+}
+
+.program-category-dot.personal {
+  background: #5b9478;
+}
+
 .program-view-switch {
   display: inline-flex;
   gap: 4px;

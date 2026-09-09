@@ -45,6 +45,10 @@ const deliveryOptions = [
   { value: "recorded", label: "录播" },
   { value: "event", label: "Event" },
 ];
+const programCategoryOptions = [
+  { value: "official", label: "官方节目" },
+  { value: "personal", label: "个人节目" },
+];
 const defaultDeliveryValues = ["live", "recorded"];
 const router = useRouter();
 const route = useRoute();
@@ -65,11 +69,17 @@ function castValuesFromQuery(value) {
   return names;
 }
 
+function programCategoryValuesFromQuery(value) {
+  const categories = queryValues(value).map(item => item.toLowerCase());
+  return [...new Set(categories.filter(category => programCategoryOptions.some(option => option.value === category)))];
+}
+
 function filtersFromQuery(query) {
   const hasDelivery = Object.prototype.hasOwnProperty.call(query, "delivery");
   const deliveryValues = queryValues(query.delivery).map(value => value.toLowerCase());
   return {
     cast: castValuesFromQuery(query.cast),
+    category: programCategoryValuesFromQuery(query.category),
     delivery: !hasDelivery
       ? [...defaultDeliveryValues]
       : deliveryValues.includes("none")
@@ -85,6 +95,7 @@ function sameValues(left, right) {
 const filters = reactive(filtersFromQuery(route.query));
 const today = new Date();
 const castFilterDetails = ref(null);
+const programCategoryFilterDetails = ref(null);
 const adminAuthenticated = ref(false);
 const editAccessNotice = ref("");
 let calendarTouchStart = null;
@@ -132,12 +143,23 @@ const filteredProgramCount = computed(() => new Set(
     .map(event => event.extendedProps?.programId),
 ).size);
 const allCastSelected = computed(() => filters.cast.length === NIJIGASAKI_CAST.length);
+const allProgramCategoriesSelected = computed(() => filters.category.length === programCategoryOptions.length);
 const deliveryFilterActive = computed(() => filters.delivery.length !== defaultDeliveryValues.length
   || defaultDeliveryValues.some(value => !filters.delivery.includes(value)));
-const activeFilterCount = computed(() => Number(filters.cast.length > 0 && !allCastSelected.value) + Number(deliveryFilterActive.value));
+const activeFilterCount = computed(() => Number(filters.cast.length > 0 && !allCastSelected.value)
+  + Number(filters.category.length > 0 && !allProgramCategoriesSelected.value)
+  + Number(deliveryFilterActive.value));
 const castFilterLabel = computed(() => {
   if (!filters.cast.length || allCastSelected.value) return t("全部 Cast");
   return t("已选 {count} 位", { count: filters.cast.length });
+});
+const programCategoryFilterLabel = computed(() => {
+  if (!filters.category.length || allProgramCategoriesSelected.value) return t("全部节目");
+  return filters.category
+    .map(category => programCategoryOptions.find(option => option.value === category))
+    .filter(Boolean)
+    .map(option => t(option.label))
+    .join("、");
 });
 const visibleMonthLabel = computed(() => {
   const [year, month] = visibleMonth.value.split("-").map(Number);
@@ -211,9 +233,10 @@ watch(eventernoteSelected, enabled => {
   loadEventernoteEvents();
 });
 
-watch(() => [route.query.cast, route.query.delivery], () => {
+watch(() => [route.query.cast, route.query.category, route.query.delivery], () => {
   const nextFilters = filtersFromQuery(route.query);
   if (!sameValues(filters.cast, nextFilters.cast)) filters.cast = nextFilters.cast;
+  if (!sameValues(filters.category, nextFilters.category)) filters.category = nextFilters.category;
   if (!sameValues(filters.delivery, nextFilters.delivery)) filters.delivery = nextFilters.delivery;
 });
 
@@ -221,6 +244,8 @@ watch(filters, () => {
   const nextQuery = { ...route.query };
   if (filters.cast.length && !allCastSelected.value) nextQuery.cast = filters.cast.join(",");
   else delete nextQuery.cast;
+  if (filters.category.length && !allProgramCategoriesSelected.value) nextQuery.category = filters.category.join(",");
+  else delete nextQuery.category;
   if (!filters.delivery.length) nextQuery.delivery = "none";
   else if (sameValues(filters.delivery, defaultDeliveryValues)) delete nextQuery.delivery;
   else nextQuery.delivery = filters.delivery.join(",");
@@ -424,8 +449,9 @@ function eventMatchesFilters(event) {
   if (!eventHasNijigasakiParticipant(event)) return false;
   if (props.isEventernote) {
     if (!filters.delivery.includes("event")) return false;
-  } else if (!filters.delivery.includes(props.delivery)) {
-    return false;
+  } else {
+    if (!filters.delivery.includes(props.delivery)) return false;
+    if (filters.category.length && !allProgramCategoriesSelected.value && !filters.category.includes(props.category)) return false;
   }
   if (!filters.cast.length || allCastSelected.value) return true;
   const cast = eventCast(event);
@@ -467,6 +493,7 @@ function eventStateClass(event) {
 
 function clearFilters() {
   filters.cast = [];
+  filters.category = [];
   filters.delivery = [...defaultDeliveryValues];
 }
 
@@ -484,9 +511,28 @@ function clearCastFilter() {
   filters.cast = [];
 }
 
+function toggleProgramCategoryFilter(category) {
+  filters.category = filters.category.includes(category)
+    ? filters.category.filter(item => item !== category)
+    : [...filters.category, category];
+}
+
+function selectAllProgramCategories() {
+  filters.category = programCategoryOptions.map(option => option.value);
+}
+
+function clearProgramCategoryFilter() {
+  filters.category = [];
+}
+
 function closeCastFilter(event) {
   if (!castFilterDetails.value?.open || castFilterDetails.value.contains(event.target)) return;
   castFilterDetails.value.open = false;
+}
+
+function closeProgramCategoryFilter(event) {
+  if (!programCategoryFilterDetails.value?.open || programCategoryFilterDetails.value.contains(event.target)) return;
+  programCategoryFilterDetails.value.open = false;
 }
 
 function updateVisibleMonth(value) {
@@ -1021,9 +1067,11 @@ onMounted(() => {
     screenshotRendererLoader = null;
   });
   document.addEventListener("click", closeCastFilter);
+  document.addEventListener("click", closeProgramCategoryFilter);
 });
 onUnmounted(() => {
   document.removeEventListener("click", closeCastFilter);
+  document.removeEventListener("click", closeProgramCategoryFilter);
   window.cancelAnimationFrame(calendarAnimationFrame);
   window.clearTimeout(calendarAnimationTimer);
   window.clearTimeout(screenshotMessageTimer);
@@ -1068,6 +1116,21 @@ onUnmounted(() => {
                     </div>
                     <div class="program-cast-tags">
                       <button v-for="member in NIJIGASAKI_CAST" :key="member.name" type="button" class="program-cast-tag" :class="{ selected: filters.cast.includes(member.name) }" :aria-pressed="filters.cast.includes(member.name)" @click="toggleCastFilter(member.name)"><i class="program-cast-dot" :style="{ backgroundColor: member.color }"></i>{{ member.name }}</button>
+                    </div>
+                  </div>
+                </details>
+              </div>
+              <div class="program-calendar-filter program-cast-filter program-category-filter">
+                <span class="program-calendar-filter-label">{{ t("节目类型") }}</span>
+                <details ref="programCategoryFilterDetails" class="program-cast-filter-details">
+                  <summary class="program-cast-filter-summary"><strong>{{ programCategoryFilterLabel }}</strong><b>⌄</b></summary>
+                  <div class="program-cast-filter-panel">
+                    <div class="program-cast-filter-actions">
+                      <button type="button" class="secondary program-action-button" @click="selectAllProgramCategories">{{ t("全选") }}</button>
+                      <button type="button" class="secondary program-action-button" @click="clearProgramCategoryFilter">{{ t("清空") }}</button>
+                    </div>
+                    <div class="program-cast-tags">
+                      <button v-for="option in programCategoryOptions" :key="option.value" type="button" class="program-cast-tag" :class="{ selected: filters.category.includes(option.value) }" :aria-pressed="filters.category.includes(option.value)" @click="toggleProgramCategoryFilter(option.value)"><i class="program-cast-dot program-category-dot" :class="option.value"></i>{{ t(option.label) }}</button>
                     </div>
                   </div>
                 </details>

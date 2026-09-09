@@ -4887,6 +4887,7 @@ html[data-theme="mocha"] .dp__theme_dark {
 .program-editor-header-actions.has-parent {
   align-items: flex-end;
   flex-direction: column;
+  gap: 18px;
 }
 
 .program-editor-json-actions {

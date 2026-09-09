@@ -5638,13 +5638,22 @@ html[data-theme="mocha"] .dp__theme_dark {
   overflow: visible;
 }
 
-.program-admin-page.occurrence-focused .occurrence-list {
+.program-admin-page.occurrence-focused .occurrence-list-column {
   min-height: 0;
   position: sticky;
   top: 104px;
   align-self: start;
+  display: flex;
   height: min(870px, calc(100vh - 128px));
   max-height: min(870px, calc(100vh - 128px));
+  flex-direction: column;
+}
+
+.program-admin-page.occurrence-focused .occurrence-list {
+  min-height: 0;
+  position: static;
+  flex: 1 1 auto;
+  max-height: none;
 }
 
 .program-occurrence-editor .section-heading {
@@ -6394,6 +6403,14 @@ html[data-theme="mocha"] .dp__theme_dark {
 
   .program-admin-page.occurrence-focused > .program-occurrence-editor .occurrence-editor-layout {
     grid-template-columns: 1fr;
+  }
+
+  .program-admin-page.occurrence-focused .occurrence-list-column {
+    position: static;
+    top: auto;
+    display: block;
+    height: auto;
+    max-height: none;
   }
 
   .program-admin-page.occurrence-focused .occurrence-list {

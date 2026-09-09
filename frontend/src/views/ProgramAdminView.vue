@@ -1125,8 +1125,15 @@ function newOccurrence() {
     nextTick(() => scrollOccurrenceListTo(pending));
     return;
   }
+  const lastOccurrence = [...occurrenceRows.value].reverse().find(row => !row._draft && row.status !== "deleted");
+  const originalDate = lastOccurrence?.original_date || lastOccurrence?.date || "";
+  const originalTime = lastOccurrence?.original_time || lastOccurrence?.time || "";
   const draft = {
     ...blankOccurrence(),
+    original_date: originalDate,
+    original_time: originalTime,
+    effective_date: originalDate,
+    timezone: lastOccurrence?.timezone || form.periods[0]?.timezone || "",
     _draft: true,
     _draftKey: `draft-${Date.now()}-${occurrenceDraftSequence += 1}`,
     episode: nextOccurrenceEpisode(),

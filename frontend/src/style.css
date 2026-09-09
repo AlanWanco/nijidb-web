@@ -4025,6 +4025,7 @@ footer {
 
 .program-editor {
   margin-bottom: 18px;
+  padding-bottom: 96px;
 }
 
 .program-form-grid {
@@ -4877,6 +4878,26 @@ html[data-theme="mocha"] .dp__theme_dark {
 
 .program-editor-actions {
   align-items: center;
+}
+
+.settings-card .program-editor-actions {
+  position: fixed;
+  z-index: 35;
+  right: max(17px, calc((100% - 1120px) / 2 + 17px));
+  bottom: 0;
+  left: max(17px, calc((100% - 1120px) / 2 + 17px));
+  margin: 0;
+  border: 1px solid color-mix(in srgb, var(--line) 76%, var(--accent));
+  border-bottom: 0;
+  border-radius: 17px 17px 0 0;
+  padding: 12px clamp(20px, 4vw, 34px) calc(12px + env(safe-area-inset-bottom));
+  background: color-mix(in srgb, var(--surface) 96%, var(--accent-soft));
+  box-shadow: 0 -8px 25px #1b1d3818;
+}
+
+.settings-card .program-editor-actions .program-editor-danger-actions {
+  width: auto;
+  margin-left: auto;
 }
 
 .program-editor-header-actions {
@@ -6372,6 +6393,13 @@ html[data-theme="mocha"] .dp__theme_dark {
     width: 100%;
     margin-left: 0;
     justify-content: flex-end;
+  }
+
+  .settings-card .program-editor-actions {
+    right: 16px;
+    left: 16px;
+    padding-right: 16px;
+    padding-left: 16px;
   }
 
   .program-admin-actions {

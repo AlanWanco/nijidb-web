@@ -4884,6 +4884,17 @@ html[data-theme="mocha"] .dp__theme_dark {
   justify-content: flex-end;
 }
 
+.program-editor-header-actions.has-parent {
+  align-items: flex-end;
+  flex-direction: column;
+}
+
+.program-editor-json-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+
 .program-editor-danger-actions {
   display: flex;
   flex-wrap: wrap;

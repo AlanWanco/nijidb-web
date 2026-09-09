@@ -4129,6 +4129,7 @@ footer {
 .program-subprogram-link {
   display: inline-flex;
   align-items: center;
+  text-decoration: none;
   gap: 8px;
   min-width: 0;
   border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--line));
@@ -5502,6 +5503,10 @@ html[data-theme="mocha"] .dp__theme_dark {
 
 .program-readonly-periods > .eyebrow {
   margin-bottom: 13px;
+}
+
+.program-readonly-subprogram-panel {
+  margin-top: 28px;
 }
 
 .program-readonly-occurrences {

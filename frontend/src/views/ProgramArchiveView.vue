@@ -20,6 +20,7 @@ const timezoneLabels = {
 const route = useRoute();
 const router = useRouter();
 const programs = ref([]);
+const subprograms = ref([]);
 const occurrences = ref([]);
 
 function queryValue(value) {
@@ -203,10 +204,12 @@ async function loadPrograms() {
   loading.value = true;
   error.value = "";
   try {
+    subprograms.value = [];
     if (detailMode.value) {
       const data = await api(`/api/programs/${encodeURIComponent(programId.value)}`);
       if (requestId !== programSearchRequest) return;
       programs.value = data.program ? [data.program] : [];
+      subprograms.value = data.subprograms || [];
     } else {
       const params = new URLSearchParams();
       if (keyword.value.trim()) params.set("q", keyword.value.trim());
@@ -214,6 +217,7 @@ async function loadPrograms() {
       const data = await api(`/api/programs${query ? `?${query}` : ""}`);
       if (requestId !== programSearchRequest) return;
       programs.value = data.programs || [];
+      subprograms.value = [];
     }
     if (detailMode.value && !selectedProgram.value) error.value = t("节目不存在或已被删除");
     await loadOccurrences();
@@ -392,6 +396,19 @@ onUnmounted(() => window.clearTimeout(programSearchTimer));
             </ul>
           </div>
         </div>
+        <section v-if="!selectedProgram.parent_id" class="program-subprogram-panel program-readonly-subprogram-panel">
+          <div class="program-subprogram-panel-heading">
+            <div><span class="program-field-label">{{ t("子节目") }}</span><small>{{ subprograms.length ? t("选择子节目查看详情") : t("当前主节目还没有子节目") }}</small></div>
+            <span class="program-subprogram-count">{{ subprograms.length }}</span>
+          </div>
+          <div v-if="subprograms.length" class="program-subprogram-list">
+            <RouterLink v-for="subprogram in subprograms" :key="subprogram.id" class="program-subprogram-link" :to="{ path: `/programs/archive/${encodeURIComponent(subprogram.id)}`, query: route.query }">
+              <strong>{{ subprogram.subprogram_name }}</strong>
+              <small>{{ scheduleLabel(subprogram) }} · {{ t("已播") }} {{ subprogram.episode_count }} {{ t("期") }}</small>
+              <span aria-hidden="true">↗</span>
+            </RouterLink>
+          </div>
+        </section>
          <section class="program-readonly-occurrences">
            <div class="section-heading">
               <div><p class="eyebrow">EPISODE INDEX</p><h3>{{ t("单集节目列表") }}</h3></div>

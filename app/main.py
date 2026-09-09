@@ -3268,7 +3268,13 @@ async def api_program_detail(program_id: str) -> dict[str, Any]:
     program = next((item for item in program_rows(program_ids={program_id}, include_occurrences=False) if item["id"] == program_id), None)
     if not program:
         raise HTTPException(404, "节目不存在")
-    return {"program": program}
+    subprograms: list[dict[str, Any]] = []
+    if not program["parent_id"]:
+        with db() as conn:
+            subprogram_ids = {row["id"] for row in conn.execute("SELECT id FROM programs WHERE parent_id = ?", (program_id,)).fetchall()}
+        if subprogram_ids:
+            subprograms = program_rows(include_occurrences=False, program_ids=subprogram_ids)
+    return {"program": program, "subprograms": subprograms}
 
 
 @app.get("/api/auth/session")

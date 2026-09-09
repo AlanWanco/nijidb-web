@@ -91,6 +91,19 @@ function scheduleLabel(program) {
   return periodScheduleLabel(periods[0]);
 }
 
+function programDateRangeLabel(program) {
+  if (!program) return "";
+  const start = String(program.start_date || "").trim();
+  if (!start) return t("未填写");
+  if (program.status !== "completed") return start;
+  const periodEnds = (program.periods || [])
+    .map(period => String(period.end_date || "").trim())
+    .filter(Boolean)
+    .sort();
+  const end = String(program.end_date || "").trim() || periodEnds[periodEnds.length - 1] || start;
+  return `${start} → ${end}`;
+}
+
 function timezoneLabel(value) {
   return value ? t(timezoneLabels[value] || value) : t("东京时间");
 }
@@ -342,7 +355,7 @@ onUnmounted(() => window.clearTimeout(programSearchTimer));
             <div>
                 <div class="program-admin-tags"><span class="program-kind" :class="`program-kind-${program.category}`">{{ programType(program) }}</span><span v-if="program.parent_id" class="program-parent-title-key" :title="program.title">{{ program.title }}</span><span class="program-status" :class="`status-${program.status}`">{{ programStatus(program) }}</span></div>
                 <h3>{{ program.parent_id ? program.subprogram_name : program.title }}</h3>
-                <p>{{ scheduleLabel(program) }} · {{ t("已播") }} {{ program.episode_count }} {{ t("期") }}</p>
+                <p>{{ t("节目日期") }}：{{ programDateRangeLabel(program) }} · {{ scheduleLabel(program) }} · {{ t("已播") }} {{ program.episode_count }} {{ t("期") }}</p>
              </div>
              <span class="program-readonly-arrow" aria-hidden="true">→</span>
             </RouterLink>

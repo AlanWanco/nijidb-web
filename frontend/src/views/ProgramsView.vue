@@ -319,6 +319,25 @@ function scheduleLabel(program) {
   return t("未设置排期");
 }
 
+function programDateRangeLabel(program) {
+  if (!program) return "";
+  const start = String(program.start_date || "").trim();
+  if (!start) return t("未填写");
+  if (program.status !== "completed") return start;
+  const periodEnds = (program.periods || [])
+    .map(period => String(period.end_date || "").trim())
+    .filter(Boolean)
+    .sort();
+  const end = String(program.end_date || "").trim() || periodEnds[periodEnds.length - 1] || start;
+  return `${start} → ${end}`;
+}
+
+function eventProgramDateRange(event) {
+  if (event.extendedProps?.isEventernote) return "";
+  const program = programs.value.find(item => item.id === event.extendedProps?.programId);
+  return programDateRangeLabel(program);
+}
+
 function formatLabel(program) {
   return `${program.format === "radio" ? t("广播") : t("有画面")} · ${program.platform === "tv" ? t("电视台") : t("网络")} · ${program.delivery === "live" ? t("直播") : t("录播")}`;
 }
@@ -1203,7 +1222,7 @@ onUnmounted(() => {
              <button v-for="event in group.events" :key="event.id" type="button" class="program-list-event" :class="eventStateClass(event)" @click="openEvent(event)">
                <span v-if="eventCast(event).length" class="program-list-cast-line" :aria-label="t('出场成员')"><i v-for="member in eventCast(event)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
                <span class="program-list-time">{{ eventTime(event) || t("全天") }}</span>
-               <span class="program-list-main"><strong>{{ event.title }}</strong><small>{{ eventDeliveryLabel(event) }} · {{ occurrenceAirStatus(event.extendedProps) }}</small></span>
+               <span class="program-list-main"><strong>{{ event.title }}</strong><small>{{ eventDeliveryLabel(event) }} · {{ occurrenceAirStatus(event.extendedProps) }}</small><small v-if="eventProgramDateRange(event)">{{ t("节目日期") }}：{{ eventProgramDateRange(event) }}</small></span>
                <span v-if="eventCast(event).length" class="program-list-cast" :aria-label="t('出场成员')"><i v-for="member in eventCast(event)" :key="member.name" :style="{ '--cast-color': member.color }" :title="member.name"></i></span>
               <span class="program-list-arrow" aria-hidden="true">→</span>
             </button>

@@ -300,6 +300,19 @@ function scheduleLabel(program) {
   return periodScheduleLabel(periods[0]);
 }
 
+function programDateRangeLabel(program) {
+  if (!program) return "";
+  const start = String(program.start_date || "").trim();
+  if (!start) return t("未填写");
+  if (program.status !== "completed") return start;
+  const periodEnds = (program.periods || [])
+    .map(period => String(period.end_date || "").trim())
+    .filter(Boolean)
+    .sort();
+  const end = String(program.end_date || "").trim() || periodEnds[periodEnds.length - 1] || start;
+  return `${start} → ${end}`;
+}
+
 function periodScheduleLabel(period) {
   const time = period.schedule_time ? ` ${period.schedule_time}` : "";
   if (period.frequency === "single") return `${t("单次")}${time}`;
@@ -1470,7 +1483,7 @@ onUnmounted(() => {
          <div>
              <div class="program-admin-tags"><span class="program-kind">{{ program.parent_id ? t("子节目") : t("主节目") }}</span><span v-if="program.parent_id" class="program-parent-title-key" :title="program.title">{{ program.title }}</span><span class="program-status" :class="`status-${program.status}`">{{ programStatus(program) }}</span><span v-if="program.update_status === 'updated'" class="program-update-status">{{ updateStatusLabel(program) }}</span><span class="program-type-label" :class="`program-type-${program.category}`">{{ programType(program) }} · {{ formatLabel(program) }}</span></div>
            <h3>{{ program.parent_id ? program.subprogram_name : program.title }}</h3>
-            <p>{{ scheduleLabel(program) }} · {{ t("已播") }} {{ program.episode_count }} {{ t("期") }}</p>
+            <p>{{ t("节目日期") }}：{{ programDateRangeLabel(program) }} · {{ scheduleLabel(program) }} · {{ t("已播") }} {{ program.episode_count }} {{ t("期") }}</p>
          </div>
         <div class="program-admin-actions">
           <button type="button" class="secondary program-action-button" @click="editProgram(program)">{{ t("编辑") }}</button>

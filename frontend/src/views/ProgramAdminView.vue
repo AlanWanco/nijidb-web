@@ -1486,7 +1486,7 @@ onUnmounted(() => {
          <div class="form-heading-actions program-editor-header-actions">
             <button type="button" class="secondary program-action-button" :title="t('选择一个节目 JSON，先预览节目、排期和全部单集，再确认导入')" @click="openImportPicker">{{ t("导入 JSON") }}</button>
             <button type="button" class="secondary program-action-button" :title="t('导出当前节目设置；未保存节目时下载说明模板')" @click="exportProgramJson">{{ t("导出 JSON") }}</button>
-            <button v-if="editingId && form.parent_id" type="button" class="secondary program-action-button program-subprogram-link program-subprogram-back" @click="returnToParentProgram">↩ {{ t("返回主节目") }}</button>
+            <button v-if="editingId && form.parent_id" type="button" class="back program-subprogram-back" @click="returnToParentProgram">← {{ t("返回主节目") }}</button>
          </div>
       </div>
 

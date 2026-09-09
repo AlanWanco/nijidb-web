@@ -4178,6 +4178,20 @@ footer {
   white-space: nowrap;
 }
 
+button.program-subprogram-back {
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--accent);
+  box-shadow: none;
+}
+
+button.program-subprogram-back:hover:not(:disabled) {
+  background: transparent;
+  transform: none;
+}
+
 .program-subprogram-add {
   margin-top: 14px;
 }

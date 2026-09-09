@@ -55,6 +55,7 @@ const error = ref("");
 const occurrenceEditingRowKey = ref("");
 let occurrenceAutoSaveTimer = 0;
 let occurrenceAutoSaveQueued = false;
+let occurrenceDraftSequence = 0;
 let occurrenceDraftHydrating = false;
 let occurrenceDraftBaseline = "";
 let toastTimer = 0;
@@ -128,6 +129,8 @@ function blankOccurrence() {
     materialized: false,
     manual: false,
     timezone: "",
+    _draft: false,
+    _draftKey: "",
   };
 }
 
@@ -156,7 +159,7 @@ const relatedSubprograms = computed(() => {
 const generatedOccurrenceCount = computed(() => occurrenceRows.value.filter(row => row.generated).length);
 const materializedOccurrenceCount = computed(() => occurrenceRows.value.filter(row => row.materialized && row.status !== "deleted").length);
 const deletedOccurrenceCount = computed(() => occurrenceRows.value.filter(row => row.status === "deleted").length);
-const adjustedOccurrenceCount = computed(() => occurrenceRows.value.filter(row => !row.generated && !row.materialized && row.status !== "deleted").length);
+const adjustedOccurrenceCount = computed(() => occurrenceRows.value.filter(row => !row._draft && !row.generated && !row.materialized && row.status !== "deleted").length);
 const occurrenceHelp = computed(() => {
   const details = [
     materializedOccurrenceCount.value ? t("{count} 个已播出并保存", { count: materializedOccurrenceCount.value }) : "",
@@ -1041,6 +1044,8 @@ function editOccurrence(row) {
     materialized: Boolean(row.materialized),
     manual: Boolean(row.manual),
     timezone: row.timezone || "",
+    _draft: Boolean(row._draft),
+    _draftKey: row._draftKey || "",
   });
   occurrenceGuestInput.value = "";
   occurrenceAutoSaveState.value = "";
@@ -1052,7 +1057,7 @@ function editOccurrence(row) {
 }
 
 function occurrenceRowKey(row) {
-  return `${row.id || "generated"}-${row.original_date}-${row.original_time || "all-day"}`;
+  return row._draftKey || `${row.id || "generated"}-${row.original_date}-${row.original_time || "all-day"}`;
 }
 
 function setOccurrenceItemRef(row, element) {
@@ -1106,7 +1111,20 @@ async function restoreOccurrencePosition(position) {
 
 function newOccurrence() {
   setActivePanel("occurrences");
-  resetOccurrenceDraft();
+  const pending = occurrenceRows.value.find(row => row._draft);
+  if (pending) {
+    editOccurrence(pending);
+    nextTick(() => scrollOccurrenceListTo(pending));
+    return;
+  }
+  const draft = {
+    ...blankOccurrence(),
+    _draft: true,
+    _draftKey: `draft-${Date.now()}-${occurrenceDraftSequence += 1}`,
+  };
+  occurrenceRows.value = [...occurrenceRows.value, draft];
+  editOccurrence(draft);
+  nextTick(() => scrollOccurrenceListTo(draft));
 }
 
 function leaveOccurrenceFocus() {
@@ -1157,6 +1175,8 @@ function savedOccurrenceRow(previous, saved) {
     materialized: saved.materialized == null ? Boolean(previous?.materialized) : Boolean(saved.materialized),
     manual: typeof saved.manual === "boolean" ? saved.manual : !saved.generated_date && !Boolean(saved.materialized),
     timezone: saved.timezone || previous?.timezone || occurrenceDraft.timezone || form.periods[0]?.timezone || "Asia/Tokyo",
+    _draft: false,
+    _draftKey: "",
     aired: typeof saved.aired === "boolean" ? saved.aired : Boolean(previous?.aired),
   };
 }
@@ -1634,12 +1654,13 @@ onUnmounted(() => {
        <p v-if="occurrenceLoading" class="state">{{ t("正在读取单集排期……") }}</p>
         <div v-else class="occurrence-editor-layout">
            <div ref="occurrenceListRef" class="occurrence-list">
-                <button v-for="row in occurrenceRows" :key="occurrenceRowKey(row)" :ref="element => setOccurrenceItemRef(row, element)" type="button" class="occurrence-list-item" :class="{ selected: occurrenceRowKey(occurrenceDraft) === occurrenceRowKey(row) }" @click="editOccurrence(row)">
+                <button v-for="row in occurrenceRows" :key="occurrenceRowKey(row)" :ref="element => setOccurrenceItemRef(row, element)" type="button" class="occurrence-list-item" :class="{ selected: occurrenceRowKey(occurrenceDraft) === occurrenceRowKey(row), 'is-draft': row._draft }" @click="editOccurrence(row)">
                 <span v-if="occurrenceCast(row).length" class="occurrence-list-cast-line" role="img" :aria-label="`${t('出场成员')}：${occurrenceCast(row).map(member => member.name).join('、')}`" :title="occurrenceCast(row).map(member => member.name).join('、')"><i v-for="member in occurrenceCast(row)" :key="member.name" :style="{ '--cast-color': member.color, backgroundColor: member.color }"></i></span>
-              <span><b>{{ occurrenceEpisodeLabel(row) }}</b><em :class="{ cancelled: row.status === 'cancelled', deleted: row.status === 'deleted', aired: row.aired }">{{ occurrenceStatus(row) }}</em></span>
-             <strong>{{ row.date }}</strong>
+              <span><b>{{ row._draft ? t("新增单集") : occurrenceEpisodeLabel(row) }}</b><em :class="{ cancelled: row.status === 'cancelled', deleted: row.status === 'deleted', aired: row.aired }">{{ row._draft ? t("待填写") : occurrenceStatus(row) }}</em></span>
+             <strong v-if="row.date">{{ row.date }}</strong>
               <small v-if="row.title" class="occurrence-list-title">{{ row.title }}</small>
-                <small>{{ row.status === "deleted" ? t("已删除，不参与生成") : row.generated ? t("自动生成") : row.materialized ? t("已播出并保存") : row.adjusted_date ? `${t("原定")} ${row.original_date}` : t("已单独调整") }}{{ row.guests?.length ? ` · ${t("嘉宾")} ${row.guests.length} ${t("人")}` : "" }}{{ row.absent_members?.length ? ` · ${t("缺席")} ${row.absent_members.length} ${t("人")}` : "" }}</small>
+                <small v-if="row._draft">{{ t("请填写日期后保存") }}</small>
+                <small v-else>{{ row.status === "deleted" ? t("已删除，不参与生成") : row.generated ? t("自动生成") : row.materialized ? t("已播出并保存") : row.adjusted_date ? `${t("原定")} ${row.original_date}` : t("已单独调整") }}{{ row.guests?.length ? ` · ${t("嘉宾")} ${row.guests.length} ${t("人")}` : "" }}{{ row.absent_members?.length ? ` · ${t("缺席")} ${row.absent_members.length} ${t("人")}` : "" }}</small>
                 <small v-if="row.absent_members?.length" class="occurrence-list-absence">{{ t("缺席：") }}{{ row.absent_members.join("、") }}</small>
           </button>
            <p v-if="!occurrenceRows.length" class="muted">{{ t("当前区间没有自动生成的单集，可以手动添加一条记录。") }}</p>

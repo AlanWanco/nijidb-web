@@ -4024,8 +4024,8 @@ footer {
 }
 
 .program-editor {
+  overflow: visible;
   margin-bottom: 18px;
-  padding-bottom: 96px;
 }
 
 .program-form-grid {
@@ -4881,12 +4881,9 @@ html[data-theme="mocha"] .dp__theme_dark {
 }
 
 .settings-card .program-editor-actions {
-  position: fixed;
+  position: sticky;
   z-index: 35;
-  right: max(17px, calc((100% - 1120px) / 2 + 17px));
   bottom: 0;
-  left: max(17px, calc((100% - 1120px) / 2 + 17px));
-  margin: 0;
   border: 1px solid color-mix(in srgb, var(--line) 76%, var(--accent));
   border-bottom: 0;
   border-radius: 17px 17px 0 0;
@@ -6393,13 +6390,6 @@ html[data-theme="mocha"] .dp__theme_dark {
     width: 100%;
     margin-left: 0;
     justify-content: flex-end;
-  }
-
-  .settings-card .program-editor-actions {
-    right: 16px;
-    left: 16px;
-    padding-right: 16px;
-    padding-left: 16px;
   }
 
   .program-admin-actions {

@@ -5717,10 +5717,18 @@ html[data-theme="mocha"] .dp__theme_dark {
   align-items: start;
 }
 
+.occurrence-list-column {
+  min-width: 0;
+}
+
 .occurrence-list {
   max-height: 480px;
   overflow-y: auto;
   border-top: 1px solid var(--line);
+}
+
+.occurrence-add-button {
+  margin-top: 14px;
 }
 
 .occurrence-list-item {

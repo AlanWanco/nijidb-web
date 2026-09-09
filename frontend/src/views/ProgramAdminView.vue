@@ -129,6 +129,7 @@ function blankOccurrence() {
     materialized: false,
     manual: false,
     timezone: "",
+    episode: 0,
     _draft: false,
     _draftKey: "",
   };
@@ -1021,6 +1022,7 @@ function editOccurrence(row) {
   occurrenceEditingRowKey.value = occurrenceRowKey(row);
   Object.assign(occurrenceDraft, {
     id: row.id || "",
+    episode: Number(row.episode) || 0,
     original_date: row.original_date || "",
     title: row.title || "",
     generated_date: row.generated_date || "",
@@ -1109,6 +1111,12 @@ async function restoreOccurrencePosition(position) {
   if (occurrenceListRef.value) occurrenceListRef.value.scrollTop = position.listTop;
 }
 
+function nextOccurrenceEpisode() {
+  const episodeStart = normalizeEpisodeStart(form.episode_start);
+  const regularOccurrences = occurrenceRows.value.filter(row => !row._draft && row.special !== "EX" && !["cancelled", "deleted"].includes(row.status));
+  return episodeStart + regularOccurrences.length;
+}
+
 function newOccurrence() {
   setActivePanel("occurrences");
   const pending = occurrenceRows.value.find(row => row._draft);
@@ -1121,6 +1129,7 @@ function newOccurrence() {
     ...blankOccurrence(),
     _draft: true,
     _draftKey: `draft-${Date.now()}-${occurrenceDraftSequence += 1}`,
+    episode: nextOccurrenceEpisode(),
   };
   occurrenceRows.value = [...occurrenceRows.value, draft];
   editOccurrence(draft);
@@ -1257,6 +1266,8 @@ async function saveOccurrence({ auto = false } = {}) {
       occurrenceDraft.id = saved.id || occurrenceDraft.id;
       occurrenceDraft.generated = false;
       occurrenceDraft.materialized = Boolean(saved.materialized);
+      occurrenceDraft._draft = false;
+      occurrenceDraft._draftKey = "";
     }
 
     // The mutation response only describes this row. Reload the generated list as well,
@@ -1637,7 +1648,6 @@ onUnmounted(() => {
           <div><p class="eyebrow">GENERATED EPISODES / OVERRIDES</p><h2>{{ t("自动生成单集") }}</h2></div>
           <div class="settings-heading-actions">
              <button type="button" class="secondary program-action-button" @click="leaveOccurrenceFocus">{{ t("返回节目配置") }}</button>
-             <button type="button" class="secondary program-action-button" @click="newOccurrence">{{ t("添加单集") }}</button>
           </div>
         </div>
         <div class="occurrence-generation-bar">
@@ -1653,22 +1663,25 @@ onUnmounted(() => {
           <p class="muted occurrence-help">{{ occurrenceHelp }}</p>
        <p v-if="occurrenceLoading" class="state">{{ t("正在读取单集排期……") }}</p>
         <div v-else class="occurrence-editor-layout">
-           <div ref="occurrenceListRef" class="occurrence-list">
+           <div class="occurrence-list-column">
+             <div ref="occurrenceListRef" class="occurrence-list">
                 <button v-for="row in occurrenceRows" :key="occurrenceRowKey(row)" :ref="element => setOccurrenceItemRef(row, element)" type="button" class="occurrence-list-item" :class="{ selected: occurrenceRowKey(occurrenceDraft) === occurrenceRowKey(row), 'is-draft': row._draft }" @click="editOccurrence(row)">
                 <span v-if="occurrenceCast(row).length" class="occurrence-list-cast-line" role="img" :aria-label="`${t('出场成员')}：${occurrenceCast(row).map(member => member.name).join('、')}`" :title="occurrenceCast(row).map(member => member.name).join('、')"><i v-for="member in occurrenceCast(row)" :key="member.name" :style="{ '--cast-color': member.color, backgroundColor: member.color }"></i></span>
-              <span><b>{{ row._draft ? t("新增单集") : occurrenceEpisodeLabel(row) }}</b><em :class="{ cancelled: row.status === 'cancelled', deleted: row.status === 'deleted', aired: row.aired }">{{ row._draft ? t("待填写") : occurrenceStatus(row) }}</em></span>
-             <strong v-if="row.date">{{ row.date }}</strong>
+              <span><b>{{ occurrenceEpisodeLabel(row) }}</b><em :class="{ cancelled: row.status === 'cancelled', deleted: row.status === 'deleted', aired: row.aired }">{{ row._draft ? t("待填写") : occurrenceStatus(row) }}</em></span>
+             <strong>{{ row._draft ? t("时间未定") : row.date }}</strong>
               <small v-if="row.title" class="occurrence-list-title">{{ row.title }}</small>
                 <small v-if="row._draft">{{ t("请填写日期后保存") }}</small>
                 <small v-else>{{ row.status === "deleted" ? t("已删除，不参与生成") : row.generated ? t("自动生成") : row.materialized ? t("已播出并保存") : row.adjusted_date ? `${t("原定")} ${row.original_date}` : t("已单独调整") }}{{ row.guests?.length ? ` · ${t("嘉宾")} ${row.guests.length} ${t("人")}` : "" }}{{ row.absent_members?.length ? ` · ${t("缺席")} ${row.absent_members.length} ${t("人")}` : "" }}</small>
                 <small v-if="row.absent_members?.length" class="occurrence-list-absence">{{ t("缺席：") }}{{ row.absent_members.join("、") }}</small>
-          </button>
-           <p v-if="!occurrenceRows.length" class="muted">{{ t("当前区间没有自动生成的单集，可以手动添加一条记录。") }}</p>
-        </div>
+                </button>
+             <p v-if="!occurrenceRows.length" class="muted">{{ t("当前区间没有自动生成的单集，可以手动添加一条记录。") }}</p>
+             </div>
+             <button type="button" class="secondary program-action-button occurrence-add-button" @click="newOccurrence">＋ {{ t("添加单集") }}</button>
+           </div>
          <form class="occurrence-form" @submit.prevent="saveOccurrence">
            <div class="occurrence-form-heading">
               <button type="button" class="occurrence-nav-button" :disabled="!canPreviousOccurrence" :aria-label="t('上一集')" :title="t('上一集')" @click="selectAdjacentOccurrence(-1)">←</button>
-               <div><p class="form-kicker">ONE EPISODE</p><h3>{{ occurrenceDraft.id || occurrenceDraft.generated ? t("编辑单集") : t("添加单集调整") }}</h3></div>
+               <div><p class="form-kicker">ONE EPISODE</p><h3>{{ occurrenceDraft._draft ? t("添加单集") : occurrenceDraft.id || occurrenceDraft.generated ? t("编辑单集") : t("添加单集调整") }}</h3></div>
                <button type="button" class="occurrence-nav-button" :disabled="!canNextOccurrence" :aria-label="t('下一集')" :title="t('下一集')" @click="selectAdjacentOccurrence(1)">→</button>
                <span v-if="occurrenceDraft.id || occurrenceDraft.generated" class="program-kind">{{ occurrenceDraft.id ? t("已保存") : t("自动生成") }}</span>
             </div>

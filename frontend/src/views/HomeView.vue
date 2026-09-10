@@ -20,7 +20,41 @@ const heroScrollStyle = ref({
   "--music-hero-copy-shift": "0px",
   "--music-hero-art-shift": "0px",
 });
+const heroPointerStyle = ref({
+  "--music-hero-pointer-x": "0px",
+  "--music-hero-pointer-y": "0px",
+  "--music-hero-focus-x": "0px",
+  "--music-hero-focus-y": "0px",
+  "--music-hero-focus-scale": "1",
+});
 let heroScrollFrame = 0;
+
+function handleHeroPointerMove(event) {
+  if (event.pointerType && event.pointerType !== "mouse") return;
+  const hero = heroRef.value;
+  if (!hero) return;
+  const bounds = hero.getBoundingClientRect();
+  const x = (event.clientX - bounds.left) / bounds.width - 0.5;
+  const y = (event.clientY - bounds.top) / bounds.height - 0.5;
+  const intensity = Math.min(1, Math.hypot(x, y) * 1.4);
+  heroPointerStyle.value = {
+    "--music-hero-pointer-x": `${x * 24}px`,
+    "--music-hero-pointer-y": `${y * 18}px`,
+    "--music-hero-focus-x": `${x * 46}px`,
+    "--music-hero-focus-y": `${y * 34}px`,
+    "--music-hero-focus-scale": String(1 + intensity * 0.1),
+  };
+}
+
+function resetHeroPointer() {
+  heroPointerStyle.value = {
+    "--music-hero-pointer-x": "0px",
+    "--music-hero-pointer-y": "0px",
+    "--music-hero-focus-x": "0px",
+    "--music-hero-focus-y": "0px",
+    "--music-hero-focus-scale": "1",
+  };
+}
 
 function updateHeroScrollStyle() {
   heroScrollFrame = 0;
@@ -82,7 +116,7 @@ onBeforeUnmount(() => {
 
 <template>
   <main class="page music-page">
-    <section ref="heroRef" class="hero music-hero" :style="heroScrollStyle">
+    <section ref="heroRef" class="hero music-hero" :style="[heroScrollStyle, heroPointerStyle]" @pointermove="handleHeroPointerMove" @pointerleave="resetHeroPointer">
       <div class="music-hero-grid" aria-hidden="true"></div>
       <div class="hero-topline music-hero-fade">
         <p class="eyebrow"><span class="eyebrow-dot"></span>MUSIC ARCHIVE / CD</p>
@@ -108,6 +142,7 @@ onBeforeUnmount(() => {
         <span class="music-hero-block music-hero-block-small"></span>
         <span class="music-hero-dot music-hero-dot-main"></span>
         <span class="music-hero-dot music-hero-dot-small"></span>
+        <span class="music-hero-focus"></span>
         <span class="music-hero-scan"></span>
       </div>
       <div class="music-hero-scroll music-hero-fade" aria-hidden="true"><span>SCROLL / INDEX</span><i></i></div>

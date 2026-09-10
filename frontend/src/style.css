@@ -6683,9 +6683,9 @@ html[data-theme="mocha"] .dp__theme_dark {
   height: min(82%, 760px);
   pointer-events: none;
   opacity: var(--music-hero-art-opacity);
-  transform: translateY(-50%);
-  transition: opacity 220ms ease-out, top 220ms ease-out;
-  will-change: opacity, top;
+  transform: translate3d(var(--music-hero-pointer-x), calc(-50% + var(--music-hero-pointer-y)), 0);
+  transition: opacity 220ms ease-out, top 220ms ease-out, transform 280ms cubic-bezier(.2, .7, .2, 1);
+  will-change: opacity, top, transform;
 }
 
 .music-hero-ring,
@@ -6773,7 +6773,23 @@ html[data-theme="mocha"] .dp__theme_dark {
 }
 
 .music-hero-dot {
+  z-index: 2;
   border-radius: 50%;
+}
+
+.music-hero-focus {
+  top: calc(49% + var(--music-hero-focus-y));
+  left: calc(55% + var(--music-hero-focus-x));
+  z-index: 1;
+  width: clamp(76px, 10vw, 142px);
+  aspect-ratio: 1;
+  border: 1px solid color-mix(in srgb, var(--accent) 68%, var(--line));
+  border-radius: 50%;
+  box-shadow: 0 0 0 10px color-mix(in srgb, var(--accent) 6%, transparent);
+  opacity: .78;
+  transform: translate(-50%, -50%) scale(var(--music-hero-focus-scale));
+  transition: left 320ms cubic-bezier(.2, .7, .2, 1), top 320ms cubic-bezier(.2, .7, .2, 1), transform 360ms cubic-bezier(.2, .7, .2, 1);
+  will-change: left, top, transform;
 }
 
 .music-hero-dot-main {
@@ -6993,6 +7009,10 @@ html[data-theme="mocha"] .dp__theme_dark {
     bottom: 10%;
     left: 9%;
     font-size: 8px;
+  }
+
+  .music-hero-focus {
+    width: clamp(64px, 22vw, 100px);
   }
 
   .music-hero-scroll {

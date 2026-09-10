@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref, watch } from "vue";
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { api } from "../api";
 import { formatLocalDateTime } from "../datetime";
@@ -12,6 +12,35 @@ const releases = ref([]);
 const lastSync = ref(null);
 const loading = ref(true);
 const error = ref("");
+const heroRef = ref(null);
+const heroScrollStyle = ref({
+  "--music-hero-copy-opacity": "1",
+  "--music-hero-art-opacity": "1",
+  "--music-hero-grid-opacity": ".56",
+  "--music-hero-copy-shift": "0px",
+  "--music-hero-art-shift": "0px",
+});
+let heroScrollFrame = 0;
+
+function updateHeroScrollStyle() {
+  heroScrollFrame = 0;
+  const hero = heroRef.value;
+  if (!hero) return;
+  const fadeDistance = Math.max(hero.offsetHeight * 0.72, window.innerHeight * 0.65);
+  const progress = Math.min(1, Math.max(0, window.scrollY / fadeDistance));
+  heroScrollStyle.value = {
+    "--music-hero-copy-opacity": String(1 - progress),
+    "--music-hero-art-opacity": String(1 - progress * 0.82),
+    "--music-hero-grid-opacity": String(0.56 - progress * 0.45),
+    "--music-hero-copy-shift": `${progress * -28}px`,
+    "--music-hero-art-shift": `${progress * 18}px`,
+  };
+}
+
+function scheduleHeroScrollStyle() {
+  if (heroScrollFrame) return;
+  heroScrollFrame = requestAnimationFrame(updateHeroScrollStyle);
+}
 
 async function loadReleases() {
   loading.value = true;
@@ -37,23 +66,51 @@ watch(() => route.query.q, value => {
   loadReleases();
 });
 
-onMounted(loadReleases);
+onMounted(() => {
+  loadReleases();
+  updateHeroScrollStyle();
+  window.addEventListener("scroll", scheduleHeroScrollStyle, { passive: true });
+  window.addEventListener("resize", scheduleHeroScrollStyle);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("scroll", scheduleHeroScrollStyle);
+  window.removeEventListener("resize", scheduleHeroScrollStyle);
+  if (heroScrollFrame) cancelAnimationFrame(heroScrollFrame);
+});
 </script>
 
 <template>
-  <main class="page">
-    <section class="hero">
-      <div class="hero-topline">
+  <main class="page music-page">
+    <section ref="heroRef" class="hero music-hero" :style="heroScrollStyle">
+      <div class="music-hero-grid" aria-hidden="true"></div>
+      <div class="hero-topline music-hero-fade">
         <p class="eyebrow"><span class="eyebrow-dot"></span>MUSIC ARCHIVE / CD</p>
         <span class="hero-stamp">OFFICIAL DATA<br><strong>LOCAL INDEX</strong></span>
       </div>
-       <h1>{{ t("虹咲音乐档案") }}<span class="title-mark" aria-hidden="true"></span></h1>
-       <p class="hero-description">{{ t("官方发行资料的本地化、可搜索档案。") }}<br><span>{{ t("从封面、曲目到特典，整理每一份虹咲音乐记录。") }}</span></p>
-      <form class="search" @submit.prevent="search">
-        <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.5"></circle><path d="m16 16 4.5 4.5"></path></svg>
-         <input v-model="query" name="q" :placeholder="t('搜索标题或艺术家')" :aria-label="t('搜索标题或艺术家')">
-         <button><span>{{ t("搜索档案") }}</span><span aria-hidden="true">↗</span></button>
-      </form>
+      <div class="music-hero-content music-hero-fade">
+        <h1>{{ t("虹咲音乐档案") }}<span class="title-mark" aria-hidden="true"></span></h1>
+        <p class="hero-description">{{ t("官方发行资料的本地化、可搜索档案。") }}<br><span>{{ t("从封面、曲目到特典，整理每一份虹咲音乐记录。") }}</span></p>
+        <form class="search" @submit.prevent="search">
+          <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.5"></circle><path d="m16 16 4.5 4.5"></path></svg>
+          <input v-model="query" name="q" :placeholder="t('搜索标题或艺术家')" :aria-label="t('搜索标题或艺术家')">
+          <button><span>{{ t("搜索档案") }}</span><span aria-hidden="true">↗</span></button>
+        </form>
+      </div>
+      <div class="music-hero-art" aria-hidden="true">
+        <span class="music-hero-art-code">NO. 01<br><b>{{ String(releases.length).padStart(2, "0") }} RELEASES</b></span>
+        <span class="music-hero-ring music-hero-ring-outer"></span>
+        <span class="music-hero-ring music-hero-ring-middle"></span>
+        <span class="music-hero-ring music-hero-ring-inner"></span>
+        <span class="music-hero-axis music-hero-axis-horizontal"></span>
+        <span class="music-hero-axis music-hero-axis-vertical"></span>
+        <span class="music-hero-block music-hero-block-main"></span>
+        <span class="music-hero-block music-hero-block-small"></span>
+        <span class="music-hero-dot music-hero-dot-main"></span>
+        <span class="music-hero-dot music-hero-dot-small"></span>
+        <span class="music-hero-scan"></span>
+      </div>
+      <div class="music-hero-scroll music-hero-fade" aria-hidden="true"><span>SCROLL / INDEX</span><i></i></div>
     </section>
 
     <div class="toolbar">

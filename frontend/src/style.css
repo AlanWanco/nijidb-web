@@ -6505,6 +6505,14 @@ html[data-theme="mocha"] .dp__theme_dark {
   padding: 0 0 80px;
 }
 
+.music-page > .toolbar,
+.music-page > .state,
+.music-page > .cover-grid {
+  width: min(1260px, calc(100% - 34px));
+  margin-right: auto;
+  margin-left: auto;
+}
+
 .music-hero {
   --music-hero-grid-line: color-mix(in srgb, var(--ink) 13%, transparent);
   --music-hero-ring: color-mix(in srgb, var(--ink) 23%, transparent);

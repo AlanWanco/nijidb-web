@@ -4429,6 +4429,15 @@ html[data-theme="mocha"] .dp__theme_dark {
   height: 16px;
 }
 
+.program-date-picker .dp--clear-btn {
+  transform: translateY(-50%);
+  transition: color 160ms ease, opacity 160ms ease;
+}
+
+.program-date-picker .dp--clear-btn:hover {
+  transform: translateY(-50%);
+}
+
 .program-date-picker .dp__disabled {
   cursor: not-allowed;
   opacity: .78;

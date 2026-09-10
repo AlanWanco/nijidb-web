@@ -6872,6 +6872,44 @@ html[data-theme="mocha"] .dp__theme_dark {
   animation: music-hero-scroll-line 2.4s ease-in-out infinite;
 }
 
+.music-hero-motion-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  margin-left: auto;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line));
+  border-radius: 999px;
+  padding: 7px 10px;
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+  color: var(--muted);
+  box-shadow: none;
+  font: 500 9px var(--mono);
+  letter-spacing: .08em;
+  white-space: nowrap;
+}
+
+.music-hero-motion-toggle:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.music-hero-motion-toggle:disabled {
+  cursor: default;
+  opacity: .82;
+}
+
+.music-hero-motion-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border: 1px solid var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
 @keyframes music-hero-orbit {
   to {
     transform: rotate(360deg);

@@ -28,6 +28,10 @@ const heroPointerStyle = ref({
   "--music-hero-focus-scale": "1",
 });
 let heroScrollFrame = 0;
+let heroMotionListening = false;
+let heroMotionBaseline = null;
+const motionStatus = ref("idle");
+const motionControlVisible = ref(false);
 
 function handleHeroPointerMove(event) {
   if (event.pointerType && event.pointerType !== "mouse") return;
@@ -47,6 +51,7 @@ function handleHeroPointerMove(event) {
 }
 
 function resetHeroPointer() {
+  if (motionStatus.value === "enabled") return;
   heroPointerStyle.value = {
     "--music-hero-pointer-x": "0px",
     "--music-hero-pointer-y": "0px",
@@ -54,6 +59,65 @@ function resetHeroPointer() {
     "--music-hero-focus-y": "0px",
     "--music-hero-focus-scale": "1",
   };
+}
+
+function handleHeroOrientation(event) {
+  const beta = Number(event.beta);
+  const gamma = Number(event.gamma);
+  if (!Number.isFinite(beta) || !Number.isFinite(gamma)) return;
+  if (!heroMotionBaseline) {
+    heroMotionBaseline = { beta, gamma };
+    return;
+  }
+  const x = Math.max(-1, Math.min(1, (gamma - heroMotionBaseline.gamma) / 35));
+  const y = Math.max(-1, Math.min(1, (beta - heroMotionBaseline.beta) / 35));
+  const intensity = Math.min(1, Math.hypot(x, y) * 1.4);
+  heroPointerStyle.value = {
+    "--music-hero-pointer-x": `${x * 24}px`,
+    "--music-hero-pointer-y": `${y * 18}px`,
+    "--music-hero-focus-x": `${x * 46}px`,
+    "--music-hero-focus-y": `${y * 34}px`,
+    "--music-hero-focus-scale": String(1 + intensity * 0.1),
+  };
+}
+
+function attachHeroMotion() {
+  if (heroMotionListening) return;
+  heroMotionBaseline = null;
+  window.addEventListener("deviceorientation", handleHeroOrientation);
+  heroMotionListening = true;
+  motionStatus.value = "enabled";
+}
+
+async function enableHeroMotion() {
+  if (motionStatus.value === "requesting" || motionStatus.value === "enabled") return;
+  const orientationEvent = window.DeviceOrientationEvent;
+  if (!orientationEvent) {
+    motionStatus.value = "unsupported";
+    return;
+  }
+  motionStatus.value = "requesting";
+  try {
+    if (typeof orientationEvent.requestPermission === "function") {
+      const permission = await orientationEvent.requestPermission();
+      if (permission !== "granted") {
+        motionStatus.value = "denied";
+        return;
+      }
+    }
+    attachHeroMotion();
+  } catch {
+    motionStatus.value = "denied";
+  }
+}
+
+function setupHeroMotion() {
+  const orientationEvent = window.DeviceOrientationEvent;
+  const touchDevice = Number(navigator.maxTouchPoints || 0) > 0;
+  if (!orientationEvent || !touchDevice) return;
+  const requiresPermission = typeof orientationEvent.requestPermission === "function";
+  motionControlVisible.value = requiresPermission;
+  if (!requiresPermission) attachHeroMotion();
 }
 
 function updateHeroScrollStyle() {
@@ -102,6 +166,7 @@ watch(() => route.query.q, value => {
 
 onMounted(() => {
   loadReleases();
+  setupHeroMotion();
   updateHeroScrollStyle();
   window.addEventListener("scroll", scheduleHeroScrollStyle, { passive: true });
   window.addEventListener("resize", scheduleHeroScrollStyle);
@@ -110,6 +175,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener("scroll", scheduleHeroScrollStyle);
   window.removeEventListener("resize", scheduleHeroScrollStyle);
+  if (heroMotionListening) window.removeEventListener("deviceorientation", handleHeroOrientation);
   if (heroScrollFrame) cancelAnimationFrame(heroScrollFrame);
 });
 </script>
@@ -145,7 +211,13 @@ onBeforeUnmount(() => {
         <span class="music-hero-focus"></span>
         <span class="music-hero-scan"></span>
       </div>
-      <div class="music-hero-scroll music-hero-fade" aria-hidden="true"><span>SCROLL / INDEX</span><i></i></div>
+      <div class="music-hero-scroll music-hero-fade">
+        <span aria-hidden="true">SCROLL / INDEX</span><i aria-hidden="true"></i>
+        <button v-if="motionControlVisible" class="music-hero-motion-toggle" type="button" :disabled="motionStatus === 'requesting' || motionStatus === 'enabled'" :aria-pressed="motionStatus === 'enabled'" @click="enableHeroMotion">
+          <span class="music-hero-motion-dot" aria-hidden="true"></span>
+          {{ motionStatus === "enabled" ? t("体感已开启") : motionStatus === "requesting" ? t("请求体感权限……") : motionStatus === "denied" ? t("体感权限未开启") : t("启用体感") }}
+        </button>
+      </div>
     </section>
 
     <div class="toolbar">

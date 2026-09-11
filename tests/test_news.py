@@ -100,6 +100,12 @@ class NewsStorageTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_topic_detail("<main>Access denied</main>", URL)
 
+    def test_detail_prefers_main_over_navigation_article(self):
+        html = '<body><article><ul id="contentsmenu"><li>全てのニュース</li></ul></article><div id="contents"><div id="main"><h3>有效标题</h3><p>这是正文内容，长度足够通过页面有效性检查，并且包含更多文字以模拟官网真实新闻页面。</p></div></div></body>'
+        parsed = parse_topic_detail(html, URL, {"title": "有效标题", "published_at": "2026-09-11"})
+        self.assertIn("正文内容", parsed["body_markdown"])
+        self.assertNotIn("全てのニュース", parsed["body_markdown"])
+
 
 class NewsApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

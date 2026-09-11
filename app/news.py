@@ -480,10 +480,12 @@ def _detail_root(soup: BeautifulSoup):
         ".news_detail",
         ".topics-detail",
         ".detail",
-        "article",
+        "#main",
         "main",
+        ".main",
         "#contents",
         ".contents",
+        "article",
     ):
         root = soup.select_one(selector)
         if root and len(_clean_text(root.get_text(" ", strip=True))) > 40:

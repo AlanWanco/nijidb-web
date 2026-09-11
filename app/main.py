@@ -27,6 +27,19 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 
+from app.collabo import (
+    collaboration_rows,
+    collaboration_source,
+    collaboration_years,
+    ensure_collaboration_schema,
+    find_collaboration,
+    image_asset_path,
+    migrate_collaboration_sources,
+    normalize_links,
+    text_list,
+    upsert_collaboration_item,
+    valid_external_url,
+)
 from app.news import (
     NEWS_EDITABLE_FIELDS,
     NEWS_SOURCE_LABELS,
@@ -58,6 +71,13 @@ ILLUSTRATION_DIR = Path(os.getenv(
     str(ILLUSTRATION_LOCAL_DIR if (ILLUSTRATION_LOCAL_DIR / "manifest.json").is_file() else ILLUSTRATION_RUNTIME_DIR),
 ))
 ILLUSTRATION_MANIFEST_PATH = ILLUSTRATION_DIR / "manifest.json"
+COLLABORATION_INDEX_PATHS = (
+    ROOT / "frontend" / "src" / "content" / "collaborationIllustrations.json",
+    ILLUSTRATION_DIR / "collaborationIllustrations.json",
+    ILLUSTRATION_DIR / "collaboration-index.json",
+    ILLUSTRATION_RUNTIME_DIR / "collaborationIllustrations.json",
+    ILLUSTRATION_RUNTIME_DIR / "collaboration-index.json",
+)
 NEWS_ARCHIVE_DEFAULT = Path("/Volumes/SSK/Download/bangumi-parser/ll-offical-site")
 NEWS_ARCHIVE_DIR = Path(os.getenv("NEWS_ARCHIVE_DIR", str(NEWS_ARCHIVE_DEFAULT if NEWS_ARCHIVE_DEFAULT.is_dir() else MEDIA_DIR / "news-archive")))
 NEWS_RUNTIME_DIR = MEDIA_DIR / "news"
@@ -422,6 +442,9 @@ def init_db() -> None:
          CREATE INDEX IF NOT EXISTS idx_program_occurrences_program ON program_occurrences(program_id, original_date, original_time);
          """)
         ensure_news_schema(conn)
+        ensure_collaboration_schema(conn)
+        collaboration_index_path = next((path for path in COLLABORATION_INDEX_PATHS if path.is_file()), None)
+        migrate_collaboration_sources(conn, collaboration_index_path, ILLUSTRATION_MANIFEST_PATH)
         program_columns = {row["name"] for row in conn.execute("PRAGMA table_info(programs)")}
         program_migrations = {
             "status": "TEXT NOT NULL DEFAULT 'ongoing'",
@@ -3315,6 +3338,11 @@ def news_upload_extension(content_type: str, content: bytes, filename: str) -> s
     return None
 
 
+def collaboration_upload_extension(content_type: str, content: bytes, filename: str) -> str | None:
+    extension = news_upload_extension(content_type, content, filename)
+    return extension if extension in {".jpg", ".png", ".gif", ".webp", ".bmp"} else None
+
+
 async def news_sync_once() -> dict[str, Any]:
     """Fetch only the active Nijigasaki topics feed.
 
@@ -3496,49 +3524,199 @@ if FRONTEND_DIST.is_dir():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="frontend-assets")
 
 
+def collaboration_asset_target(asset_path: str) -> Path | None:
+    relative = image_asset_path(asset_path)
+    if not relative:
+        return None
+    roots: list[Path] = []
+    for root in (ILLUSTRATION_RUNTIME_DIR, ILLUSTRATION_DIR):
+        resolved = root.resolve()
+        if resolved not in {candidate.resolve() for candidate in roots}:
+            roots.append(root)
+    for root in roots:
+        target = (root / relative).resolve()
+        try:
+            target.relative_to(root.resolve())
+        except ValueError:
+            continue
+        if target.is_file():
+            return target
+    return None
+
+
+def collaboration_image_url(row: sqlite3.Row | dict[str, Any], thumbnail: bool = False) -> str:
+    path_key = "thumbnail_path" if thumbnail else "path"
+    local_path = str(row[path_key] or "")
+    if local_path:
+        target = collaboration_asset_target(local_path)
+        if target:
+            relative = image_asset_path(local_path)
+            if relative:
+                return f"/api/collabo/assets/{quote(relative, safe='/')}"
+    if thumbnail and str(row["path"] or ""):
+        return collaboration_image_url(row, thumbnail=False)
+    source_url = str(row["source_url"] or "").strip()
+    return source_url if valid_external_url(source_url) else ""
+
+
+def collaboration_image_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    url = collaboration_image_url(row)
+    thumbnail_url = collaboration_image_url(row, thumbnail=True)
+    return {
+        "id": str(row["id"]),
+        "position": row["position"],
+        "path": url,
+        "asset_path": str(row["path"] or ""),
+        "thumbnail_path": str(row["thumbnail_path"] or ""),
+        "url": url,
+        "thumbnail_url": thumbnail_url,
+        "source_url": str(row["source_url"] or ""),
+        "source_page": str(row["source_page"] or ""),
+        "source_title": str(row["source_title"] or ""),
+        "caption": str(row["caption"] or ""),
+        "alt": str(row["alt"] or ""),
+        "width": row["width"],
+        "height": row["height"],
+        "bytes": row["bytes"],
+        "sha256": str(row["sha256"] or ""),
+        "kind": str(row["kind"] or ""),
+        "score": row["score"],
+        "context": str(row["context"] or ""),
+        "review_status": str(row["review_status"] or "pending"),
+        "available": bool(url),
+    }
+
+
+def collaboration_item_payload(conn: sqlite3.Connection, row: sqlite3.Row, detail: bool = False, admin: bool = False) -> dict[str, Any]:
+    image_rows = conn.execute(
+        "SELECT * FROM collaboration_images WHERE item_id = ? ORDER BY position, id",
+        (row["id"],),
+    ).fetchall()
+    visible_images = image_rows if admin else [image for image in image_rows if image["review_status"] != "rejected"]
+    image_payloads = [collaboration_image_payload(image) for image in visible_images]
+    available_images = [image for image in image_payloads if image["available"]]
+    cover = next((image for image in visible_images if image["id"] == row["cover_image_id"]), None)
+    if not cover or (not admin and cover["review_status"] == "rejected"):
+        cover = visible_images[0] if visible_images else None
+    cover_url = collaboration_image_url(cover) if cover else ""
+    thumbnail_url = collaboration_image_url(cover, thumbnail=True) if cover else ""
+    payload = {
+        "id": str(row["id"]),
+        "slug": str(row["slug"]),
+        "title": str(row["title"] or ""),
+        "date": str(row["date"] or ""),
+        "date_kind": str(row["date_kind"] or "first_seen"),
+        "partners": text_list(row["partners_json"]),
+        "credit": str(row["credit"] or ""),
+        "note": str(row["note"] or ""),
+        "links": normalize_links(row["links_json"]),
+        "collection_status": str(row["collection_status"] or "unavailable"),
+        "review_status": str(row["review_status"] or "pending"),
+        "cover_image_id": str(row["cover_image_id"] or ""),
+        "cover_url": cover_url,
+        "thumbnail_url": thumbnail_url,
+        "image_count": len(visible_images),
+        "available_image_count": len(available_images),
+        "updated_at": row["updated_at"],
+    }
+    if detail:
+        payload["images"] = image_payloads
+    return payload
+
+
+def collaboration_source_payload(conn: sqlite3.Connection) -> dict[str, Any]:
+    source = collaboration_source(conn)
+    return source if source else {
+        "title": "Nijigasaki Collaboration Illustration Archive",
+        "site": "Nijigasaki DB",
+    }
+
+
+def collaboration_list_payload(conn: sqlite3.Connection, q: str = "", year: str = "", page: int = 1, page_size: int = 24, admin: bool = False) -> dict[str, Any]:
+    rows = collaboration_rows(conn, q, year)
+    page_size = max(1, min(60, page_size))
+    pages = max(1, (len(rows) + page_size - 1) // page_size)
+    page = min(max(1, page), pages)
+    page_rows = rows[(page - 1) * page_size : page * page_size]
+    return {
+        "items": [collaboration_item_payload(conn, row, admin=admin) for row in page_rows],
+        "total": len(rows),
+        "page": page,
+        "page_size": page_size,
+        "pages": pages,
+        "years": collaboration_years(conn),
+        "source": collaboration_source_payload(conn),
+        "mode": "database",
+    }
+
+
+def collaboration_detail_payload(conn: sqlite3.Connection, identifier: str, q: str = "", year: str = "", admin: bool = False) -> dict[str, Any]:
+    row = find_collaboration(conn, identifier, admin=admin)
+    if not row:
+        raise HTTPException(404, "联动记录不存在")
+    rows = collaboration_rows(conn, q, year)
+    index = next((index for index, candidate in enumerate(rows) if candidate["id"] == row["id"]), -1)
+    previous = collaboration_item_payload(conn, rows[index - 1]) if index > 0 else None
+    following = collaboration_item_payload(conn, rows[index + 1]) if index >= 0 and index + 1 < len(rows) else None
+    return {
+        "item": collaboration_item_payload(conn, row, detail=True, admin=admin),
+        "previous": previous,
+        "following": following,
+        "source": collaboration_source_payload(conn),
+        "mode": "database",
+    }
+
+
+def serve_collaboration_asset(asset_path: str) -> FileResponse:
+    target = collaboration_asset_target(asset_path)
+    if not target:
+        raise HTTPException(404, "联动立绘资源不存在")
+    return FileResponse(target, media_type=mimetypes.guess_type(target.name)[0])
+
+
+@app.get("/api/collabo")
+async def api_collabo(q: str = "", year: str = "", page: int = 1, page_size: int = 24) -> dict[str, Any]:
+    with db() as conn:
+        return collaboration_list_payload(conn, q, year, page, page_size)
+
+
+@app.get("/api/collabo/assets/{asset_path:path}", include_in_schema=False)
+async def collabo_asset(asset_path: str):
+    return serve_collaboration_asset(asset_path)
+
+
+@app.get("/api/collabo/{identifier}")
+async def api_collabo_detail(identifier: str, q: str = "", year: str = "") -> dict[str, Any]:
+    with db() as conn:
+        return collaboration_detail_payload(conn, identifier, q, year)
+
+
 @app.get("/api/collaboration-illustrations")
 async def api_collaboration_illustrations() -> dict[str, Any]:
-    if not ILLUSTRATION_MANIFEST_PATH.is_file():
-        return {"available": False, "generated_at": None, "items": {}, "total_images": 0}
-    try:
-        manifest = json.loads(ILLUSTRATION_MANIFEST_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise HTTPException(503, "联动立绘索引暂时不可用") from exc
-    items = {}
-    for item_id, item in manifest.get("items", {}).items():
-        normalized = {"images": []}
-        for image in item.get("images", []):
-            asset_path = str(image.get("path", "")).removeprefix("/media/illustrations/").lstrip("/")
-            if not asset_path or not (ILLUSTRATION_DIR / asset_path).is_file():
-                continue
-            normalized["images"].append({
-                key: image.get(key)
-                for key in ("path", "source_url", "source_page", "sha256", "width", "height", "bytes", "kind")
-                if key in image
-            } | {"path": f"/api/collaboration-illustrations/assets/{asset_path}"})
-        status = str(item.get("status") or "")
-        normalized["status"] = status if status in {"complete", "partial", "unavailable"} else "complete" if normalized["images"] else "unavailable"
-        items[item_id] = normalized
-    return {
-        "available": True,
-        "generated_at": manifest.get("generated_at"),
-        "items": items,
-        "total_images": sum(len(item["images"]) for item in items.values()),
-    }
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM collaboration_items ORDER BY date DESC, id DESC").fetchall()
+        items = {}
+        total_images = 0
+        for row in rows:
+            payload = collaboration_item_payload(conn, row, detail=True)
+            images = payload.get("images", [])
+            total_images += len(images)
+            items[row["id"]] = {
+                "status": row["collection_status"],
+                "review_status": row["review_status"],
+                "images": images,
+            }
+        return {
+            "available": bool(rows),
+            "generated_at": None,
+            "items": items,
+            "total_images": total_images,
+        }
 
 
 @app.get("/api/collaboration-illustrations/assets/{asset_path:path}", include_in_schema=False)
 async def collaboration_illustration_asset(asset_path: str):
-    root = ILLUSTRATION_DIR.resolve()
-    target = (ILLUSTRATION_DIR / asset_path).resolve()
-    try:
-        target.relative_to(root)
-    except ValueError as exc:
-        raise HTTPException(404, "联动立绘资源不存在") from exc
-    if not target.is_file():
-        raise HTTPException(404, "联动立绘资源不存在")
-    media_type = mimetypes.guess_type(target.name)[0]
-    return FileResponse(target, media_type=media_type)
+    return serve_collaboration_asset(asset_path)
 
 
 def news_article_payload(conn: sqlite3.Connection, row: sqlite3.Row, detail: bool = False) -> dict[str, Any]:
@@ -3945,6 +4123,156 @@ async def api_admin_news_edit(news_id: str, request: Request) -> dict[str, Any]:
         result = news_article_payload(conn, updated, detail=True)
     log_database_activity("news", f"更新官网新闻：{result['title'][:80]}")
     return {"article": result}
+
+
+@app.get("/api/admin/collabo")
+async def api_admin_collabo(request: Request, q: str = "", year: str = "", page: int = 1, page_size: int = 24) -> dict[str, Any]:
+    require_api_admin(request)
+    with db() as conn:
+        return collaboration_list_payload(conn, q, year, page, page_size, admin=True)
+
+
+@app.post("/api/admin/collabo/assets")
+async def api_admin_collabo_upload(request: Request) -> dict[str, list[dict[str, Any]]]:
+    require_api_admin(request)
+    max_bytes = 20 * 1024 * 1024
+    max_files = 16
+    request_type = str(request.headers.get("content-type", "")).split(";", 1)[0].strip().lower()
+    uploads: list[tuple[str, str, bytes]] = []
+    if request_type == "multipart/form-data":
+        try:
+            form = await request.form(max_files=max_files, max_fields=max_files, max_part_size=max_bytes)
+        except Exception as exc:
+            raise HTTPException(400, "图片上传格式无效") from exc
+        for _, value in form.multi_items():
+            if not getattr(value, "filename", None) or not hasattr(value, "read"):
+                continue
+            content = await value.read()
+            uploads.append((str(value.filename), str(value.content_type or ""), content))
+    else:
+        content_length = request.headers.get("content-length", "")
+        try:
+            if content_length and int(content_length) > max_bytes:
+                raise HTTPException(413, "单张联动图片不能超过 20 MB")
+        except ValueError:
+            pass
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in request.stream():
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_bytes:
+                raise HTTPException(413, "单张联动图片不能超过 20 MB")
+        uploads.append((
+            unquote(str(request.headers.get("x-filename", "collabo-image"))),
+            request.headers.get("content-type", ""),
+            b"".join(chunks),
+        ))
+    if not uploads:
+        raise HTTPException(400, "没有收到图片")
+    if len(uploads) > max_files:
+        raise HTTPException(413, "每批最多上传 16 张联动图片")
+
+    prepared: list[tuple[str, bytes, str, str, str]] = []
+    for filename, content_type, content in uploads:
+        if len(content) > max_bytes:
+            raise HTTPException(413, "单张联动图片不能超过 20 MB")
+        content_type = content_type.split(";", 1)[0].strip().lower()
+        extension = collaboration_upload_extension(content_type, content, filename)
+        if not extension:
+            raise HTTPException(415, "只支持 JPEG、PNG、GIF、WebP 或 BMP 图片")
+        digest = hashlib.sha256(content).hexdigest()
+        relative = Path("assets") / f"{digest}{extension}"
+        prepared.append((filename, content, content_type, digest, relative.as_posix()))
+
+    images: list[dict[str, Any]] = []
+    for filename, content, _, digest, relative_text in prepared:
+        relative = Path(relative_text)
+        target = ILLUSTRATION_RUNTIME_DIR / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            temporary = target.with_name(f".{target.name}.{secrets.token_hex(6)}.tmp")
+            try:
+                temporary.write_bytes(content)
+                temporary.replace(target)
+            finally:
+                temporary.unlink(missing_ok=True)
+        url = f"/api/collabo/assets/{quote(relative_text, safe='/')}"
+        images.append({
+            "id": digest,
+            "position": len(images),
+            "path": url,
+            "asset_path": relative_text,
+            "thumbnail_path": "",
+            "url": url,
+            "thumbnail_url": "",
+            "source_url": "",
+            "source_page": "",
+            "source_title": "",
+            "caption": "",
+            "alt": filename[:500],
+            "width": 0,
+            "height": 0,
+            "bytes": len(content),
+            "sha256": digest,
+            "kind": "manual",
+            "score": 0,
+            "context": "",
+            "review_status": "pending",
+            "available": True,
+        })
+    return {"images": images}
+
+
+@app.get("/api/admin/collabo/{identifier}")
+async def api_admin_collabo_detail(identifier: str, request: Request, q: str = "", year: str = "") -> dict[str, Any]:
+    require_api_admin(request)
+    with db() as conn:
+        return collaboration_detail_payload(conn, identifier, q, year, admin=True)
+
+
+@app.post("/api/admin/collabo")
+async def api_admin_collabo_create(request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "请求格式无效") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "请求格式无效")
+    try:
+        with db() as conn:
+            item_id = upsert_collaboration_item(conn, payload)
+            row = conn.execute("SELECT * FROM collaboration_items WHERE id = ?", (item_id,)).fetchone()
+            result = collaboration_item_payload(conn, row, detail=True, admin=True)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    log_database_activity("collabo", f"新增联动立绘：{result['title'][:80]}")
+    return {"item": result, "mode": "database"}
+
+
+@app.patch("/api/admin/collabo/{identifier}")
+async def api_admin_collabo_edit(identifier: str, request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "请求格式无效") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "请求格式无效")
+    with db() as conn:
+        existing = find_collaboration(conn, identifier, admin=True)
+        if not existing:
+            raise HTTPException(404, "联动记录不存在")
+        payload = {**payload, "id": existing["id"]}
+        try:
+            item_id = upsert_collaboration_item(conn, payload)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        row = conn.execute("SELECT * FROM collaboration_items WHERE id = ?", (item_id,)).fetchone()
+        result = collaboration_item_payload(conn, row, detail=True, admin=True)
+    log_database_activity("collabo", f"更新联动立绘：{result['title'][:80]}")
+    return {"item": result, "mode": "database"}
 
 
 @app.get("/api/admin/backups")

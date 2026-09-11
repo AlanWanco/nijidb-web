@@ -60,7 +60,7 @@ npm run dev
 
 ## 联动立绘档案
 
-`/illustrations` 页面使用仓库内的 `frontend/src/content/collaborationIllustrations.json` 展示 Wiki 元数据和官方出处。图片采集结果、缓存和 manifest 保存在 Git 忽略的 `data/` 下，不随前端构建提交；开发时后端会自动读取本地 `data/images/illustrations/`，并通过 `/api/collaboration-illustrations` 提供索引和图片接口。若需要在容器中启用本地图片，将该目录复制到数据卷的 `/data/images/illustrations/`，然后重启应用即可。采集脚本包括：
+`/collabo` 使用 SQLite 中的联动记录和图片元数据，管理员可在 `/admin/collabo` 编辑资料、排序图片、审核候选图和上传本地图片。应用启动时会从本地 `frontend/src/content/collaborationIllustrations.json` 与 `data/images/illustrations/manifest.json` 导入尚未入库的记录；容器部署可使用 `scripts/seed_collabo_database.py` 对数据卷执行同样的导入。原有 `/illustrations` 和 `/api/collaboration-illustrations` 保留兼容。图片文件仍保存在 Git 忽略的 `data/` / `/data` 下，不写入 SQLite；若需要在容器中启用本地图片，将该目录复制到数据卷的 `/data/images/illustrations/`，然后重启应用即可。采集脚本包括：
 
 ```bash
 uv run --locked python scripts/import_collaboration_illustrations.py
@@ -70,7 +70,14 @@ uv run --locked python scripts/collect_pdf_illustrations.py
 uv run --locked python scripts/collect_local_illustrations.py --source-dir /Volumes/SSK/Download/bangumi-parser/ll-offical-site
 ```
 
-联网采集脚本只接受官方页面、官方 PDF、Wayback 的官方页面快照和官方账号的原图候选，并会过滤 logo、导航、二维码、头像和站点装饰图。`collect_local_illustrations.py` 不联网，只按本地 Markdown 的页面 ID 和已审核图片序号补入资源，并按 SHA-256 去重且不覆盖已有文件。清单中的 `complete` 表示已收录 3 张，`partial` 表示目前只有 1–2 张，`unavailable` 表示暂未找到可验证的本地资源，需继续人工审核。
+联网采集脚本只接受官方页面、官方 PDF、Wayback 的官方页面快照和官方账号的原图候选，并会过滤 logo、导航、二维码、头像和站点装饰图。`collect_local_illustrations.py` 不联网，只按本地 Markdown 的页面 ID 和已审核图片序号补入资源，并按 SHA-256 去重且不覆盖已有文件。清单中的 `complete` 表示已收录 3 张，`partial` 表示目前只有 1–2 张，`unavailable` 表示暂未找到可验证的本地资源，需继续人工审核。初次部署时可执行：
+
+```bash
+uv run --locked python scripts/seed_collabo_database.py \
+  --database /data/nijidb.sqlite3 \
+  --index /data/images/illustrations/collaborationIllustrations.json \
+  --manifest /data/images/illustrations/manifest.json
+```
 
 ## 官网新闻
 

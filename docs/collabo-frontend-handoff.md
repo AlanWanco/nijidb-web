@@ -2,11 +2,10 @@
 
 ## 本次范围与协作边界
 
-- 仅实现前端，不修改 `app/main.py`、数据库、采集脚本、采集结果 JSON / manifest。
-- 原有 `/illustrations` 页面保留，主导航和首页入口指向新 `/collabo`。
-- 新功能集中在 `frontend/src/collabo/`、三个 `Collabo*View.vue` 和两个 `Collabo*` 组件。
-- 后端开发可独立继续；以下是前端适配器的**暂定契约**，如果后端已有其他路由/字段，只需调整
-  `frontend/src/collabo/api.js` 和 `model.js`，不要为配合前端重建数据。
+- `/illustrations` 页面保留，主导航和首页入口指向新 `/collabo`。
+- 前端集中在 `frontend/src/collabo/`、三个 `Collabo*View.vue` 和两个 `Collabo*` 组件；数据库实现位于
+  `app/collabo.py` 和 `app/main.py`。
+- 应用启动时会把本地 index / manifest 中尚未入库的记录和图片元数据迁移到 SQLite；手动字段不会被刷新覆盖。
 
 ## 已实现
 
@@ -25,12 +24,12 @@
 
 ## 当前数据模式（重要）
 
-1. 优先访问新的数据库 API。
+1. 优先访问 SQLite 驱动的 `/api/collabo`、`/api/collabo/:slug` 及管理员接口。
 2. 只有 API 不存在（404 或旧部署返回 SPA HTML）才读取现有的
    `frontend/src/content/collaborationIllustrations.json` 和 `/api/collaboration-illustrations`。
 3. 数据库/网络/鉴权错误不能伪装成预览或空目录；在页面显示错误。
-4. 预览模式明确标注“图片尚待人工审核”，不沿用“至少 3 张 = 完整收录”的自动结论。
-5. **预览模式不会写数据库或上传 R2**。可以编辑、导出草稿，但数据库保存和上传按钮不可用。
+4. 旧部署的预览模式明确标注“图片尚待人工审核”，不沿用“至少 3 张 = 完整收录”的自动结论。
+5. 数据库模式支持管理员保存、审核和上传；预览模式不会写数据库或上传资源。
 6. 新数据库接口存在时，找不到某条记录就显示不存在，不从旧 JSON 重新带回已删除记录。
 
 ### URL 规则
@@ -114,8 +113,8 @@
 - `POST /api/admin/collabo`：创建，body 是可编辑 item；正式 ID 与随机 slug 服务端生成。
 - `PATCH /api/admin/collabo/:id`：修改可编辑字段，不删除未传入的原始元数据。
 - 保存返回 `{ "item": 完整保存结果 }`；建议使用 `updated_at` 做并发修改检查，不静默覆盖其他编辑。
-- `POST /api/admin/collabo/assets`：multipart，`files` 字段可多项，返回 `{ "images": [图片对象] }`。
-  前端限制 JPEG/PNG/WebP、单张 20 MB、每批 16 张；服务端仍须检查内容、大小、实际编码和管理员权限。
+- `POST /api/admin/collabo/assets`：multipart，`files` 字段可多项，返回 `{ "images": [图片对象] }`；服务端也兼容单文件原始请求。
+  前端限制 JPEG/PNG/WebP、单张 20 MB、每批 16 张；服务端检查内容、大小、实际编码和管理员权限。
 - R2 上传在后端执行，浏览器不接触 R2 密钥。上传成功后才允许把返回对象加入记录；未关联资产可延迟回收。
 - 仅移除记录中的图片关联，不应立即删除被其他联动引用的 R2 原图。
 - 服务器端 URL 抓取应限制为公网 HTTP(S)，防止 SSRF、重定向进入私网，设置超时/响应大小限制。
@@ -149,4 +148,4 @@ PLAYWRIGHT_MODULE=/tmp/your-tools/node_modules/playwright node frontend/tests/co
 - 回归覆盖：网格分页容量、昼夜模式 DOM、详情/灯箱按键、关闭及滚动解锁、返回列表位置、
   预览禁用数据库写入、草稿导出、mock 数据库保存、手机无横向溢出、纵向滚动不翻页、联动/CD 左右滑动。
 - 浏览器回归不代表真实 R2 上传、数据库持久化和随机 slug 分配已验收；这些待后端接入后联调。
-- 当前未提交、未部署；不能把其他代理的未完成改动混入部署包。
+- 数据库迁移脚本：`scripts/seed_collabo_database.py`；生产部署前应使用源 index / manifest 对现有数据卷执行一次导入并核对数量。

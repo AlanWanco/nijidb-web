@@ -1,8 +1,8 @@
 import { api } from "../api";
 import { filterItems, normalizeItem, PAGE_SIZE, pageNumber } from "./model";
 
-// The database/collector is owned by a separate workstream. All its integration is isolated here.
-// Only a missing API falls back to the existing read-only catalog; server/auth errors remain visible.
+// The database API is the primary source. A missing endpoint alone falls back to
+// the legacy read-only catalog so older deployments remain viewable.
 let previewPromise;
 async function previewCatalog() {
   if (!previewPromise) {
@@ -104,8 +104,11 @@ export async function saveCollaboration(item) {
 export async function uploadCollaborationImages(files) {
   const form = new FormData();
   files.forEach((file) => form.append("files", file));
-  // api() JSON-encodes objects, so multipart needs its own transport.
-  const response = await fetch("/api/admin/collabo/assets", { method: "POST", body: form, credentials: "same-origin" });
+  const response = await fetch("/api/admin/collabo/assets", {
+    method: "POST",
+    body: form,
+    credentials: "same-origin",
+  });
   const payload = await response.json();
   if (!response.ok || !Array.isArray(payload.images)) throw new Error(payload.detail || "图片上传失败");
   return payload.images;

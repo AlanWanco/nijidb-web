@@ -5,7 +5,7 @@ export function safeUrl(value, local = false) {
   if (typeof value !== "string" || !value.trim()) return "";
   const raw = value.trim();
   if (raw.includes("\\")) return "";
-  if (local && /^\/(?:media|api\/collaboration-illustrations\/assets)\//.test(raw) && !raw.includes("\\")) return raw;
+  if (local && /^\/(?:media|api\/(?:collabo|collaboration-illustrations)\/assets)\//.test(raw) && !raw.includes("\\")) return raw;
   try {
     const url = new URL(raw);
     return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password ? url.href : "";

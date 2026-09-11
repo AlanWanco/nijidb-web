@@ -115,7 +115,7 @@ onBeforeUnmount(() => {
     <RouterView />
     <footer>
        <span v-if="route.path === '/music'" class="footer-source">{{ t("数据源：") }}<a href="https://www.lovelive-anime.jp/nijigasaki/cd.php" target="_blank" rel="noopener noreferrer">lovelive-anime.jp</a></span>
-       <span class="footer-divider" aria-hidden="true"></span>
+       <span v-if="route.path === '/music'" class="footer-divider" aria-hidden="true"></span>
          <span class="footer-title">{{ t("友链") }}</span>
         <span class="footer-links">
           <a href="https://events.nijigaku.fans/" target="_blank" rel="noopener noreferrer">Nijigaku Events</a>

@@ -4,6 +4,10 @@ __pycache__/
 frontend/node_modules/
 frontend/dist/
 data/
+# 联动立绘本地图片、manifest 和采集缓存（data/ 已整体忽略，这行用于明确用途）
+/data/images/illustrations/
+# 联动立绘本地元数据索引
+/frontend/src/content/collaborationIllustrations.json
 *.sqlite3
 .env
 .env.*

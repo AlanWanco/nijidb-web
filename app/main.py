@@ -16,16 +16,31 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import quote, unquote, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 import boto3
 import httpx
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
+
+from app.news import (
+    NEWS_EDITABLE_FIELDS,
+    NEWS_SOURCE_LABELS,
+    NEWS_SOURCES,
+    NEWS_TOPICS_URL,
+    ensure_news_schema,
+    news_id,
+    normalize_news_date,
+    normalized_tags,
+    parse_topic_detail,
+    parse_topic_listing,
+    topic_next_offset,
+    upsert_news_record,
+)
 
 SOURCE_URL = "https://www.lovelive-anime.jp/nijigasaki/cd.php"
 EVENTERNOTE_EVENTS_URL = "https://events.nijigaku.fans/api/events"
@@ -36,6 +51,16 @@ BACKUP_DIR = Path(os.getenv("DATABASE_BACKUP_DIR", str(DB_PATH.parent / "backups
 COVER_CACHE_VERSION = "source-url-refresh-v1"
 COVER_CACHE_VERSION_PATH = DB_PATH.parent / ".cover-cache-version"
 FRONTEND_DIST = ROOT / "frontend" / "dist"
+ILLUSTRATION_LOCAL_DIR = ROOT / "data" / "images" / "illustrations"
+ILLUSTRATION_RUNTIME_DIR = MEDIA_DIR / "illustrations"
+ILLUSTRATION_DIR = Path(os.getenv(
+    "ILLUSTRATION_DIR",
+    str(ILLUSTRATION_LOCAL_DIR if (ILLUSTRATION_LOCAL_DIR / "manifest.json").is_file() else ILLUSTRATION_RUNTIME_DIR),
+))
+ILLUSTRATION_MANIFEST_PATH = ILLUSTRATION_DIR / "manifest.json"
+NEWS_ARCHIVE_DEFAULT = Path("/Volumes/SSK/Download/bangumi-parser/ll-offical-site")
+NEWS_ARCHIVE_DIR = Path(os.getenv("NEWS_ARCHIVE_DIR", str(NEWS_ARCHIVE_DEFAULT if NEWS_ARCHIVE_DEFAULT.is_dir() else MEDIA_DIR / "news-archive")))
+NEWS_RUNTIME_DIR = MEDIA_DIR / "news"
 PASSWORD_ITERATIONS = 310_000
 BACKUP_MAX_BYTES = 32 * 1024 * 1024
 BACKUP_RETENTION_COUNT = 30
@@ -61,6 +86,7 @@ R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "").strip()
 R2_PUBLIC_BASE_URL = os.getenv("R2_PUBLIC_BASE_URL", "").strip().rstrip("/")
 R2_IMAGE_PREFIX = os.getenv("R2_IMAGE_PREFIX", "images").strip("/")
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+NEWS_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 os.chmod(BACKUP_DIR, 0o700)
 stop_event = asyncio.Event()
@@ -395,6 +421,7 @@ def init_db() -> None:
          );
          CREATE INDEX IF NOT EXISTS idx_program_occurrences_program ON program_occurrences(program_id, original_date, original_time);
          """)
+        ensure_news_schema(conn)
         program_columns = {row["name"] for row in conn.execute("PRAGMA table_info(programs)")}
         program_migrations = {
             "status": "TEXT NOT NULL DEFAULT 'ongoing'",
@@ -452,6 +479,8 @@ def init_db() -> None:
         defaults = {
             "interval_minutes": os.getenv("CHECK_INTERVAL_MINUTES", "10"),
             "detail_interval_minutes": os.getenv("DETAIL_CHECK_INTERVAL_MINUTES", "5"),
+            "news_interval_minutes": os.getenv("NEWS_CHECK_INTERVAL_MINUTES", "30"),
+            "news_auto_sync": os.getenv("NEWS_AUTO_SYNC", "1"),
             "onebot_url": os.getenv("ONEBOT_URL", ""),
             "onebot_token": os.getenv("ONEBOT_TOKEN", ""),
             "onebot_target": os.getenv("ONEBOT_TARGET", ""),
@@ -491,6 +520,10 @@ def recent_database_logs(limit: int = 20) -> list[dict[str, Any]]:
             "SELECT id, created_at, category, summary FROM database_activity_log ORDER BY id DESC LIMIT ?",
             (limit,),
         ).fetchall()
+        news_rows = conn.execute(
+            "SELECT id, checked_at, discovered_count, changed_count, error FROM news_sync_log WHERE changed_count > 0 OR (error IS NOT NULL AND error != '') ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
     logs = [
         {
             "id": f"music-{row['id']}",
@@ -512,6 +545,17 @@ def recent_database_logs(limit: int = 20) -> list[dict[str, Any]]:
             "error": None,
         }
         for row in activity_rows
+    )
+    logs.extend(
+        {
+            "id": f"news-{row['id']}",
+            "checked_at": row["checked_at"],
+            "category": "news",
+            "summary": f"发现 {row['changed_count']} 项变化（检查 {row['discovered_count']} 条 Topics）",
+            "changed_count": row["changed_count"],
+            "error": row["error"],
+        }
+        for row in news_rows
     )
     logs.sort(key=lambda row: row["checked_at"], reverse=True)
     return logs[:limit]
@@ -2630,9 +2674,16 @@ def normalized_settings(values: dict[str, Any]) -> dict[str, str]:
         detail_interval = max(1, min(30, int(str(values.get("detail_interval_minutes", "5")))))
     except ValueError:
         detail_interval = 5
+    try:
+        news_interval = max(10, min(1440, int(str(values.get("news_interval_minutes", "30")))))
+    except ValueError:
+        news_interval = 30
+    news_auto_sync = "1" if boolean_value(values.get("news_auto_sync"), True) else "0"
     return {
         "interval_minutes": str(interval),
         "detail_interval_minutes": str(detail_interval),
+        "news_interval_minutes": str(news_interval),
+        "news_auto_sync": news_auto_sync,
         "onebot_url": str(values.get("onebot_url", "") or "").strip(),
         "onebot_token": str(values.get("onebot_token", "") or "").strip(),
         "onebot_target": str(values.get("onebot_target", "") or "").strip(),
@@ -3112,6 +3163,254 @@ async def refresh_deferred_once() -> tuple[int, str | None]:
             return 0, str(exc)
 
 
+def news_image_target(row: sqlite3.Row | dict[str, Any]) -> Path | None:
+    local_path = str(row.get("local_path", "") if isinstance(row, dict) else row["local_path"] or "").strip()
+    if not local_path:
+        return None
+    if local_path.startswith("runtime:"):
+        root = NEWS_RUNTIME_DIR
+        relative = local_path.removeprefix("runtime:").lstrip("/")
+    else:
+        root = NEWS_ARCHIVE_DIR
+        relative = local_path.removeprefix("archive:").lstrip("/")
+    if not relative:
+        return None
+    target = (root / relative).resolve()
+    try:
+        target.relative_to(root.resolve())
+    except ValueError:
+        return None
+    return target if target.is_file() else None
+
+
+def news_image_url(row: sqlite3.Row | dict[str, Any]) -> str:
+    target = news_image_target(row)
+    if target:
+        try:
+            relative = target.relative_to(MEDIA_DIR.resolve()).as_posix()
+        except ValueError:
+            relative = ""
+        if relative and r2_is_configured():
+            return f"{R2_PUBLIC_BASE_URL}/{quote(r2_object_key(relative), safe='/')}"
+        image_id = row["id"]
+        return f"/api/news/images/{image_id}"
+    source_url = str(row["source_url"] if isinstance(row, dict) else row["source_url"] or "").strip()
+    parsed = urlparse(source_url)
+    return source_url if parsed.scheme in {"http", "https"} and parsed.netloc else ""
+
+
+def news_image_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "id": row["id"],
+        "position": row["position"],
+        "kind": row["kind"],
+        "url": news_image_url(row),
+        "source_url": str(row["source_url"] or ""),
+        "local_path": str(row["local_path"] or ""),
+        "alt_text": str(row["alt_text"] or ""),
+        "width": row["width"],
+        "height": row["height"],
+        "bytes": row["bytes"],
+        "available": bool(news_image_target(row)) or bool(news_image_url(row)),
+    }
+    return payload
+
+
+def news_summary_payload(row: sqlite3.Row | dict[str, Any], image_counts: dict[str, int] | None = None) -> dict[str, Any]:
+    article_id = str(row["id"])
+    count = image_counts.get(article_id, 0) if image_counts is not None else 0
+    return {
+        "id": article_id,
+        "source": row["source"],
+        "source_label": NEWS_SOURCE_LABELS.get(str(row["source"]), str(row["source"])),
+        "page_name": row["page_name"],
+        "title": row["title"],
+        "published_at": row["published_at"],
+        "category": row["category"],
+        "tags": normalized_tags(decode_json(row["tags_json"], [])),
+        "summary": row["summary"],
+        "source_url": row["source_url"],
+        "image_count": count,
+        "edited": bool(decode_json(row["manual_fields_json"], [])),
+        "updated_at": row["updated_at"],
+    }
+
+
+def news_query_rows(conn: sqlite3.Connection, q: str = "", tags: str = "", source: str = "") -> list[sqlite3.Row]:
+    conditions = []
+    parameters: list[Any] = []
+    normalized_source = source.strip()
+    if normalized_source in NEWS_SOURCES:
+        conditions.append("source = ?")
+        parameters.append(normalized_source)
+    query = q.strip()
+    if query:
+        conditions.append("(title LIKE ? OR summary LIKE ? OR body_markdown LIKE ? OR category LIKE ? OR page_name LIKE ? OR tags_json LIKE ?)")
+        pattern = f"%{query}%"
+        parameters.extend([pattern] * 6)
+    sql = "SELECT * FROM news_articles"
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+    sql += " ORDER BY CASE WHEN published_at = '' THEN 1 ELSE 0 END, published_at DESC, id DESC"
+    rows = conn.execute(sql, parameters).fetchall()
+    selected_tags = set(normalized_tags(tags))
+    if not selected_tags:
+        return rows
+    return [row for row in rows if selected_tags.intersection(normalized_tags(decode_json(row["tags_json"], [])))]
+
+
+def news_tag_counts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        for tag in normalized_tags(decode_json(row["tags_json"], [])):
+            counts[tag] = counts.get(tag, 0) + 1
+    return [{"name": tag, "count": counts[tag]} for tag in sorted(counts, key=lambda value: (-counts[value], value))]
+
+
+def news_sync_status(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    row = conn.execute("SELECT checked_at, discovered_count, changed_count, error FROM news_sync_log ORDER BY id DESC LIMIT 1").fetchone()
+    return dict(row) if row else None
+
+
+def normalized_news_edit_value(field: str, value: Any) -> str:
+    if field == "tags_json":
+        return json.dumps(normalized_tags(value), ensure_ascii=False)
+    if field == "published_at":
+        raw = str(value or "").strip()
+        if raw and not normalize_news_date(raw):
+            raise ValueError("发布日期格式无效")
+        return normalize_news_date(raw)
+    result = str(value or "").strip()
+    limits = {"title": 500, "category": 100, "summary": 10000, "body_markdown": 500000, "source_url": 2000}
+    if len(result) > limits.get(field, 500000):
+        raise ValueError(f"{field}内容过长")
+    if field == "source_url" and result:
+        parsed = urlparse(result)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("来源地址需要填写完整的 HTTP/HTTPS 地址")
+    return result
+
+
+def news_listing_url(offset: int) -> str:
+    separator = "&" if "?" in NEWS_TOPICS_URL else "?"
+    return f"{NEWS_TOPICS_URL}{separator}offset={offset}"
+
+
+def news_upload_extension(content_type: str, content: bytes, filename: str) -> str | None:
+    signatures = (
+        (b"\xff\xd8\xff", ".jpg"),
+        (b"\x89PNG\r\n\x1a\n", ".png"),
+        (b"GIF87a", ".gif"),
+        (b"GIF89a", ".gif"),
+        (b"BM", ".bmp"),
+    )
+    for signature, extension in signatures:
+        if content.startswith(signature):
+            return extension
+    if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        return ".webp"
+    if content_type == "image/avif" or Path(filename).suffix.lower() == ".avif":
+        return ".avif" if content_type == "image/avif" else None
+    return None
+
+
+async def news_sync_once() -> dict[str, Any]:
+    """Fetch only the active Nijigasaki topics feed.
+
+    The old niji_news and as_news archives remain readable, but they are never
+    queried here because those endpoints no longer receive updates.
+    """
+    print("[news-sync] started", flush=True)
+    discovered_count = 0
+    changed_count = 0
+    error_message: str | None = None
+    async with sync_lock:
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+                "Referer": NEWS_TOPICS_URL,
+            }
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
+                with db() as conn:
+                    existing = {
+                        row["id"]: row
+                        for row in conn.execute("SELECT * FROM news_articles WHERE source = 'niji_topics'").fetchall()
+                    }
+                entries: list[dict[str, str]] = []
+                seen_urls: set[str] = set()
+                page_size = 6
+                max_pages = 4
+                offset = 0
+                for page in range(max_pages):
+                    response = await client.get(news_listing_url(offset))
+                    response.raise_for_status()
+                    page_entries = parse_topic_listing(response.text, NEWS_TOPICS_URL)
+                    if not page_entries:
+                        break
+                    for entry in page_entries:
+                        if entry["source_url"] not in seen_urls:
+                            entries.append(entry)
+                            seen_urls.add(entry["source_url"])
+                    unknown_on_page = any(news_id("niji_topics", entry["page_name"], entry["source_url"]) not in existing for entry in page_entries)
+                    if not unknown_on_page:
+                        break
+                    next_offset = topic_next_offset(response.text, offset)
+                    if next_offset is None:
+                        if len(page_entries) < page_size:
+                            break
+                        next_offset = offset + len(page_entries)
+                    if next_offset <= offset:
+                        break
+                    offset = next_offset
+            discovered_count = len(entries)
+            if not entries:
+                raise RuntimeError("topics 页面没有解析到新闻条目")
+
+            detail_errors = 0
+            with db() as conn:
+                async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as detail_client:
+                    for entry in entries:
+                        record_id = news_id("niji_topics", entry["page_name"], entry["source_url"])
+                        old = existing.get(record_id)
+                        listing_changed = bool(old and any(
+                            str(old[key] or "") != str(entry[key] or "")
+                            for key in ("title", "published_at", "category", "source_url")
+                        ))
+                        if old and not listing_changed:
+                            continue
+                        try:
+                            detail_response = await detail_client.get(entry["source_url"])
+                            detail_response.raise_for_status()
+                            record = parse_topic_detail(detail_response.text, entry["source_url"], entry)
+                            changed, _ = upsert_news_record(conn, record)
+                            if changed:
+                                changed_count += 1
+                        except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+                            detail_errors += 1
+                            print(f"[news-sync] detail failed {entry['source_url']}: {type(exc).__name__}", flush=True)
+                error_message = f"{detail_errors} 条详情读取失败" if detail_errors else None
+                conn.execute(
+                    "INSERT INTO news_sync_log(checked_at, discovered_count, changed_count, error) VALUES (?, ?, ?, ?)",
+                    (datetime.now(timezone.utc).isoformat(), discovered_count, changed_count, error_message),
+                )
+            print(f"[news-sync] completed: {changed_count} changed, {discovered_count} topics checked", flush=True)
+        except Exception as exc:
+            error_message = str(exc)
+            print(f"[news-sync] failed: {type(exc).__name__}: {exc}", flush=True)
+            with db() as conn:
+                conn.execute(
+                    "INSERT INTO news_sync_log(checked_at, discovered_count, changed_count, error) VALUES (?, ?, ?, ?)",
+                    (datetime.now(timezone.utc).isoformat(), discovered_count, changed_count, error_message),
+                )
+    return {
+        "discovered_count": discovered_count,
+        "changed_count": changed_count,
+        "error": error_message,
+    }
+
+
 async def wait_or_stop(seconds: int) -> None:
     try:
         await asyncio.wait_for(stop_event.wait(), timeout=seconds)
@@ -3142,6 +3441,21 @@ async def detail_scheduler() -> None:
         await wait_or_stop(seconds)
 
 
+async def news_scheduler() -> None:
+    # Let the application finish its first boot before making an external
+    # request. The interval is configured separately from the music crawler.
+    await wait_or_stop(20)
+    while not stop_event.is_set():
+        config = settings()
+        if boolean_value(config.get("news_auto_sync"), True):
+            await news_sync_once()
+        try:
+            seconds = max(600, min(86400, int(float(config.get("news_interval_minutes", "30")) * 60)))
+        except ValueError:
+            seconds = 1800
+        await wait_or_stop(seconds)
+
+
 def next_daily_backup_at(current: datetime) -> datetime:
     return (current + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -3167,10 +3481,11 @@ async def lifespan(_: FastAPI):
     prune_database_backups()
     source_task = asyncio.create_task(source_scheduler())
     detail_task = asyncio.create_task(detail_scheduler())
+    news_task = asyncio.create_task(news_scheduler())
     backup_task = asyncio.create_task(database_backup_scheduler())
     yield
     stop_event.set()
-    await asyncio.gather(source_task, detail_task, backup_task)
+    await asyncio.gather(source_task, detail_task, news_task, backup_task)
 
 
 app = FastAPI(title="Nijigasaki DB", lifespan=lifespan)
@@ -3178,6 +3493,165 @@ app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=6)
 app.mount("/media", StaticFiles(directory=str(MEDIA_DIR)), name="media")
 if FRONTEND_DIST.is_dir():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="frontend-assets")
+
+
+@app.get("/api/collaboration-illustrations")
+async def api_collaboration_illustrations() -> dict[str, Any]:
+    if not ILLUSTRATION_MANIFEST_PATH.is_file():
+        return {"available": False, "generated_at": None, "items": {}, "total_images": 0}
+    try:
+        manifest = json.loads(ILLUSTRATION_MANIFEST_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(503, "联动立绘索引暂时不可用") from exc
+    items = {}
+    for item_id, item in manifest.get("items", {}).items():
+        normalized = {"images": []}
+        for image in item.get("images", []):
+            asset_path = str(image.get("path", "")).removeprefix("/media/illustrations/").lstrip("/")
+            if not asset_path or not (ILLUSTRATION_DIR / asset_path).is_file():
+                continue
+            normalized["images"].append({
+                key: image.get(key)
+                for key in ("path", "source_url", "source_page", "sha256", "width", "height", "bytes", "kind")
+                if key in image
+            } | {"path": f"/api/collaboration-illustrations/assets/{asset_path}"})
+        status = str(item.get("status") or "")
+        normalized["status"] = status if status in {"complete", "partial", "unavailable"} else "complete" if normalized["images"] else "unavailable"
+        items[item_id] = normalized
+    return {
+        "available": True,
+        "generated_at": manifest.get("generated_at"),
+        "items": items,
+        "total_images": sum(len(item["images"]) for item in items.values()),
+    }
+
+
+@app.get("/api/collaboration-illustrations/assets/{asset_path:path}", include_in_schema=False)
+async def collaboration_illustration_asset(asset_path: str):
+    root = ILLUSTRATION_DIR.resolve()
+    target = (ILLUSTRATION_DIR / asset_path).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(404, "联动立绘资源不存在") from exc
+    if not target.is_file():
+        raise HTTPException(404, "联动立绘资源不存在")
+    media_type = mimetypes.guess_type(target.name)[0]
+    return FileResponse(target, media_type=media_type)
+
+
+def news_article_payload(conn: sqlite3.Connection, row: sqlite3.Row, detail: bool = False) -> dict[str, Any]:
+    image_rows = conn.execute(
+        "SELECT id, position, kind, local_path, source_url, alt_text, width, height, bytes, sha256 FROM news_images WHERE news_id = ? ORDER BY position, id",
+        (row["id"],),
+    ).fetchall()
+    payload = news_summary_payload(row, {str(row["id"]): len(image_rows)})
+    cover = next((image for image in image_rows if news_image_url(image)), None)
+    payload["cover_url"] = news_image_url(cover) if cover else ""
+    payload["available_image_count"] = sum(1 for image in image_rows if news_image_url(image))
+    if detail:
+        payload.update({
+            "body_markdown": row["body_markdown"],
+            "source_file": row["source_file"],
+            "source_hash": row["source_hash"],
+            "manual_fields": decode_json(row["manual_fields_json"], []),
+            "images": [news_image_payload(image) for image in image_rows],
+        })
+    return payload
+
+
+@app.get("/api/news/images/{image_id}", include_in_schema=False)
+async def api_news_image(image_id: int):
+    with db() as conn:
+        image = conn.execute("SELECT * FROM news_images WHERE id = ?", (image_id,)).fetchone()
+    if not image:
+        raise HTTPException(404, "新闻图片不存在")
+    target = news_image_target(image)
+    if target:
+        return FileResponse(target, media_type=mimetypes.guess_type(target.name)[0])
+    source_url = str(image["source_url"] or "").strip()
+    parsed = urlparse(source_url)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return RedirectResponse(source_url)
+    raise HTTPException(404, "新闻图片资源不存在")
+
+
+@app.get("/api/news")
+async def api_news(q: str = "", tags: str = "", source: str = "", page: int = 1, page_size: int = 24, tag: str = "") -> dict[str, Any]:
+    tags = tags or tag
+    page = max(1, page)
+    page_size = max(6, min(60, page_size))
+    with db() as conn:
+        rows = news_query_rows(conn, q, tags, source)
+        total = len(rows)
+        page_count = max(1, (total + page_size - 1) // page_size)
+        page = min(page, page_count)
+        page_rows = rows[(page - 1) * page_size : page * page_size]
+        image_counts = {
+            str(row["news_id"]): row["count"]
+            for row in conn.execute("SELECT news_id, COUNT(*) AS count FROM news_images GROUP BY news_id").fetchall()
+        }
+        article_ids = [row["id"] for row in page_rows]
+        covers: dict[str, sqlite3.Row] = {}
+        available_counts: dict[str, int] = {}
+        if article_ids:
+            placeholders = ",".join("?" for _ in article_ids)
+            for image in conn.execute(
+                f"SELECT * FROM news_images WHERE news_id IN ({placeholders}) ORDER BY position, id",
+                article_ids,
+            ).fetchall():
+                article_key = str(image["news_id"])
+                if news_image_url(image):
+                    available_counts[article_key] = available_counts.get(article_key, 0) + 1
+                    if article_key not in covers:
+                        covers[article_key] = image
+        payloads = []
+        for row in page_rows:
+            payload = news_summary_payload(row, image_counts)
+            cover = covers.get(str(row["id"]))
+            payload["cover_url"] = news_image_url(cover) if cover else ""
+            payload["available_image_count"] = available_counts.get(str(row["id"]), 0)
+            payloads.append(payload)
+        last = news_sync_status(conn)
+    return {
+        "items": payloads,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": page_count,
+        "q": q,
+        "tags": normalized_tags(tags),
+        "source": source if source in NEWS_SOURCES else "",
+        "tag_options": news_tag_counts(rows),
+        "source_options": [
+            {"name": source_name, "label": NEWS_SOURCE_LABELS[source_name], "count": sum(1 for row in rows if row["source"] == source_name)}
+            for source_name in ("niji_topics", "niji_news", "as_news")
+            if any(row["source"] == source_name for row in rows)
+        ],
+        "last_sync": last,
+    }
+
+
+@app.get("/api/news/{news_id}")
+async def api_news_detail(news_id: str, q: str = "", tags: str = "", source: str = "", tag: str = "") -> dict[str, Any]:
+    tags = tags or tag
+    with db() as conn:
+        article = conn.execute("SELECT * FROM news_articles WHERE id = ?", (news_id,)).fetchone()
+        if not article:
+            raise HTTPException(404, "新闻不存在")
+        rows = news_query_rows(conn, q, tags, source)
+        index = next((index for index, row in enumerate(rows) if row["id"] == news_id), -1)
+        previous = rows[index - 1] if index > 0 else None
+        following = rows[index + 1] if index >= 0 and index + 1 < len(rows) else None
+        article_payload = news_article_payload(conn, article, detail=True)
+        previous_payload = news_article_payload(conn, previous) if previous else None
+        following_payload = news_article_payload(conn, following) if following else None
+    return {
+        "article": article_payload,
+        "previous": previous_payload,
+        "following": following_payload,
+        "filter": {"q": q, "tags": normalized_tags(tags), "source": source if source in NEWS_SOURCES else ""},
+    }
 
 
 @app.get("/api/releases")
@@ -3342,6 +3816,134 @@ async def restore_validated_database(source_path: Path) -> dict[str, str]:
             raise HTTPException(500, "数据库还原失败，原数据库已保留") from exc
     print("[backup] database restored", flush=True)
     return {"message": "数据库还原成功，下一次同步会重新检查封面缓存"}
+
+
+@app.post("/api/admin/news/sync")
+async def api_admin_news_sync(request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    result = await news_sync_once()
+    with db() as conn:
+        result["last_sync"] = news_sync_status(conn)
+    return result
+
+
+@app.post("/api/admin/news/{news_id}/images")
+async def api_admin_news_upload_image(news_id: str, request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    max_bytes = 20 * 1024 * 1024
+    content_length = request.headers.get("content-length", "")
+    try:
+        if content_length and int(content_length) > max_bytes:
+            raise HTTPException(413, "单张新闻图片不能超过 20 MB")
+    except ValueError:
+        pass
+    with db() as conn:
+        article = conn.execute("SELECT id FROM news_articles WHERE id = ?", (news_id,)).fetchone()
+    if not article:
+        raise HTTPException(404, "新闻不存在")
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(413, "单张新闻图片不能超过 20 MB")
+        chunks.append(chunk)
+    content = b"".join(chunks)
+    filename = unquote(str(request.headers.get("x-filename", "news-image")))
+    content_type = str(request.headers.get("content-type", "")).split(";", 1)[0].strip().lower()
+    extension = news_upload_extension(content_type, content, filename)
+    if not extension:
+        raise HTTPException(415, "只支持 JPEG、PNG、GIF、WebP、BMP 或 AVIF 图片")
+    digest = hashlib.sha256(content).hexdigest()
+    relative = Path("manual") / f"{digest}{extension}"
+    target = NEWS_RUNTIME_DIR / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        temporary = target.with_name(f".{target.name}.{secrets.token_hex(6)}.tmp")
+        try:
+            temporary.write_bytes(content)
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+    alt_text = str(request.headers.get("x-alt-text", "")).strip()[:500]
+    with db() as conn:
+        existing = conn.execute(
+            "SELECT id FROM news_images WHERE news_id = ? AND kind = 'manual' AND local_path = ? LIMIT 1",
+            (news_id, f"runtime:{relative.as_posix()}"),
+        ).fetchone()
+        if not existing:
+            position = conn.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM news_images WHERE news_id = ?", (news_id,)).fetchone()[0]
+            conn.execute(
+                """INSERT INTO news_images
+                (news_id, position, kind, local_path, source_url, alt_text, bytes, sha256, created_at)
+                VALUES (?, ?, 'manual', ?, '', ?, ?, ?, ?)""",
+                (news_id, position, f"runtime:{relative.as_posix()}", alt_text, total, digest, datetime.now(timezone.utc).isoformat()),
+            )
+        updated = conn.execute("SELECT * FROM news_articles WHERE id = ?", (news_id,)).fetchone()
+        result = news_article_payload(conn, updated, detail=True)
+    log_database_activity("news", f"补充官网新闻图片：{result['title'][:80]}")
+    return {"article": result}
+
+
+@app.delete("/api/admin/news/images/{image_id}")
+async def api_admin_news_delete_image(image_id: int, request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    with db() as conn:
+        image = conn.execute("SELECT * FROM news_images WHERE id = ?", (image_id,)).fetchone()
+        if not image:
+            raise HTTPException(404, "新闻图片不存在")
+        if image["kind"] != "manual":
+            raise HTTPException(400, "只能删除手动补录的图片")
+        target = news_image_target(image)
+        conn.execute("DELETE FROM news_images WHERE id = ?", (image_id,))
+        still_used = conn.execute("SELECT 1 FROM news_images WHERE local_path = ? LIMIT 1", (image["local_path"],)).fetchone()
+        article = conn.execute("SELECT * FROM news_articles WHERE id = ?", (image["news_id"],)).fetchone()
+        result = news_article_payload(conn, article, detail=True)
+    if target and not still_used:
+        target.unlink(missing_ok=True)
+    return {"article": result}
+
+
+@app.patch("/api/admin/news/{news_id}")
+async def api_admin_news_edit(news_id: str, request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "请求格式无效") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "请求格式无效")
+    changes: dict[str, str] = {}
+    for field in NEWS_EDITABLE_FIELDS:
+        if field in payload:
+            value = payload[field]
+        elif field == "tags_json" and "tags" in payload:
+            value = payload["tags"]
+        else:
+            continue
+        try:
+            changes[field] = normalized_news_edit_value(field, value)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    if not changes:
+        raise HTTPException(400, "没有可保存的新闻字段")
+    with db() as conn:
+        article = conn.execute("SELECT * FROM news_articles WHERE id = ?", (news_id,)).fetchone()
+        if not article:
+            raise HTTPException(404, "新闻不存在")
+        manual_fields = set(decode_json(article["manual_fields_json"], []))
+        manual_fields.update(changes)
+        assignments = ", ".join(f"{field} = ?" for field in changes)
+        values = list(changes.values())
+        values.extend([json.dumps(sorted(manual_fields), ensure_ascii=False), datetime.now(timezone.utc).isoformat(), news_id])
+        conn.execute(
+            f"UPDATE news_articles SET {assignments}, manual_fields_json = ?, updated_at = ? WHERE id = ?",
+            values,
+        )
+        updated = conn.execute("SELECT * FROM news_articles WHERE id = ?", (news_id,)).fetchone()
+        result = news_article_payload(conn, updated, detail=True)
+    log_database_activity("news", f"更新官网新闻：{result['title'][:80]}")
+    return {"article": result}
 
 
 @app.get("/api/admin/backups")

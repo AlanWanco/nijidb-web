@@ -82,8 +82,9 @@ onBeforeUnmount(() => {
         </RouterLink>
         <nav class="section-nav" :aria-label="t('内容分类')">
           <RouterLink class="music-link" to="/music">{{ t("音乐") }}</RouterLink>
+          <RouterLink class="news-link" to="/news">{{ t("官网新闻") }}</RouterLink>
           <RouterLink class="program-link" to="/programs">{{ t("节目档案") }}</RouterLink>
-          <span class="planned" aria-disabled="true" :title="t('即将推出')">{{ t("联动立绘") }}</span>
+          <RouterLink class="illustration-link" to="/collabo">{{ t("联动立绘") }}</RouterLink>
         </nav>
       </div>
       <nav class="site-nav">
@@ -115,7 +116,8 @@ onBeforeUnmount(() => {
     <RouterView />
     <footer>
        <span v-if="route.path === '/music'" class="footer-source"><strong class="footer-title">{{ t("数据源：") }}</strong><a href="https://www.lovelive-anime.jp/nijigasaki/cd.php" target="_blank" rel="noopener noreferrer">lovelive-anime.jp</a></span>
-       <span v-if="route.path === '/music'" class="footer-divider" aria-hidden="true"></span>
+       <span v-if="route.path.startsWith('/news')" class="footer-source"><strong class="footer-title">{{ t("数据源：") }}</strong><a href="https://www.lovelive-anime.jp/nijigasaki/topics.php" target="_blank" rel="noopener noreferrer">lovelive-anime.jp/topics.php</a></span>
+       <span v-if="route.path === '/music' || route.path.startsWith('/news')" class="footer-divider" aria-hidden="true"></span>
          <span class="footer-title">{{ t("友链：") }}</span>
         <span class="footer-links">
           <a href="https://events.nijigaku.fans/" target="_blank" rel="noopener noreferrer">Nijigaku Events</a>

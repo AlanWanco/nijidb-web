@@ -9,6 +9,8 @@ const router = useRouter();
 const settings = reactive({
   interval_minutes: "10",
   detail_interval_minutes: "5",
+  news_interval_minutes: "30",
+  news_auto_sync: "1",
   onebot_url: "",
   onebot_token: "",
   onebot_target: "",
@@ -19,6 +21,7 @@ const loading = ref(true);
 const saving = ref(false);
 const testing = ref(false);
 const syncing = ref(false);
+const newsSyncing = ref(false);
 const activityLogs = ref([]);
 const changingPassword = ref(false);
 const message = ref("");
@@ -49,8 +52,9 @@ function setSettings(values) {
 }
 
 function activityLogSummary(log) {
-  if (log.error) return t("歌曲监控检查失败");
-  return `${log.category === "program" ? t("节目档案") : t("歌曲监控")} · ${log.summary}`;
+  if (log.error) return log.category === "news" ? t("新闻监控检查失败") : t("歌曲监控检查失败");
+  const category = log.category === "program" ? t("节目档案") : log.category === "news" ? t("官网新闻") : t("歌曲监控");
+  return `${category} · ${log.summary}`;
 }
 
 async function loadSettings() {
@@ -136,6 +140,21 @@ async function changePassword() {
     else passwordError.value = requestError.message || t("密码修改失败");
   } finally {
     changingPassword.value = false;
+  }
+}
+
+async function syncNewsNow() {
+  newsSyncing.value = true;
+  message.value = "";
+  error.value = "";
+  try {
+    const data = await api("/api/admin/news/sync", { method: "POST" });
+    if (data.error) error.value = `${t("新闻同步失败")}: ${data.error}`;
+    else message.value = data.changed_count ? t("新闻监控发现 {count} 项变化", { count: data.changed_count }) : t("Topics 没有新变化");
+  } catch (requestError) {
+    showError(requestError);
+  } finally {
+    newsSyncing.value = false;
   }
 }
 
@@ -273,7 +292,10 @@ onMounted(loadSettings);
         <p v-if="message" class="success">{{ message }}</p>
         <p v-if="error" class="state error">{{ error }}</p>
         <div class="settings-stack">
-          <button class="secondary settings-programs-button" type="button" @click="router.push('/admin/programs')">{{ t("管理节目") }}</button>
+          <div class="settings-quick-links">
+            <button class="secondary settings-programs-button" type="button" @click="router.push('/admin/programs')">{{ t("管理节目") }}</button>
+            <button class="secondary settings-programs-button" type="button" @click="router.push('/news')">{{ t("打开官网新闻") }}</button>
+          </div>
           <form class="settings-card" @submit.prevent="saveSettings">
              <div class="form-heading"><span class="form-number">01</span><div><p class="form-kicker">SYNC ENGINE</p><h2>{{ t("抓取") }}</h2></div></div>
             <label>{{ t("整页目录检查（分钟）") }}<input v-model="settings.interval_minutes" type="number" min="5" max="60"><small>{{ t("检查目录顺序、新专辑和封面，范围 5–60 分钟。") }}</small></label>
@@ -288,6 +310,13 @@ onMounted(loadSettings);
               <button type="button" class="secondary" :disabled="testing" @click="testOnebot">{{ testing ? t("发送中……") : t("发送测试消息") }}</button>
             </div>
           </form>
+          <section class="settings-card news-monitor-card">
+            <div class="form-heading"><span class="form-number">02</span><div><p class="form-kicker">NEWS MONITOR</p><h2>{{ t("官网新闻") }}</h2></div></div>
+            <p class="muted">{{ t("只自动检查官网 Topics；历史 news 与 as_news 仅作为本地归档展示。") }}</p>
+            <label class="settings-checkbox"><input type="checkbox" :checked="settings.news_auto_sync === '1'" @change="settings.news_auto_sync = $event.target.checked ? '1' : '0'"><span>{{ t("启用 Topics 自动检查") }}</span></label>
+            <label>{{ t("Topics 检查间隔（分钟）") }}<input v-model="settings.news_interval_minutes" type="number" min="10" max="1440"><small>{{ t("范围 10–1440 分钟；图片可在页面内后续补录。") }}</small></label>
+            <div class="actions"><button type="button" :disabled="newsSyncing" @click="syncNewsNow">{{ newsSyncing ? t("检查中……") : t("立即检查 Topics") }}</button><button type="button" class="secondary" :disabled="saving" @click="saveSettings">{{ saving ? t("保存中……") : t("保存新闻设置") }}</button><button type="button" class="secondary" @click="router.push('/news')">{{ t("查看新闻页") }}</button></div>
+          </section>
           <form class="settings-card password-form" @submit.prevent="changePassword">
             <div class="form-heading"><span class="form-number">03</span><div><p class="form-kicker">ACCESS CONTROL</p><h2>{{ t("修改管理员密码") }}</h2></div></div>
             <p class="muted">{{ t("新密码至少 8 位，修改后会持久化到数据卷。") }}</p>
@@ -316,7 +345,7 @@ onMounted(loadSettings);
           </section>
            <section class="settings-card backup">
              <div class="form-heading"><span class="form-number">06</span><div><p class="form-kicker">DATA SAFETY</p><h2>{{ t("数据库备份与还原") }}</h2></div></div>
-              <p class="muted">{{ t("备份包含设置、节目档案、发行资料和同步记录，不包含封面图片。JSON 导入前、数据库还原前和每天 00:00（Asia/Tokyo）会自动保存备份到数据卷的 /data/backups 文件夹，最多保留最近 30 份。") }}</p>
+              <p class="muted">{{ t("备份包含设置、节目档案、发行资料、新闻和同步记录，不包含图片文件。JSON 导入前、数据库还原前和每天 00:00（Asia/Tokyo）会自动保存备份到数据卷的 /data/backups 文件夹，最多保留最近 30 份。") }}</p>
              <p v-if="backupMessage" class="success">{{ backupMessage }}</p>
              <p v-if="backupError" class="state error">{{ backupError }}</p>
              <div class="backup-actions">

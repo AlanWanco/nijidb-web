@@ -37,7 +37,7 @@ docker run --rm --mount source=nijidb-data,target=/data \
   --entrypoint python nijidb-web /scripts/upload_images_to_r2.py --rewrite-db
 ```
 
-`--rewrite-db` 会先在数据目录创建 SQLite 备份，再把数据库和详情 HTML 中的 `/media/...` 引用改为公开 R2 URL。没有公开访问地址时可以省略该参数，仅执行图片上传。后续同步只配置 Endpoint、Bucket 和 S3 凭证时，会自动把新封面上传到 R2 但继续使用本地 `/media` 引用；补充 `R2_PUBLIC_BASE_URL` 后，才会同时生成 R2 引用。
+`--rewrite-db` 会先在数据目录创建 SQLite 备份，再把数据库和详情 HTML 中的 `/media/...` 引用改为公开 R2 URL。没有公开访问地址时可以省略该参数，仅执行图片上传。后续同步只配置 Endpoint、Bucket 和 S3 凭证时，会自动把新封面上传到 R2 但继续使用本地 `/media` 引用；补充 `R2_PUBLIC_BASE_URL` 后，才会同时生成 R2 引用。新闻运行时图片位于 `/data/images/news` 时也会按同一公开前缀读取，不需要改写新闻表。
 
 ## 开发调试
 
@@ -58,6 +58,32 @@ npm run dev
 
 打开 `http://localhost:5173`。Vite 会把 `/api` 和 `/media` 请求代理到 `http://127.0.0.1:8000`；如果后端使用其他地址，可设置 `VITE_BACKEND_URL`。生产 Docker 镜像会自动构建 `frontend/dist`，无需手动执行前端构建。
 
+## 联动立绘档案
+
+`/illustrations` 页面使用仓库内的 `frontend/src/content/collaborationIllustrations.json` 展示 Wiki 元数据和官方出处。图片采集结果、缓存和 manifest 保存在 Git 忽略的 `data/` 下，不随前端构建提交；开发时后端会自动读取本地 `data/images/illustrations/`，并通过 `/api/collaboration-illustrations` 提供索引和图片接口。若需要在容器中启用本地图片，将该目录复制到数据卷的 `/data/images/illustrations/`，然后重启应用即可。采集脚本包括：
+
+```bash
+uv run --locked python scripts/import_collaboration_illustrations.py
+uv run --locked python scripts/collect_collaboration_illustrations.py
+uv run --locked python scripts/collect_wayback_illustrations.py
+uv run --locked python scripts/collect_pdf_illustrations.py
+uv run --locked python scripts/collect_local_illustrations.py --source-dir /Volumes/SSK/Download/bangumi-parser/ll-offical-site
+```
+
+联网采集脚本只接受官方页面、官方 PDF、Wayback 的官方页面快照和官方账号的原图候选，并会过滤 logo、导航、二维码、头像和站点装饰图。`collect_local_illustrations.py` 不联网，只按本地 Markdown 的页面 ID 和已审核图片序号补入资源，并按 SHA-256 去重且不覆盖已有文件。清单中的 `complete` 表示已收录 3 张，`partial` 表示目前只有 1–2 张，`unavailable` 表示暂未找到可验证的本地资源，需继续人工审核。
+
+## 官网新闻
+
+`/news` 使用独立的 `news_articles`、`news_images` 和 `news_sync_log` 表。可以把本地 `ll-offical-site/*.md` 一次导入数据库；导入器默认只保存 `pic/` 相对路径，不会复制约 6GB 的原始图库：
+
+```bash
+uv run --locked python scripts/import_official_news.py \
+  --root /Volumes/SSK/Download/bangumi-parser/ll-offical-site \
+  --database data/nijidb.sqlite3
+```
+
+运行本地后端时设置 `NEWS_ARCHIVE_DIR` 指向该归档目录，页面会通过新闻图片接口读取本地图片。需要将图片复制到数据卷时再加 `--copy-images`。后台只定时检查 `https://www.lovelive-anime.jp/nijigasaki/topics.php`，不会请求已停止更新的 `news` 或 `as_news`；检查间隔和开关可在设置页调整。管理员登录后可直接在新闻详情页修改标题、日期、分类、tags、摘要和正文。
+
 ## 节目档案
 
 打开 `/programs` 查看节目播出日历；登录后打开 `/admin/programs` 手动维护节目资料和排期。排期支持周更、固定月更、逐期设置、单次和多个分段时期，每个时期可以选择更新时间时区。逐期设置会按月生成每月 1 日作为占位，之后可在单集列表中直接修改每期原定日期和时间。对异常节目的单集列表可以关闭后续自动生成，改用“添加单集”逐条录入，也可以将固定月更批量切换为逐期设置，或将已改期日期和时间覆盖为新的原定播出日期和时间。一个主节目下可以挂载多个独立配置的子节目，主节目 key 固定为“主节目”。开启自动生成的进行中节目会按规则生成未来约半年的单集，也可以对单集进行改期、取消或补录。“未更新”仅按当前排期规则推算，不代表真实播出状态。
@@ -67,9 +93,9 @@ npm run dev
 ## TODO / Roadmap
 
 - [ ] 数据库查询页：按标题、艺术家、日期和发行 ID 搜索。
-- [ ] 虹咲其他官方资料页：成员、音乐、活动和新闻等。
+- [x] 官网新闻页：本地 Markdown 归档、Topics 自动检查、tags 筛选和页面内编辑。
 - [x] 节目档案页：整理官方和个人节目资料。
-- [ ] 联动立绘页：整理联动视觉和相关出处。
+- [x] 联动立绘页：整理联动视觉和相关出处。
 - [ ] 艺术家详情页：关联作品、曲目和 credit。
 - [ ] 跨平台账号映射和艺术家关系表。
 - [ ] 补充同步、解析和数据迁移测试。

@@ -1,0 +1,247 @@
+// Read-only fixtures; every backend request is mocked. No production or local database writes.
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE || "playwright");
+const fs = require("fs");
+const path = require("path");
+const assert = require("node:assert/strict");
+const root = path.resolve(__dirname, "../..");
+const catalog = JSON.parse(fs.readFileSync(path.join(root, "frontend/src/content/collaborationIllustrations.json")));
+const manifest = JSON.parse(fs.readFileSync(path.join(root, "data/images/illustrations/manifest.json")));
+const rawItems = catalog.years
+  .flatMap((y) => y.items)
+  .sort((a, b) => b.first_seen.localeCompare(a.first_seen) || a.id.localeCompare(b.id));
+const images = (id) =>
+  (manifest.items[id]?.images || []).map((i) => ({
+    ...i,
+    path: i.path.replace("/media/illustrations/", "/api/collaboration-illustrations/assets/"),
+  }));
+const sample = rawItems.find((i) => images(i.id).length > 1);
+const slug = (i) => `${i.first_seen.replaceAll("-", "")}-${i.id.slice(0, 6)}`;
+let dbMode = false;
+let saves = 0;
+const dbItem = { ...sample, slug: slug(sample), images: images(sample.id), review_status: "pending" };
+const browserErrors = [];
+async function configure(context) {
+  await context.addInitScript(() => {
+    localStorage.setItem("locale", "zh-CN");
+    localStorage.setItem("theme", "latte");
+  });
+  await context.route("**/api/**", async (route) => {
+    const u = new URL(route.request().url());
+    const p = u.pathname;
+    const json = (data) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(data) });
+    if (p.startsWith("/api/collaboration-illustrations/assets/")) {
+      const asset = p.replace("/api/collaboration-illustrations/assets/", "");
+      const target = path.join(root, "data/images/illustrations", asset);
+      if (fs.existsSync(target))
+        return route.fulfill({
+          status: 200,
+          contentType: asset.endsWith("png") ? "image/png" : "image/jpeg",
+          body: fs.readFileSync(target),
+        });
+    }
+    if (p === "/api/collaboration-illustrations")
+      return json({
+        available: true,
+        items: Object.fromEntries(rawItems.map((i) => [i.id, { images: images(i.id) }])),
+      });
+    if (p === "/api/auth/session") return json({ authenticated: true });
+    if (p.startsWith("/api/releases/")) {
+      const id = p.split("/").pop();
+      return json({
+        release: { id, title: `CD ${id}`, source_url: "https://example.com", cover_url: images(sample.id)[0].path },
+        previous: id === "two" ? { id: "one", title: "CD one" } : null,
+        following: id === "one" ? { id: "two", title: "CD two" } : null,
+      });
+    }
+    if (dbMode && (p === "/api/admin/collabo" || p === "/api/collabo"))
+      return json({ items: [dbItem], total: 1, years: ["2026"], source: catalog.source });
+    if (dbMode && (p === `/api/admin/collabo/${sample.id}` || p === `/api/collabo/${slug(sample)}`)) {
+      if (route.request().method() === "PATCH") {
+        saves++;
+        Object.assign(dbItem, route.request().postDataJSON());
+      }
+      return json({ item: dbItem, source: catalog.source, previous: null, following: null });
+    }
+    return route.fulfill({ status: 404, contentType: "application/json", body: '{"detail":"Not Found"}' });
+  });
+}
+async function swipe(page, selector, dx, dy = 2) {
+  await page.locator(selector).evaluate(
+    (el, { dx, dy }) => {
+      const r = el.getBoundingClientRect();
+      const x = dx < 0 ? Math.min(innerWidth - 60, 290) : 65;
+      const y = Math.max(180, Math.min(r.top + 50, innerHeight - 80));
+      const point = (px, py) => new Touch({ identifier: 1, target: el, clientX: px, clientY: py });
+      el.dispatchEvent(
+        new TouchEvent("touchstart", { bubbles: true, touches: [point(x, y)], changedTouches: [point(x, y)] }),
+      );
+      el.dispatchEvent(
+        new TouchEvent("touchmove", {
+          bubbles: true,
+          touches: [point(x + dx, y + dy)],
+          changedTouches: [point(x + dx, y + dy)],
+        }),
+      );
+      el.dispatchEvent(
+        new TouchEvent("touchend", { bubbles: true, touches: [], changedTouches: [point(x + dx, y + dy)] }),
+      );
+    },
+    { dx, dy },
+  );
+}
+(async () => {
+  const browser = await chromium.launch({
+    headless: true,
+    executablePath: process.env.CHROME_PATH || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  });
+  try {
+    const desktop = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+    await configure(desktop);
+    const page = await desktop.newPage();
+    page.on("pageerror", (e) => browserErrors.push(e.message));
+    await page.goto("http://127.0.0.1:15173/collabo");
+    await page.waitForSelector(".cb-card");
+    assert.equal(await page.locator(".cb-card").count(), 24);
+    assert.equal((await page.locator(".cb-card img").count()) <= 24, true);
+    const heroBounds = await page.locator(".cb-hero").boundingBox();
+    await page.mouse.move(heroBounds.x + heroBounds.width * 0.8, heroBounds.y + heroBounds.height * 0.35);
+    await page.waitForTimeout(100);
+    assert.notEqual(
+      await page
+        .locator(".cb-hero")
+        .evaluate((element) => getComputedStyle(element).getPropertyValue("--cb-hero-focus-x")),
+      "0px",
+    );
+    await page.evaluate(() => window.scrollTo(0, 900));
+    const filterScroll = await page.evaluate(() => window.scrollY);
+    await page.getByRole("button", { name: "2026", exact: true }).evaluate((element) => element.click());
+    await page.waitForURL(/year=2026/);
+    await page.waitForTimeout(300);
+    assert.ok(
+      Math.abs((await page.evaluate(() => window.scrollY)) - filterScroll) < 100,
+      "preserve year filter scroll",
+    );
+    assert.equal(await page.locator(".cb-year-chip.selected").count(), 1);
+    await page.getByRole("button", { name: "2025", exact: true }).evaluate((element) => element.click());
+    await page.waitForURL(/year=2026%2C2025|year=2025%2C2026|year=2026,2025|year=2025,2026/);
+    assert.equal(await page.locator(".cb-year-chip.selected").count(), 2);
+    await page.getByRole("button", { name: /全部年份/ }).click();
+    await page.waitForURL((url) => !url.searchParams.has("year"));
+    assert.equal(await page.locator(".cb-year-chip.selected").count(), 1);
+    await page.screenshot({ path: "/tmp/nijidb-collabo-desktop.png", fullPage: false });
+    await page.getByRole("button", { name: "夜间", exact: true }).click();
+    await page.screenshot({ path: "/tmp/nijidb-collabo-dark.png", fullPage: false });
+    await page.evaluate(() => window.scrollTo(0, 1650));
+    const listScroll = await page.evaluate(() => window.scrollY);
+    await page
+      .locator(".cb-card")
+      .nth(14)
+      .evaluate((element) => element.click());
+    await page.waitForSelector(".cb-detail-layout");
+    await page.getByRole("link", { name: "返回联动一览", exact: false }).click();
+    await page.waitForSelector(".cb-card");
+    await page.waitForTimeout(700);
+    assert.ok(Math.abs((await page.evaluate(() => window.scrollY)) - listScroll) < 100, "restore list scroll");
+    await page.goto(`http://127.0.0.1:15173/collabo/${slug(sample)}`);
+    await page.waitForSelector(".cb-detail-layout");
+    await page.waitForFunction(() => document.querySelector(".cb-gallery-stage img")?.naturalWidth > 0);
+    assert.equal((await page.locator(".cb-related a").count()) >= sample.official_links.length, true);
+    await page.screenshot({ path: "/tmp/nijidb-collabo-detail.png", fullPage: false });
+    await page.getByRole("button", { name: "查看大图", exact: true }).click();
+    assert.equal(await page.locator("dialog[open]").count(), 1);
+    const url = page.url();
+    await page.keyboard.press("ArrowRight");
+    await page.waitForTimeout(200);
+    assert.equal(page.url(), url);
+    assert.match(await page.locator(".cb-lightbox-bar").innerText(), /^2 \/ /);
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(100);
+    assert.equal(await page.locator("dialog[open]").count(), 0);
+    assert.equal(await page.evaluate(() => document.body.style.overflow), "");
+    await page.goto(`http://127.0.0.1:15173/admin/collabo/${sample.id}`);
+    await page.waitForSelector(".cb-editor");
+    assert.equal(await page.getByRole("button", { name: "保存到数据库", exact: true }).isDisabled(), true);
+    await page.getByLabel("标题", { exact: true }).fill("edited local draft");
+    const downloadPromise = page.waitForEvent("download");
+    await page.getByRole("button", { name: "导出草稿 JSON" }).click();
+    const download = await downloadPromise;
+    const payload = JSON.parse(fs.readFileSync(await download.path(), "utf8"));
+    assert.equal(payload.item.title, "edited local draft");
+    page.on("dialog", (d) => d.accept());
+    dbMode = true;
+    await page.reload();
+    await page.waitForSelector(".cb-editor");
+    assert.equal(await page.getByRole("button", { name: "保存到数据库", exact: true }).isEnabled(), true);
+    await page.getByLabel("标题", { exact: true }).fill("Database save test");
+    await page.getByRole("button", { name: "保存到数据库", exact: true }).click();
+    await page.getByRole("status").filter({ hasText: "保存成功" }).waitFor();
+    assert.equal(saves, 1);
+    const deleted = rawItems.find((item) => item.id !== sample.id);
+    await page.goto(`http://127.0.0.1:15173/collabo/${slug(deleted)}`);
+    await page.getByRole("alert").filter({ hasText: "未找到联动" }).waitFor();
+    assert.equal(await page.locator(".cb-detail-layout").count(), 0);
+    dbMode = false;
+    const mobile = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      isMobile: true,
+      hasTouch: true,
+      deviceScaleFactor: 1,
+    });
+    await configure(mobile);
+    const phone = await mobile.newPage();
+    phone.on("pageerror", (e) => browserErrors.push(e.message));
+    await phone.goto("http://127.0.0.1:15173/collabo");
+    await phone.waitForSelector(".cb-card");
+    assert.equal(await phone.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await phone.screenshot({ path: "/tmp/nijidb-collabo-mobile.png", fullPage: false });
+    await phone.goto(`http://127.0.0.1:15173/collabo/${slug(sample)}`);
+    await phone.waitForSelector(".cb-gallery-stage");
+    assert.equal(await phone.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await phone.screenshot({ path: "/tmp/nijidb-collabo-mobile-detail.png", fullPage: false });
+    const before = phone.url();
+    await swipe(phone, ".cb-gallery-stage", -110, 80);
+    assert.equal(phone.url(), before);
+    await swipe(phone, ".cb-gallery-stage", -110);
+    await phone.waitForTimeout(600);
+    assert.notEqual(phone.url(), before);
+    await phone.goto("http://127.0.0.1:15173/release/one");
+    await phone.waitForSelector(".release");
+    await swipe(phone, ".release-cover-art", -110);
+    await phone.waitForURL("**/release/two");
+    await phone.waitForSelector(".release");
+    await swipe(phone, ".release-cover-art", 110);
+    await phone.waitForURL("**/release/one");
+    for (const width of [320, 768, 1024]) {
+      await phone.setViewportSize({ width, height: 1000 });
+      await phone.goto("http://127.0.0.1:15173/collabo");
+      await phone.waitForSelector(".cb-card");
+      assert.equal(
+        await phone.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+        true,
+        `list width ${width}`,
+      );
+      await phone.goto(`http://127.0.0.1:15173/admin/collabo/${sample.id}`);
+      await phone.waitForSelector(".cb-editor");
+      assert.equal(
+        await phone.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+        true,
+        `editor width ${width}`,
+      );
+    }
+    await page.route("**/api/collabo?*", (route) =>
+      route.fulfill({ status: 500, contentType: "application/json", body: '{"detail":"Database unavailable"}' }),
+    );
+    await page.goto("http://127.0.0.1:15173/collabo");
+    await page.getByRole("alert").filter({ hasText: "Database unavailable" }).waitFor();
+    assert.equal(await page.locator(".cb-card").count(), 0);
+    assert.deepEqual(browserErrors, []);
+    console.log(
+      "PASS: desktop/light/dark, pagination, gallery keyboard + close, editor draft export + mocked DB save, mobile layout, vertical-scroll guard, collaboration swipe, CD bidirectional swipe.",
+    );
+  } finally {
+    await browser.close();
+  }
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

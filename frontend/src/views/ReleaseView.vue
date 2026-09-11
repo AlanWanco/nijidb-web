@@ -4,6 +4,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 import { api } from "../api";
 import { t } from "../i18n";
+import { useDetailNavigation } from "../composables/useDetailNavigation";
 
 const route = useRoute();
 const router = useRouter();
@@ -23,17 +24,22 @@ const safeDetailHtml = computed(() => {
   return parsed.body.innerHTML;
 });
 
+let releaseRequestId = 0;
+
 async function loadRelease() {
+  const requestId = ++releaseRequestId;
   loading.value = true;
   error.value = "";
   data.value = null;
   try {
-    data.value = await api(`/api/releases/${encodeURIComponent(route.params.releaseId)}`);
-    document.title = `${data.value.release.title} · Nijigasaki DB`;
+    const result = await api(`/api/releases/${encodeURIComponent(route.params.releaseId)}`);
+    if (requestId !== releaseRequestId) return;
+    data.value = result;
+    document.title = `${result.release.title} · Nijigasaki DB`;
   } catch (requestError) {
-     error.value = requestError.message || t("专辑加载失败");
+    if (requestId === releaseRequestId) error.value = requestError.message || t("专辑加载失败");
   } finally {
-    loading.value = false;
+    if (requestId === releaseRequestId) loading.value = false;
   }
 }
 
@@ -41,19 +47,18 @@ function navigate(id) {
   if (id) router.push(`/release/${id}`);
 }
 
-function handleKeydown(event) {
-  if (event.target.closest("input,textarea,select,button,[contenteditable=\"true\"]")) return;
-  if (event.key === "ArrowLeft") navigate(data.value?.previous?.id);
-  if (event.key === "ArrowRight") navigate(data.value?.following?.id);
-}
+const detailTouch = useDetailNavigation({
+  previous: () => navigate(data.value?.previous?.id),
+  following: () => navigate(data.value?.following?.id),
+  enabled: () => !loading.value && Boolean(release.value),
+});
 
 watch(() => route.params.releaseId, loadRelease, { immediate: true });
-window.addEventListener("keydown", handleKeydown);
-onBeforeUnmount(() => window.removeEventListener("keydown", handleKeydown));
+onBeforeUnmount(() => { releaseRequestId += 1; });
 </script>
 
 <template>
-  <main class="page">
+  <main class="page" @touchstart.passive="detailTouch.onTouchStart" @touchmove.passive="detailTouch.onTouchMove" @touchend.passive="detailTouch.onTouchEnd" @touchcancel.passive="detailTouch.onTouchCancel">
     <div class="detail-topline">
        <RouterLink class="back" to="/music"><span aria-hidden="true">←</span> {{ t("返回专辑目录") }}</RouterLink>
        <span class="keyboard-hint">← / → {{ t("浏览发行") }}</span>

@@ -20,7 +20,7 @@ from urllib.parse import quote, urlparse
 import boto3
 
 
-SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"}
+SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".bmp", ".avif"}
 
 
 def required_env(name: str) -> str:

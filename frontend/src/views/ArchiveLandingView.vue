@@ -21,12 +21,22 @@ const archiveChoices = [
     action: "进入节目档案",
   },
   {
-    theme: "illustration",
+    path: "/news",
+    theme: "news",
     index: "03",
+    eyebrow: "NEWS ARCHIVE",
+    title: "官网新闻",
+    description: "整理虹咲官方 Topics、News 与历史公告。",
+    action: "进入官网新闻",
+  },
+  {
+    path: "/collabo",
+    theme: "illustration",
+    index: "04",
     eyebrow: "COLLABORATION ILLUSTRATIONS",
     title: "联动立绘档案",
-    description: "这个入口还在挖坑，等整理好再和你见面。",
-    action: "建设中",
+    description: "按年份浏览官方联动记录，查看本地整理的立绘与来源页面。",
+    action: "浏览联动立绘",
   },
 ];
 </script>
@@ -36,7 +46,7 @@ const archiveChoices = [
     <section class="archive-landing-intro">
       <p class="eyebrow">NIJIGASAKI DATA ARCHIVE</p>
      <h1>{{ t("选择一个档案入口") }}<span class="title-mark" aria-hidden="true"></span></h1>
-     <p>{{ t("音乐、节目，以及还在慢慢整理中的联动记录。") }}</p>
+     <p>{{ t("音乐、节目、新闻，以及还在慢慢整理中的联动记录。") }}</p>
    </section>
 
    <section class="archive-choice-grid" :aria-label="t('档案入口')">
@@ -56,15 +66,6 @@ const archiveChoices = [
        <span class="archive-choice-footer"><span>{{ t(choice.action) }}</span><b aria-hidden="true">↗</b></span>
       </RouterLink>
 
-      <article class="archive-choice archive-choice-illustration is-planned" aria-disabled="true">
-        <span class="archive-choice-index">{{ archiveChoices[2].index }}</span>
-        <div class="archive-choice-content">
-          <p class="eyebrow">{{ archiveChoices[2].eyebrow }}</p>
-         <h2>{{ t(archiveChoices[2].title) }}</h2>
-         <p>{{ t(archiveChoices[2].description) }}</p>
-       </div>
-       <span class="archive-choice-footer"><span>{{ t(archiveChoices[2].action) }}</span><b aria-hidden="true">···</b></span>
-      </article>
     </section>
   </main>
 </template>

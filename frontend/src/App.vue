@@ -1,10 +1,11 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { RouterLink, RouterView } from "vue-router";
+import { RouterLink, RouterView, useRoute } from "vue-router";
 import PalettePicker from "./components/PalettePicker.vue";
 import { currentLanguage, languageOptions, locale, setLocale, t } from "./i18n";
 import { effectiveFlavor, normalizeTheme, paletteFor } from "./theme";
 
+const route = useRoute();
 const savedTheme = normalizeTheme(localStorage.getItem("theme"));
 const theme = ref(savedTheme);
 const colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
@@ -113,7 +114,7 @@ onBeforeUnmount(() => {
     </header>
     <RouterView />
     <footer>
-       <span class="footer-source">{{ t("数据源：") }}<a href="https://www.lovelive-anime.jp/nijigasaki/cd.php" target="_blank" rel="noopener noreferrer">lovelive-anime.jp</a></span>
+       <span v-if="route.path === '/music'" class="footer-source">{{ t("数据源：") }}<a href="https://www.lovelive-anime.jp/nijigasaki/cd.php" target="_blank" rel="noopener noreferrer">lovelive-anime.jp</a></span>
        <span class="footer-divider" aria-hidden="true"></span>
          <span class="footer-title">{{ t("友链") }}</span>
         <span class="footer-links">

@@ -10,6 +10,7 @@ const router = useRouter();
 const route = useRoute();
 const sections = [
   { id: "music", label: "音乐抓取设置" },
+  { id: "bot", label: "Bot 设置" },
   { id: "news", label: "新闻抓取设置" },
   { id: "database", label: "数据库" },
   { id: "account", label: "账号安全" },
@@ -179,14 +180,9 @@ async function saveSettings() {
     const keys =
       section.value === "news"
         ? ["news_auto_sync", "news_interval_minutes"]
-        : [
-            "interval_minutes",
-            "detail_interval_minutes",
-            "onebot_url",
-            "onebot_token",
-            "onebot_target",
-            "onebot_profile",
-          ];
+        : section.value === "bot"
+          ? ["onebot_url", "onebot_token", "onebot_target", "onebot_profile"]
+          : ["interval_minutes", "detail_interval_minutes"];
     const data = await api("/api/admin/settings", {
       method: "PATCH",
       body: Object.fromEntries(keys.map((key) => [key, settings[key]])),
@@ -459,13 +455,6 @@ onMounted(loadSettings);
               >
                 {{ t("管理联动") }}
               </button>
-              <button
-                class="secondary settings-programs-button"
-                type="button"
-                @click="router.push('/news')"
-              >
-                {{ t("打开官网新闻") }}
-              </button>
             </div>
             <form
               v-show="section === 'music'"
@@ -511,13 +500,20 @@ onMounted(loadSettings);
                   {{ syncing ? t("同步中……") : t("立即检查") }}
                 </button>
               </div>
-              <div class="form-heading subsection-heading">
+            </form>
+            <form
+              v-show="section === 'bot'"
+              class="settings-card bot-settings-card"
+              @submit.prevent="saveSettings"
+            >
+              <div class="form-heading">
                 <span class="form-number">02</span>
                 <div>
                   <p class="form-kicker">NOTIFICATION BRIDGE</p>
                   <h2>OneBot V11 HTTP</h2>
                 </div>
               </div>
+              <p class="muted">{{ t("Bot 设置独立于音乐与新闻抓取，便于后续接入更多通知。") }}</p>
               <label
                 >{{ t("接口地址")
                 }}<input
@@ -559,7 +555,7 @@ onMounted(loadSettings);
               class="settings-card news-monitor-card"
             >
               <div class="form-heading">
-                <span class="form-number">02</span>
+                <span class="form-number">03</span>
                 <div>
                   <p class="form-kicker">OFFICIAL SITE NEWS</p>
                   <h2>{{ t("新闻抓取设置") }}</h2>
@@ -640,7 +636,7 @@ onMounted(loadSettings);
               @submit.prevent="changePassword"
             >
               <div class="form-heading">
-                <span class="form-number">03</span>
+                <span class="form-number">04</span>
                 <div>
                   <p class="form-kicker">ACCESS CONTROL</p>
                   <h2>{{ t("修改管理员密码") }}</h2>

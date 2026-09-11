@@ -17,7 +17,12 @@ import {
 import NewsLightbox from "../components/NewsLightbox.vue";
 import { useDetailNavigation } from "../composables/useDetailNavigation";
 import { newsHref, newsSummaryText, renderNewsMarkdown } from "../newsMarkdown";
-import { newsSourceGroup, newsSourceLabel, newsTagLabel } from "../newsLabels";
+import {
+  newsSourceGroup,
+  newsSourceLabel,
+  newsTagLabel,
+  newsTagOptions,
+} from "../newsLabels";
 import { api } from "../api";
 import { locale, t } from "../i18n";
 
@@ -47,11 +52,22 @@ const editForm = reactive({
   title: "",
   published_at: "",
   category: "",
-  tags: "",
+  tags: [],
   summary: "",
   body_markdown: "",
   source_url: "",
 });
+const editTagOptions = computed(() => {
+  const catalog = article.value?.tag_options;
+  return Array.isArray(catalog) && catalog.length
+    ? catalog
+    : newsTagOptions.map((name) => ({ id: name, name }));
+});
+const selectedTagNames = computed(() =>
+  editForm.tags
+    .map((tagId) => editTagOptions.value.find((tag) => tag.id === tagId)?.name)
+    .filter(Boolean),
+);
 
 const filterQuery = computed(() => {
   const result = {};
@@ -171,13 +187,33 @@ function formatDate(value) {
   return value ? value.replace(/-/g, "/") : "—";
 }
 
+function tagDefinition(tagName) {
+  return editTagOptions.value.find((tag) => tag.name === tagName) || null;
+}
+
+function tagLabel(tagName) {
+  return newsTagLabel(tagName, locale.value, tagDefinition(tagName));
+}
+
+function updateDocumentTitle() {
+  document.title = article.value?.title
+    ? `${article.value.title} · Nijigasaki DB`
+    : `${t("新闻详情")} · Nijigasaki DB`;
+}
+
 function fillEditForm() {
   if (!article.value) return;
+  const availableTags = editTagOptions.value;
+  const articleTagIds = Array.isArray(article.value.tag_ids) && article.value.tag_ids.length
+    ? article.value.tag_ids
+    : (article.value.tags || [])
+        .map((tagName) => availableTags.find((tag) => tag.name === tagName)?.id)
+        .filter(Boolean);
   Object.assign(editForm, {
     title: article.value.title || "",
     published_at: article.value.published_at || "",
     category: article.value.category || "",
-    tags: (article.value.tags || []).join(", "),
+    tags: articleTagIds,
     summary: article.value.summary || "",
     body_markdown: article.value.body_markdown || "",
     source_url: article.value.source_url || "",
@@ -236,6 +272,13 @@ function beginEdit() {
   saveError.value = "";
   fillEditForm();
   editMode.value = true;
+}
+
+function toggleEditTag(tagId) {
+  if (!editTagOptions.value.some((tag) => tag.id === tagId)) return;
+  editForm.tags = editForm.tags.includes(tagId)
+    ? editForm.tags.filter((value) => value !== tagId)
+    : [...editForm.tags, tagId];
 }
 
 function selectImages(event) {
@@ -328,10 +371,8 @@ async function saveEdit() {
           title: editForm.title,
           published_at: editForm.published_at,
           category: editForm.category,
-          tags: editForm.tags
-            .split(/[,，、\n]+/)
-            .map((value) => value.trim())
-            .filter(Boolean),
+          tags: selectedTagNames.value,
+          tag_ids: [...editForm.tags],
           summary: editForm.summary,
           body_markdown: editForm.body_markdown,
           source_url: editForm.source_url,
@@ -372,6 +413,7 @@ watch(
     loadAuth();
   },
 );
+watch(() => [article.value?.title, locale.value], updateDocumentTitle);
 
 onMounted(() => {
   loadDetail();
@@ -418,7 +460,7 @@ onMounted(() => {
           <h1>{{ article.title }}</h1>
           <div class="news-detail-tags">
             <span v-for="tag in article.tags" :key="tag" :title="tag"
-              >#{{ newsTagLabel(tag, locale) }}</span
+              >#{{ tagLabel(tag) }}</span
             >
           </div>
           <p class="news-detail-summary">
@@ -440,7 +482,7 @@ onMounted(() => {
               :disabled="busy"
               @click="beginEdit"
             >
-              {{ authenticated ? t("页面内编辑") : t("登录后编辑") }}
+              {{ authenticated ? t("编辑该页") : t("登录后编辑") }}
             </button>
             <a
               v-if="article.source_url && newsHref(article.source_url)"
@@ -485,12 +527,27 @@ onMounted(() => {
                 }}<input v-model="editForm.category" maxlength="100"
               /></label>
             </div>
-            <label
-              >{{ t("tags（逗号分隔）")
-              }}<input
-                v-model="editForm.tags"
-                placeholder="goods, collaboration"
-            /></label>
+            <div class="news-edit-tag-field">
+              <span class="news-edit-label">{{ t("选择标签") }}</span>
+              <div
+                class="news-edit-tag-picker"
+                role="group"
+                :aria-label="t('选择标签')"
+              >
+                <button
+                  v-for="tag in editTagOptions"
+                  :key="tag.id"
+                  type="button"
+                  class="news-edit-tag"
+                  :class="{ selected: editForm.tags.includes(tag.id) }"
+                  :aria-pressed="editForm.tags.includes(tag.id)"
+                  @click="toggleEditTag(tag.id)"
+                >
+                  #{{ newsTagLabel(tag.name, locale, tag) }}
+                </button>
+              </div>
+              <small>{{ t("只能选择预设标签。") }}</small>
+            </div>
             <label
               >{{ t("摘要")
               }}<textarea v-model="editForm.summary" rows="5"></textarea>

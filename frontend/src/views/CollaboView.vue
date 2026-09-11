@@ -154,8 +154,11 @@ onBeforeUnmount(() => {
 
     <form class="cb-toolbar" @submit.prevent="searchItems">
       <div class="cb-search">
-        <span aria-hidden="true">⌕</span
-        ><input
+        <svg class="cb-search-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="10.8" cy="10.8" r="6.5"></circle>
+          <path d="m16 16 4.5 4.5"></path>
+        </svg>
+        <input
           v-model="search"
           type="search"
           :aria-label="c('标题、合作方或关键词')"

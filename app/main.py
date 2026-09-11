@@ -47,16 +47,29 @@ from app.news import (
     NEWS_SOURCES,
     NEWS_TOPICS_URL,
     clean_news_markdown,
+    clean_tag_values,
     ensure_news_schema,
+    news_article_tag_ids,
     news_id,
     news_source_group,
-    normalized_tags,
+    news_tag_catalog,
+    news_tag_id_for_slug,
+    normalized_news_tag_key,
+    normalized_news_tag_labels,
+    resolve_news_tag_values,
+    sync_news_article_tags,
     parse_topic_detail,
     parse_topic_listing,
     topic_next_offset,
     upsert_news_record,
 )
-from app.news_fetch import NEWS_HEADERS, describe_news_fetch_error, fetch_news_page, validate_news_url
+from app.news_fetch import (
+    NEWS_HEADERS,
+    describe_news_fetch_error,
+    fetch_news_page,
+    filter_news_images,
+    validate_news_url,
+)
 
 SOURCE_URL = "https://www.lovelive-anime.jp/nijigasaki/cd.php"
 EVENTERNOTE_EVENTS_URL = "https://events.nijigaku.fans/api/events"
@@ -3246,11 +3259,13 @@ def news_image_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
 
 
 def news_summary_payload(
-    row: sqlite3.Row | dict[str, Any], image_counts: dict[str, int] | None = None
+    row: sqlite3.Row | dict[str, Any],
+    image_counts: dict[str, int] | None = None,
+    tag_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     article_id = str(row["id"])
     count = image_counts.get(article_id, 0) if image_counts is not None else 0
-    return {
+    payload = {
         "id": article_id,
         "source": row["source"],
         "source_label": NEWS_SOURCE_LABELS.get(str(row["source"]), str(row["source"])),
@@ -3259,13 +3274,16 @@ def news_summary_payload(
         "title": row["title"],
         "published_at": row["published_at"],
         "category": row["category"],
-        "tags": normalized_tags(decode_json(row["tags_json"], [])),
+        "tags": clean_tag_values(decode_json(row["tags_json"], row["tags_json"])),
         "summary": clean_news_markdown(row["summary"]),
         "source_url": row["source_url"],
         "image_count": count,
         "edited": bool(decode_json(row["manual_fields_json"], [])),
         "updated_at": row["updated_at"],
     }
+    if tag_ids is not None:
+        payload["tag_ids"] = tag_ids
+    return payload
 
 
 def news_query_rows(conn: sqlite3.Connection, q: str = "", tags: str = "", source: str = "") -> list[sqlite3.Row]:
@@ -3291,18 +3309,39 @@ def news_query_rows(conn: sqlite3.Connection, q: str = "", tags: str = "", sourc
         sql += " WHERE " + " AND ".join(conditions)
     sql += " ORDER BY CASE WHEN published_at = '' THEN 1 ELSE 0 END, published_at DESC, id DESC"
     rows = conn.execute(sql, parameters).fetchall()
-    selected_tags = set(normalized_tags(tags))
-    if not selected_tags:
+    requested_tags = clean_tag_values(tags)
+    if not requested_tags:
         return rows
-    return [row for row in rows if selected_tags.intersection(normalized_tags(decode_json(row["tags_json"], [])))]
+    _, selected_ids, _ = resolve_news_tag_values(conn, requested_tags)
+    if not selected_ids:
+        return []
+    selected = set(selected_ids)
+    article_ids = {
+        row["news_id"]
+        for row in conn.execute(
+            f"SELECT news_id FROM news_article_tags WHERE tag_id IN ({','.join('?' for _ in selected)})",
+            list(selected),
+        ).fetchall()
+    }
+    return [row for row in rows if row["id"] in article_ids]
 
 
-def news_tag_counts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+def news_tag_counts(
+    rows: list[sqlite3.Row], tag_catalog: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
     counts: dict[str, int] = {}
     for row in rows:
-        for tag in normalized_tags(decode_json(row["tags_json"], [])):
+        for tag in clean_tag_values(decode_json(row["tags_json"], row["tags_json"])):
             counts[tag] = counts.get(tag, 0) + 1
-    return [{"name": tag, "count": counts[tag]} for tag in sorted(counts, key=lambda value: (-counts[value], value))]
+    definitions = {str(item["name"]): item for item in tag_catalog or []}
+    result = []
+    for tag in sorted(counts, key=lambda value: (-counts[value], value)):
+        item = {"name": tag, "count": counts[tag]}
+        definition = definitions.get(tag)
+        if definition:
+            item.update({key: definition[key] for key in ("id", "labels", "label", "sort_order") if key in definition})
+        result.append(item)
+    return result
 
 
 def news_sync_status(conn: sqlite3.Connection) -> dict[str, Any] | None:
@@ -3312,7 +3351,7 @@ def news_sync_status(conn: sqlite3.Connection) -> dict[str, Any] | None:
 
 def normalized_news_edit_value(field: str, value: Any) -> str:
     if field == "tags_json":
-        return json.dumps(normalized_tags(value), ensure_ascii=False)
+        return json.dumps(clean_tag_values(value), ensure_ascii=False)
     if field == "published_at":
         raw = str(value or "").strip()
         if raw:
@@ -3382,6 +3421,7 @@ async def refresh_news_record(
     record = None
     if response.status_code != 304:
         record = parse_topic_detail(response.text, source_url, listing)
+        record["images"] = await filter_news_images(client, record.get("images") or [])
         record["id"] = record_id
         # A manual refresh of an old news.php/AS article never creates a Topics clone.
         if old:
@@ -3762,7 +3802,7 @@ def news_article_payload(conn: sqlite3.Connection, row: sqlite3.Row, detail: boo
         "SELECT id, position, kind, local_path, source_url, alt_text, width, height, bytes, sha256 FROM news_images WHERE news_id = ? ORDER BY position, id",
         (row["id"],),
     ).fetchall()
-    payload = news_summary_payload(row, {str(row["id"]): len(image_rows)})
+    payload = news_summary_payload(row, {str(row["id"]): len(image_rows)}, news_article_tag_ids(conn, str(row["id"])))
     cover = next((image for image in image_rows if news_image_url(image)), None)
     payload["cover_url"] = news_image_url(cover) if cover else ""
     payload["available_image_count"] = sum(1 for image in image_rows if news_image_url(image))
@@ -3774,6 +3814,7 @@ def news_article_payload(conn: sqlite3.Connection, row: sqlite3.Row, detail: boo
             "source_hash": row["source_hash"],
             "manual_fields": decode_json(row["manual_fields_json"], []),
             "images": [news_image_payload(image) for image in image_rows],
+            "tag_options": news_tag_catalog(conn),
         })
     return payload
 
@@ -3825,9 +3866,10 @@ async def api_news(
                     available_counts[article_key] = available_counts.get(article_key, 0) + 1
                     if article_key not in covers:
                         covers[article_key] = image
+        tag_catalog = news_tag_catalog(conn)
         payloads = []
         for row in page_rows:
-            payload = news_summary_payload(row, image_counts)
+            payload = news_summary_payload(row, image_counts, news_article_tag_ids(conn, str(row["id"])))
             cover = covers.get(str(row["id"]))
             payload["cover_url"] = news_image_url(cover) if cover else ""
             payload["available_image_count"] = available_counts.get(str(row["id"]), 0)
@@ -3841,9 +3883,10 @@ async def api_news(
         "page_size": page_size,
         "pages": page_count,
         "q": q,
-        "tags": normalized_tags(tags),
+        "tags": clean_tag_values(tags),
         "source": source if source in NEWS_SOURCES or source in NEWS_SOURCE_GROUPS else "",
-        "tag_options": news_tag_counts(rows),
+        "tag_options": news_tag_counts(rows, tag_catalog),
+        "tag_catalog": tag_catalog,
         "source_options": [
             {
                 "name": group,
@@ -3876,7 +3919,7 @@ async def api_news_detail(news_id: str, q: str = "", tags: str = "", source: str
         "following": following_payload,
         "filter": {
             "q": q,
-            "tags": normalized_tags(tags),
+            "tags": clean_tag_values(tags),
             "source": source if source in NEWS_SOURCES or source in NEWS_SOURCE_GROUPS else "",
         },
     }
@@ -4174,6 +4217,213 @@ async def api_admin_news_delete_image(image_id: int, request: Request) -> dict[s
     return {"article": result}
 
 
+def news_tag_labels_for_payload(payload: dict[str, Any], slug: str, existing=None) -> dict[str, str]:
+    if "labels" in payload:
+        return normalized_news_tag_labels(payload["labels"], slug)
+    if existing is not None:
+        return normalized_news_tag_labels(decode_json(existing["labels_json"], {}), slug)
+    return normalized_news_tag_labels(None, slug)
+
+
+def add_news_manual_field(raw: Any, field: str) -> str:
+    decoded = decode_json(str(raw or "[]"), [])
+    fields = set(decoded if isinstance(decoded, list) else [])
+    fields.add(field)
+    return json.dumps(sorted(fields), ensure_ascii=False)
+
+
+@app.get("/api/admin/news/tags")
+async def api_admin_news_tags(request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    with db() as conn:
+        return {"tags": news_tag_catalog(conn)}
+
+
+@app.post("/api/admin/news/tags")
+async def api_admin_news_create_tag(request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "请求格式无效") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "请求格式无效")
+    try:
+        slug = normalized_news_tag_key(payload.get("key") or payload.get("name"))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    now = datetime.now(timezone.utc).isoformat()
+    labels = news_tag_labels_for_payload(payload, slug)
+    with db() as conn:
+        existing = conn.execute("SELECT * FROM news_tags WHERE slug = ?", (slug,)).fetchone()
+        if existing is None:
+            _, alias_ids, _ = resolve_news_tag_values(conn, [slug], include_inactive=True)
+            if alias_ids:
+                raise HTTPException(409, "这个标签 ID 是已有标签的历史别名")
+        if existing and existing["active"]:
+            raise HTTPException(409, "这个标签 ID 已存在")
+        if existing:
+            conn.execute(
+                "UPDATE news_tags SET labels_json = ?, active = 1, updated_at = ? WHERE id = ?",
+                (json.dumps(labels, ensure_ascii=False), now, existing["id"]),
+            )
+            tag_id = existing["id"]
+        else:
+            tag_id = news_tag_id_for_slug(slug)
+            sort_order = conn.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM news_tags").fetchone()[0]
+            conn.execute(
+                """INSERT INTO news_tags
+                (id, slug, labels_json, sort_order, active, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 1, ?, ?)""",
+                (tag_id, slug, json.dumps(labels, ensure_ascii=False), sort_order, now, now),
+            )
+        tags = news_tag_catalog(conn)
+        tag = next(item for item in tags if item["id"] == tag_id)
+    log_database_activity("news", f"新增新闻标签：{slug}")
+    return {"tag": tag, "tags": tags}
+
+
+def update_news_tag_catalog(conn, items: list[Any], now: str) -> tuple[list[dict[str, Any]], int]:
+    if len(items) > 100:
+        raise HTTPException(400, "新闻标签不能超过 100 个")
+    changes: list[tuple[Any, str, dict[str, str]]] = []
+    seen_ids: set[str] = set()
+    seen_slugs: set[str] = set()
+    active_rows = conn.execute("SELECT * FROM news_tags WHERE active = 1").fetchall()
+    active_by_id = {str(row["id"]): row for row in active_rows}
+    for item in items:
+        if not isinstance(item, dict):
+            raise HTTPException(400, "标签项格式无效")
+        tag_id = str(item.get("id") or "").strip()
+        existing = active_by_id.get(tag_id)
+        if existing is None:
+            raise HTTPException(400, "标签不存在或已被删除")
+        try:
+            slug = normalized_news_tag_key(item.get("key") or item.get("name") or existing["slug"])
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if tag_id in seen_ids or slug in seen_slugs:
+            raise HTTPException(400, "标签 ID 不能重复")
+        _, other_ids, _ = resolve_news_tag_values(conn, [slug], include_inactive=True)
+        if other_ids and str(other_ids[0]) != tag_id:
+            raise HTTPException(409, f"标签 ID 已被占用：{slug}")
+        seen_ids.add(tag_id)
+        seen_slugs.add(slug)
+        changes.append((existing, slug, news_tag_labels_for_payload(item, slug, existing)))
+
+    changed_count = 0
+    for existing, slug, labels in changes:
+        old_slug = str(existing["slug"])
+        old_labels = normalized_news_tag_labels(decode_json(existing["labels_json"], {}), old_slug)
+        aliases = [alias for alias in clean_tag_values(decode_json(existing["aliases_json"], [])) if alias != slug]
+        if old_slug != slug and old_slug not in aliases:
+            aliases.append(old_slug)
+        if old_slug != slug:
+            article_rows = conn.execute(
+                "SELECT n.id, n.tags_json, n.manual_fields_json FROM news_articles n "
+                "JOIN news_article_tags a ON a.news_id = n.id WHERE a.tag_id = ?",
+                (existing["id"],),
+            ).fetchall()
+            for article in article_rows:
+                article_tags = [
+                    slug if tag == old_slug else tag
+                    for tag in clean_tag_values(decode_json(article["tags_json"], article["tags_json"]))
+                ]
+                conn.execute(
+                    """UPDATE news_articles
+                       SET tags_json = ?, manual_fields_json = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (
+                        json.dumps(article_tags, ensure_ascii=False),
+                        add_news_manual_field(article["manual_fields_json"], "tags_json"),
+                        now,
+                        article["id"],
+                    ),
+                )
+        if old_slug != slug or old_labels != labels:
+            conn.execute(
+                """UPDATE news_tags
+                   SET slug = ?, aliases_json = ?, labels_json = ?, updated_at = ?
+                   WHERE id = ?""",
+                (slug, json.dumps(aliases, ensure_ascii=False), json.dumps(labels, ensure_ascii=False), now, existing["id"]),
+            )
+            changed_count += 1
+    return news_tag_catalog(conn), changed_count
+
+
+@app.patch("/api/admin/news/tags")
+async def api_admin_news_update_tags(request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "请求格式无效") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("tags"), list):
+        raise HTTPException(400, "标签列表格式无效")
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        tags, changed_count = update_news_tag_catalog(conn, payload["tags"], now)
+    if changed_count:
+        log_database_activity("news", f"更新新闻标签：{changed_count} 个")
+    return {"tags": tags}
+
+
+@app.patch("/api/admin/news/tags/{tag_id}")
+async def api_admin_news_update_tag(tag_id: str, request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "请求格式无效") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "请求格式无效")
+    item = {**payload, "id": tag_id}
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM news_tags WHERE id = ? AND active = 1", (tag_id,)).fetchone():
+            raise HTTPException(404, "标签不存在")
+        tags, changed_count = update_news_tag_catalog(conn, [item], datetime.now(timezone.utc).isoformat())
+    if changed_count:
+        log_database_activity("news", f"更新新闻标签：{tag_id}")
+    return {"tag": next(tag for tag in tags if tag["id"] == tag_id), "tags": tags}
+
+
+@app.delete("/api/admin/news/tags/{tag_id}")
+async def api_admin_news_delete_tag(tag_id: str, request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        tag = conn.execute("SELECT * FROM news_tags WHERE id = ? AND active = 1", (tag_id,)).fetchone()
+        if not tag:
+            raise HTTPException(404, "标签不存在")
+        article_rows = conn.execute(
+            "SELECT n.id, n.tags_json, n.manual_fields_json FROM news_articles n "
+            "JOIN news_article_tags a ON a.news_id = n.id WHERE a.tag_id = ?",
+            (tag_id,),
+        ).fetchall()
+        for article in article_rows:
+            article_tags = [
+                value
+                for value in clean_tag_values(decode_json(article["tags_json"], article["tags_json"]))
+                if value != tag["slug"]
+            ]
+            conn.execute(
+                """UPDATE news_articles
+                   SET tags_json = ?, manual_fields_json = ?, updated_at = ?
+                   WHERE id = ?""",
+                (
+                    json.dumps(article_tags, ensure_ascii=False),
+                    add_news_manual_field(article["manual_fields_json"], "tags_json"),
+                    now,
+                    article["id"],
+                ),
+            )
+        conn.execute("DELETE FROM news_article_tags WHERE tag_id = ?", (tag_id,))
+        conn.execute("UPDATE news_tags SET active = 0, updated_at = ? WHERE id = ?", (now, tag_id))
+        tags = news_tag_catalog(conn)
+    log_database_activity("news", f"删除新闻标签：{tag['slug']}")
+    return {"tags": tags}
+
+
 @app.patch("/api/admin/news/{news_id}")
 async def api_admin_news_edit(news_id: str, request: Request) -> dict[str, Any]:
     require_api_admin(request)
@@ -4189,6 +4439,8 @@ async def api_admin_news_edit(news_id: str, request: Request) -> dict[str, Any]:
             value = payload[field]
         elif field == "tags_json" and "tags" in payload:
             value = payload["tags"]
+        elif field == "tags_json" and "tag_ids" in payload:
+            value = payload["tag_ids"]
         else:
             continue
         try:
@@ -4203,6 +4455,12 @@ async def api_admin_news_edit(news_id: str, request: Request) -> dict[str, Any]:
             raise HTTPException(404, "新闻不存在")
         if payload.get("updated_at") and payload["updated_at"] != article["updated_at"]:
             raise HTTPException(409, "新闻已被其他操作更新，请重新加载后编辑")
+        if "tags_json" in changes:
+            tag_values = payload.get("tag_ids") if "tag_ids" in payload else decode_json(changes["tags_json"], [])
+            tag_keys, _, invalid_tags = resolve_news_tag_values(conn, tag_values)
+            if invalid_tags:
+                raise HTTPException(400, f"新闻标签不存在：{'、'.join(invalid_tags[:5])}")
+            changes["tags_json"] = json.dumps(tag_keys, ensure_ascii=False)
         changes = {field: value for field, value in changes.items() if value != article[field]}
         if not changes:
             return {"article": news_article_payload(conn, article, detail=True)}
@@ -4217,6 +4475,8 @@ async def api_admin_news_edit(news_id: str, request: Request) -> dict[str, Any]:
             f"UPDATE news_articles SET {assignments}, manual_fields_json = ?, updated_at = ? WHERE id = ?",
             values,
         )
+        if "tags_json" in changes:
+            sync_news_article_tags(conn, news_id, decode_json(changes["tags_json"], []))
         updated = conn.execute("SELECT * FROM news_articles WHERE id = ?", (news_id,)).fetchone()
         result = news_article_payload(conn, updated, detail=True)
     log_database_activity("news", f"更新官网新闻：{result['title'][:80]}")

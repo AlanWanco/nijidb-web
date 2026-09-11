@@ -81,10 +81,10 @@ onBeforeUnmount(() => {
           <span class="brand-copy"><strong>NIJIGASAKI DB</strong><small>NIJIGASAKI DATA ARCHIVE</small></span>
         </RouterLink>
         <nav class="section-nav" :aria-label="t('内容分类')">
-          <RouterLink class="music-link" to="/music">{{ t("音乐") }}</RouterLink>
-          <RouterLink class="news-link" to="/news">{{ t("官网新闻") }}</RouterLink>
+          <RouterLink class="music-link" to="/music">{{ t("音乐档案") }}</RouterLink>
           <RouterLink class="program-link" to="/programs">{{ t("节目档案") }}</RouterLink>
           <RouterLink class="illustration-link" to="/collabo">{{ t("联动立绘") }}</RouterLink>
+          <RouterLink class="news-link" to="/news">{{ t("官网新闻") }}</RouterLink>
         </nav>
       </div>
       <nav class="site-nav">

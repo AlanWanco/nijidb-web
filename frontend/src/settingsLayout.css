@@ -48,8 +48,42 @@
   justify-content: center;
   margin-top: 20px;
 }
+.settings-log-toolbar > label {
+  position: relative;
+  flex: 1 1 220px;
+  min-width: min(100%, 190px);
+}
 .settings-log-toolbar select {
+  display: block;
   width: 100%;
+  min-height: 44px;
+  appearance: none;
+  -webkit-appearance: none;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 11px 38px 11px 14px;
+  background: var(--paper);
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 13px;
+  outline: 0;
+}
+.settings-log-toolbar > label::after {
+  position: absolute;
+  right: 15px;
+  bottom: 14px;
+  width: 7px;
+  height: 7px;
+  border-right: 1px solid var(--muted);
+  border-bottom: 1px solid var(--muted);
+  content: "";
+  pointer-events: none;
+  transform: rotate(45deg);
+}
+.settings-log-toolbar select:focus {
+  border-color: var(--accent);
+  background: var(--surface);
+  box-shadow: 0 0 0 4px var(--accent-soft);
 }
 .settings-workspace .sync-log-list li {
   overflow-wrap: anywhere;

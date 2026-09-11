@@ -92,6 +92,7 @@ uv run --locked python scripts/import_official_news.py \
 运行本地后端时设置 `NEWS_ARCHIVE_DIR` 指向该归档目录，页面会通过新闻图片接口读取本地图片。需要将图片复制到数据卷时再加 `--copy-images`。
 
 - 正文支持 GFM Markdown（标题、列表、表格、引用、代码等），HTML 经 DOMPurify 清理；会过滤官网分类导航和当前分类标签；正文与图库图片可点击放大，支持灯箱内翻图。
+- 官网图片仅保留宽度至少 240 px、高度至少 120 px 且不超过 10000 px 的资源；页面未声明尺寸时读取官方图片头部判断，图标、追踪图和异常尺寸图片不会进入图库。
 - 标签保持原始 token 入库，展示按中文/日文/英文翻译；新闻支持左右键和横向滑动，保留来源、标签、搜索与页码。编辑中/灯箱内不会误切新闻。
 - 自动轮询只访问 `https://www.lovelive-anime.jp/nijigasaki/topics.php` 最近四页及详情，检查正文变化；通过 ETag / Last-Modified 减少重复传输，429/临时错误有界重试。设置开关或间隔变更立即唤醒调度器。
 - `POST /api/admin/news/{id}/refresh` 手动刷新对应官网页面，支持历史来源。服务端检查管理员权限、官网 HTTPS 白名单、重定向与响应大小；失败保留旧内容，并返回 HTTP 状态、超时、网络或解析原因。

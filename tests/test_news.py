@@ -13,13 +13,16 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from app.news import (
+    clean_news_markdown,
     ensure_news_schema,
+    image_references,
     news_id,
+    normalized_tags,
     parse_local_markdown,
     parse_topic_detail,
     upsert_news_record,
 )
-from app.news_fetch import fetch_news_page
+from app.news_fetch import fetch_news_page, filter_news_images
 
 # main creates its runtime directories at import time.
 _import_dir = tempfile.TemporaryDirectory()
@@ -55,6 +58,12 @@ class NewsStorageTests(unittest.TestCase):
 
     def tearDown(self):
         self.conn.close()
+
+    def test_editor_tags_are_limited_to_known_tokens(self):
+        self.assertEqual(
+            normalized_tags(["goods", "anime:movie", "not-allowed"]),
+            ["goods", "anime:movie"],
+        )
 
     def test_stable_ids_and_timestamp_on_unchanged_refresh(self):
         self.assertEqual(upsert_news_record(self.conn, record(), "2026-01-01T00:00:00+00:00"), (True, True))
@@ -100,6 +109,27 @@ class NewsStorageTests(unittest.TestCase):
         body = self.conn.execute("SELECT body_markdown FROM news_articles").fetchone()[0]
         self.assertEqual(body, "正文")
 
+    def test_legacy_html_image_markup_is_not_article_text(self):
+        polluted = (
+            "正文\n"
+            '<img\n src="https://example.com/hero.jpg"\n srcset="https://example.com/hero-640.jpg 640w"\n width="640" />\n'
+            "![图片](pic/archive.jpg)https://example.com/hero-640.jpg 640w, "
+            "[https://example.com/hero-320.jpg](https://example.com/hero-320.jpg) 320w width=640\n"
+            "结尾"
+        )
+        self.assertEqual(clean_news_markdown(polluted), "正文\n\n结尾")
+        self.assertEqual(clean_news_markdown("第一段\n\n第二段"), "第一段\n\n第二段")
+        self.assertEqual(clean_news_markdown("正文\nhttps://example.com/hero.jpg 640w\n结尾"), "正文\n结尾")
+        self.assertEqual(
+            image_references(polluted, "https://example.com/news/01.html"),
+            [{"kind": "archive", "local_path": "pic/archive.jpg", "source_url": ""},
+             {"kind": "remote", "local_path": "", "source_url": "https://example.com/hero.jpg"}],
+        )
+        self.assertEqual(
+            image_references('<img src="/hero.jpg">', "https://example.com/news/01.html"),
+            [{"kind": "remote", "local_path": "", "source_url": "https://example.com/hero.jpg"}],
+        )
+
     def test_html_preserves_markdown(self):
         parsed = parse_topic_detail(HTML, URL)
         self.assertIn("**更新本文**", parsed["body_markdown"])
@@ -108,10 +138,12 @@ class NewsStorageTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_topic_detail("<main>Access denied</main>", URL)
 
-    def test_detail_filters_navigation_and_category_chrome(self):
-        html = '<body><div id="main"><article><ul id="contentsmenu"><li>全てのニュース</li><li>音楽商品</li><li>グッズ</li></ul></article><article><div class="newsbox"><div class="title"><p class="cat"><a href="topics.php?cat=goods">グッズ</a></p><h6>2026/09/11</h6><h5>有效标题</h5></div><div class="txt"><p>这是正文内容，长度足够通过页面有效性检查，并且包含更多文字以模拟官网真实新闻页面。</p></div></div></article></div></body>'
+    def test_detail_filters_navigation_category_chrome_and_small_images(self):
+        html = '<body><div id="main"><article><ul id="contentsmenu"><li>全てのニュース</li><li>音楽商品</li><li>グッズ</li></ul></article><article><div class="newsbox"><div class="title"><p class="cat"><a href="topics.php?cat=goods">グッズ</a></p><h6>2026/09/11</h6><h5>有效标题</h5></div><div class="txt"><p>这是正文内容，长度足够通过页面有效性检查，并且包含更多文字以模拟官网真实新闻页面。</p><img src="/tiny.png" width="80" height="80"><img src="/valid.png" width="640" height="360"></div></div></article></div></body>'
         parsed = parse_topic_detail(html, URL)
         self.assertEqual(parsed["title"], "有效标题")
+        self.assertEqual(len(parsed["images"]), 1)
+        self.assertEqual((parsed["images"][0]["width"], parsed["images"][0]["height"]), (640, 360))
         self.assertIn("正文内容", parsed["body_markdown"])
         self.assertNotIn("全てのニュース", parsed["body_markdown"])
         self.assertNotIn("音楽商品", parsed["body_markdown"])
@@ -119,6 +151,26 @@ class NewsStorageTests(unittest.TestCase):
 
 
 class NewsApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_official_images_are_filtered_by_real_dimensions(self):
+        def png(width, height):
+            return b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + width.to_bytes(4, "big") + height.to_bytes(4, "big")
+
+        def handler(request):
+            return httpx.Response(
+                200,
+                headers={"content-type": "image/png"},
+                content=png(80, 80) if "tiny" in str(request.url) else png(640, 360),
+            )
+
+        images = [
+            {"kind": "remote", "source_url": "https://www.lovelive-anime.jp/module/image.php?tiny=1"},
+            {"kind": "remote", "source_url": "https://www.lovelive-anime.jp/module/image.php?large=1"},
+        ]
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            filtered = await filter_news_images(client, images)
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual((filtered[0]["width"], filtered[0]["height"]), (640, 360))
+
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -176,6 +228,29 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
                 for log in (await self.client.get("/api/admin/settings")).json()["activity_logs"]
             )
         )
+
+    async def test_news_tag_catalog_admin_crud_and_article_sync(self):
+        article_id = record()["id"]
+        self.login()
+        created = await self.client.post(
+            "/api/admin/news/tags",
+            json={"key": "test:catalog", "labels": {"zh-CN": "测试目录", "ja": "テスト", "en": "Test"}},
+        )
+        self.assertEqual(created.status_code, 200)
+        tag = created.json()["tag"]
+        updated = await self.client.patch(
+            f"/api/admin/news/tags/{tag['id']}",
+            json={"key": "test:renamed", "labels": {"zh-CN": "已改名"}},
+        )
+        self.assertEqual(updated.status_code, 200)
+        changed = await self.client.patch(f"/api/admin/news/{article_id}", json={"tag_ids": [tag["id"]]})
+        self.assertEqual(changed.status_code, 200)
+        self.assertEqual(changed.json()["article"]["tags"], ["test:renamed"])
+        deleted = await self.client.delete(f"/api/admin/news/tags/{tag['id']}")
+        self.assertEqual(deleted.status_code, 200)
+        detail = (await self.client.get(f"/api/news/{article_id}")).json()["article"]
+        self.assertEqual(detail["tags"], [])
+        self.assertEqual(detail["tag_ids"], [])
 
     async def test_delete_source_image_and_keep_suppressed_on_refresh(self):
         self.login()

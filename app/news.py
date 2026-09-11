@@ -58,7 +58,14 @@ NEWS_EDITABLE_FIELDS = (
     "source_url",
 )
 NEWS_IMAGE_RE = re.compile(r"!\[[^\]]*\]\((?:<([^>]+)>|([^)\n]+))\)")
+NEWS_HTML_IMAGE_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE | re.DOTALL)
+NEWS_HTML_IMAGE_ATTR_RE = re.compile(r"(?:data-src|data-original|src)\s*=\s*['\"]([^'\"]+)['\"]", re.IGNORECASE)
 NEWS_DATE_RE = re.compile(r"(?<!\d)(20\d{2})[./年-](\d{1,2})[./月-](\d{1,2})日?")
+NEWS_IMAGE_STYLE_RE = re.compile(r"(?:^|;)\s*(width|height)\s*:\s*(\d+(?:\.\d+)?)\s*(?:px)?\s*(?:;|$)", re.IGNORECASE)
+NEWS_IMAGE_MIN_WIDTH = 240
+NEWS_IMAGE_MIN_HEIGHT = 120
+NEWS_IMAGE_MAX_WIDTH = 10000
+NEWS_IMAGE_MAX_HEIGHT = 10000
 NEWS_FILENAME_RE = re.compile(r"^\[(\d{8})\](niji_topics|niji_news|as_news)_(?:\d+)_([^/]+)\.md$")
 NEWS_PAGE_ID_RE = re.compile(r"^\d+_[^/]+$")
 NEWS_CHROME_LINES = NEWS_CATEGORIES | {
@@ -111,6 +118,79 @@ NEWS_TAG_ORDER = (
     "announcement",
     "other",
 )
+NEWS_TAG_CATALOG_ORDER = (
+    "game",
+    "game:loveca",
+    "game:other",
+    "game:school-fes",
+    "game:sukusta",
+    "game:visual-novel",
+    "anime",
+    "anime:movie",
+    "anime:movie-chapter-1",
+    "anime:movie-chapter-2",
+    "anime:movie-chapter-3",
+    "anime:ova",
+    "anime:spin-off",
+    "anime:tv-season-1",
+    "anime:tv-season-2",
+    "anime:tv-season-3",
+    "voice-activity",
+    "voice:online",
+    "voice:offline",
+    "voice:radio",
+    "collaboration",
+    "apology",
+    "goods",
+    "music",
+    "video",
+    "book",
+    "media",
+    "event",
+    "theater",
+    "campaign",
+    "local",
+    "streaming",
+    "announcement",
+    "other",
+)
+NEWS_ALLOWED_TAGS = frozenset(NEWS_TAG_CATALOG_ORDER)
+NEWS_TAG_LABELS = {
+    "game": ("游戏", "ゲーム", "Games"),
+    "game:loveca": ("Love Live! 卡牌", "ラブライブ！カードゲーム", "Love Live! Card Game"),
+    "game:other": ("其他游戏", "その他のゲーム", "Other games"),
+    "game:school-fes": ("学园偶像祭", "スクフェス", "School Idol Festival"),
+    "game:sukusta": ("学园偶像祭 ALL STARS", "スクスタ", "ALL STARS"),
+    "game:visual-novel": ("视觉小说", "ビジュアルノベル", "Visual novels"),
+    "anime": ("动画", "アニメ", "Anime"),
+    "anime:movie": ("剧场版", "劇場版", "Movie"),
+    "anime:movie-chapter-1": ("剧场版第1章", "劇場版第1章", "Movie chapter 1"),
+    "anime:movie-chapter-2": ("剧场版第2章", "劇場版第2章", "Movie chapter 2"),
+    "anime:movie-chapter-3": ("剧场版第3章", "劇場版第3章", "Movie chapter 3"),
+    "anime:ova": ("OVA", "OVA", "OVA"),
+    "anime:spin-off": ("衍生动画", "スピンオフアニメ", "Spin-off anime"),
+    "anime:tv-season-1": ("TV动画第1季", "TVアニメ第1期", "TV season 1"),
+    "anime:tv-season-2": ("TV动画第2季", "TVアニメ第2期", "TV season 2"),
+    "anime:tv-season-3": ("TV动画第3季", "TVアニメ第3期", "TV season 3"),
+    "voice-activity": ("声优活动", "キャスト活動", "Cast activities"),
+    "voice:online": ("声优线上活动", "キャスト配信", "Online cast events"),
+    "voice:offline": ("声优线下活动", "キャスト現地イベント", "In-person cast events"),
+    "voice:radio": ("声优广播", "キャストラジオ", "Cast radio"),
+    "collaboration": ("联动", "コラボ", "Collaboration"),
+    "apology": ("致歉与更正", "お詫び・訂正", "Apologies & corrections"),
+    "goods": ("周边", "グッズ", "Merchandise"),
+    "music": ("音乐", "音楽", "Music"),
+    "video": ("影像商品", "映像商品", "Video releases"),
+    "book": ("书籍杂志", "書籍・雑誌", "Books & magazines"),
+    "media": ("媒体", "メディア", "Media"),
+    "event": ("活动", "イベント", "Events"),
+    "theater": ("影院", "劇場", "Theater"),
+    "campaign": ("宣传活动", "キャンペーン", "Campaigns"),
+    "local": ("地方资讯", "ご当地情報", "Local news"),
+    "streaming": ("节目配信", "番組配信", "Streaming"),
+    "announcement": ("公告", "お知らせ", "Announcements"),
+    "other": ("其他", "その他", "Other"),
+}
 
 NEWS_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS news_articles (
@@ -133,6 +213,26 @@ CREATE TABLE IF NOT EXISTS news_articles (
 );
 CREATE INDEX IF NOT EXISTS idx_news_articles_date ON news_articles(published_at DESC, id);
 CREATE INDEX IF NOT EXISTS idx_news_articles_source ON news_articles(source, published_at DESC);
+CREATE TABLE IF NOT EXISTS news_tags (
+  id TEXT PRIMARY KEY,
+  slug TEXT NOT NULL UNIQUE,
+  aliases_json TEXT NOT NULL DEFAULT '[]',
+  labels_json TEXT NOT NULL DEFAULT '{}',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_news_tags_active ON news_tags(active, sort_order, id);
+CREATE TABLE IF NOT EXISTS news_article_tags (
+  news_id TEXT NOT NULL,
+  tag_id TEXT NOT NULL,
+  position INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(news_id, tag_id),
+  FOREIGN KEY(news_id) REFERENCES news_articles(id) ON DELETE CASCADE,
+  FOREIGN KEY(tag_id) REFERENCES news_tags(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_news_article_tags_tag ON news_article_tags(tag_id, news_id);
 CREATE TABLE IF NOT EXISTS news_images (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   news_id TEXT NOT NULL,
@@ -187,7 +287,7 @@ def _is_news_chrome_markdown_line(line: str) -> bool:
 
 
 def clean_news_markdown(value: Any) -> str:
-    """Remove official-site navigation accidentally captured as article Markdown."""
+    """Remove official-site navigation and image-conversion artifacts."""
     lines: list[str] = []
     has_content = False
     for line in str(value or "").replace("\r\n", "\n").replace("\r", "\n").splitlines():
@@ -198,7 +298,7 @@ def clean_news_markdown(value: Any) -> str:
         if line.strip():
             has_content = True
         lines.append(line)
-    return "\n".join(lines).strip()
+    return strip_news_image_markup("\n".join(lines).strip())
 
 
 def ensure_news_schema(conn) -> None:
@@ -213,6 +313,11 @@ def ensure_news_schema(conn) -> None:
             conn.execute(
                 "UPDATE news_articles SET body_markdown = ?, summary = ? WHERE id = ?", (body, summary, row["id"])
             )
+    tag_columns = {row["name"] for row in conn.execute("PRAGMA table_info(news_tags)")}
+    if "aliases_json" not in tag_columns:
+        conn.execute("ALTER TABLE news_tags ADD COLUMN aliases_json TEXT NOT NULL DEFAULT '[]'")
+    ensure_news_tag_definitions(conn)
+    migrate_news_article_tags(conn)
 
 
 def decode_json(value: str | None, fallback: Any) -> Any:
@@ -222,15 +327,22 @@ def decode_json(value: str | None, fallback: Any) -> Any:
         return fallback
 
 
-def normalized_tags(value: Any) -> list[str]:
+NEWS_TAG_KEY_RE = re.compile(r"^[\w][\w:.-]{0,79}$", re.UNICODE)
+
+
+def normalized_news_tag_key(value: Any) -> str:
+    slug = str(value or "").strip()
+    if not NEWS_TAG_KEY_RE.fullmatch(slug):
+        raise ValueError("标签 ID 只能使用字母、数字、下划线、冒号、点或短横线，长度为 1–80 个字符")
+    return slug
+
+
+def clean_tag_values(value: Any) -> list[str]:
     if isinstance(value, str):
         raw = value.strip()
         if raw.startswith("[") and raw.endswith("]"):
             parsed = decode_json(raw, None)
-            if isinstance(parsed, list):
-                value = parsed
-            else:
-                value = raw[1:-1]
+            value = parsed if isinstance(parsed, list) else raw[1:-1]
         else:
             value = raw
     if not isinstance(value, (list, tuple, set)):
@@ -240,6 +352,177 @@ def normalized_tags(value: Any) -> list[str]:
         tag = str(item or "").strip().strip("'\"")
         if tag and tag not in result:
             result.append(tag)
+    return result
+
+
+def normalized_tags(value: Any) -> list[str]:
+    return [tag for tag in clean_tag_values(value) if tag in NEWS_ALLOWED_TAGS]
+
+
+def news_tag_id_for_slug(slug: str) -> str:
+    return f"news-tag-{hashlib.sha256(f'news-tag:{slug}'.encode()).hexdigest()[:20]}"
+
+
+def default_news_tag_labels(slug: str) -> dict[str, str]:
+    labels = NEWS_TAG_LABELS.get(slug, (slug, slug, slug))
+    return {"zh-CN": labels[0], "ja": labels[1], "en": labels[2]}
+
+
+def normalized_news_tag_labels(value: Any, slug: str) -> dict[str, str]:
+    labels = default_news_tag_labels(slug)
+    if isinstance(value, dict):
+        for language in labels:
+            candidate = str(value.get(language) or "").strip()
+            if candidate:
+                labels[language] = candidate[:200]
+    elif isinstance(value, str) and value.strip():
+        labels = {language: value.strip()[:200] for language in labels}
+    return labels
+
+
+def _insert_news_tag(
+    conn,
+    slug: str,
+    labels: Any = None,
+    sort_order: int = 0,
+    active: int = 1,
+    now: str | None = None,
+):
+    timestamp = now or datetime.now(UTC).isoformat()
+    conn.execute(
+        """INSERT INTO news_tags
+        (id, slug, labels_json, sort_order, active, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (
+            news_tag_id_for_slug(slug),
+            slug,
+            json.dumps(normalized_news_tag_labels(labels, slug), ensure_ascii=False),
+            sort_order,
+            active,
+            timestamp,
+            timestamp,
+        ),
+    )
+    return conn.execute("SELECT * FROM news_tags WHERE slug = ?", (slug,)).fetchone()
+
+
+def news_tag_row_for_value(conn, value: Any):
+    token = str(value or "").strip()
+    if not token:
+        return None
+    row = conn.execute("SELECT * FROM news_tags WHERE id = ? OR slug = ? LIMIT 1", (token, token)).fetchone()
+    if row is not None:
+        return row
+    for candidate in conn.execute("SELECT * FROM news_tags").fetchall():
+        if token in clean_tag_values(decode_json(candidate["aliases_json"], [])):
+            return candidate
+    return None
+
+
+def ensure_news_tag_definitions(conn) -> None:
+    now = datetime.now(UTC).isoformat()
+    for position, slug in enumerate(NEWS_TAG_CATALOG_ORDER):
+        row = news_tag_row_for_value(conn, slug)
+        if row is None:
+            _insert_news_tag(conn, slug, default_news_tag_labels(slug), position, now=now)
+            continue
+        if not isinstance(decode_json(row["labels_json"], None), dict) or not decode_json(row["labels_json"], {}):
+            conn.execute(
+                "UPDATE news_tags SET labels_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(default_news_tag_labels(slug), ensure_ascii=False), now, row["id"]),
+            )
+
+
+def migrate_news_article_tags(conn) -> None:
+    now = datetime.now(UTC).isoformat()
+    next_position = conn.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM news_tags").fetchone()[0]
+    for article in conn.execute("SELECT id, tags_json FROM news_articles").fetchall():
+        raw_tags = clean_tag_values(decode_json(article["tags_json"], article["tags_json"]))
+        active_tags: list[tuple[str, str]] = []
+        for slug in raw_tags:
+            row = news_tag_row_for_value(conn, slug)
+            if row is None:
+                row = _insert_news_tag(conn, slug, sort_order=next_position, now=now)
+                next_position += 1
+            if row["active"]:
+                active_tags.append((row["slug"], row["id"]))
+        conn.execute("DELETE FROM news_article_tags WHERE news_id = ?", (article["id"],))
+        conn.executemany(
+            "INSERT INTO news_article_tags(news_id, tag_id, position) VALUES (?, ?, ?)",
+            [(article["id"], tag_id, position) for position, (_, tag_id) in enumerate(active_tags)],
+        )
+        normalized = [slug for slug, _ in active_tags]
+        if normalized != raw_tags:
+            conn.execute(
+                "UPDATE news_articles SET tags_json = ? WHERE id = ?",
+                (json.dumps(normalized, ensure_ascii=False), article["id"]),
+            )
+
+
+def resolve_news_tag_values(conn, value: Any, include_inactive: bool = False) -> tuple[list[str], list[str], list[str]]:
+    keys: list[str] = []
+    ids: list[str] = []
+    invalid: list[str] = []
+    for token in clean_tag_values(value):
+        row = news_tag_row_for_value(conn, token)
+        if not row or (not include_inactive and not row["active"]):
+            invalid.append(token)
+            continue
+        if row["id"] in ids:
+            continue
+        ids.append(row["id"])
+        keys.append(row["slug"])
+    return keys, ids, invalid
+
+
+def sync_news_article_tags(conn, news_id: str, value: Any) -> tuple[list[str], list[str]]:
+    keys, ids, _ = resolve_news_tag_values(conn, value)
+    conn.execute("DELETE FROM news_article_tags WHERE news_id = ?", (news_id,))
+    conn.executemany(
+        "INSERT INTO news_article_tags(news_id, tag_id, position) VALUES (?, ?, ?)",
+        [(news_id, tag_id, position) for position, tag_id in enumerate(ids)],
+    )
+    return keys, ids
+
+
+def news_article_tag_ids(conn, news_id: str) -> list[str]:
+    return [
+        row["tag_id"]
+        for row in conn.execute(
+            "SELECT tag_id FROM news_article_tags WHERE news_id = ? ORDER BY position, tag_id", (news_id,)
+        ).fetchall()
+    ]
+
+
+def news_tag_catalog(conn, counts: dict[str, int] | None = None, include_inactive: bool = False) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT * FROM news_tags WHERE active = 1 OR ? ORDER BY sort_order, id", (1 if include_inactive else 0,)
+    ).fetchall()
+    if counts is None:
+        counts = {
+            row["slug"]: row["count"]
+            for row in conn.execute(
+                """SELECT t.slug, COUNT(a.news_id) AS count
+                   FROM news_tags t
+                   LEFT JOIN news_article_tags a ON a.tag_id = t.id
+                   WHERE t.active = 1
+                   GROUP BY t.id, t.slug"""
+            ).fetchall()
+        }
+    result = []
+    for row in rows:
+        labels = normalized_news_tag_labels(decode_json(row["labels_json"], {}), row["slug"])
+        result.append(
+            {
+                "id": row["id"],
+                "name": row["slug"],
+                "labels": labels,
+                "label": labels["zh-CN"],
+                "count": counts.get(row["slug"], 0),
+                "sort_order": row["sort_order"],
+                "active": bool(row["active"]),
+            }
+        )
     return result
 
 
@@ -274,34 +557,76 @@ def markdown_section(text: str, heading: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _is_image_srcset_artifact(value: str) -> bool:
+    return bool(
+        re.match(r"^\s*(?:https?:)?//", value, re.IGNORECASE)
+        and re.search(r"\b\d+(?:\.\d+)?w\b", value, re.IGNORECASE)
+    )
+
+
+def strip_news_image_markup(text: str) -> str:
+    lines: list[str] = []
+    cleaned_text = NEWS_HTML_IMAGE_RE.sub("", str(text or ""))
+    for raw_line in cleaned_text.splitlines():
+        line = raw_line
+        for image_match in NEWS_IMAGE_RE.finditer(line):
+            if _is_image_srcset_artifact(line[image_match.end() :]):
+                line = line[: image_match.end()]
+                break
+        if _is_image_srcset_artifact(line):
+            continue
+        lines.append(NEWS_IMAGE_RE.sub("", line).strip())
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
 def strip_markdown_images(text: str) -> str:
-    return NEWS_IMAGE_RE.sub("", text).strip()
+    return strip_news_image_markup(text)
 
 
-def image_references(text: str) -> list[dict[str, str]]:
+def news_image_tag_source(image) -> str:
+    fallback = ""
+    for attribute in ("data-src", "data-original", "data-lazy-src", "src"):
+        value = str(image.get(attribute) or "").strip()
+        if not value:
+            continue
+        fallback = fallback or value
+        if not value.lower().startswith("data:"):
+            return value
+    srcset = str(image.get("srcset") or image.get("data-srcset") or "").strip()
+    if srcset:
+        return srcset.split(",", 1)[0].strip().split(" ", 1)[0]
+    return fallback
+
+
+def image_references(text: str, base_url: str = "") -> list[dict[str, str]]:
     references: list[dict[str, str]] = []
     seen: set[str] = set()
-    for match in NEWS_IMAGE_RE.finditer(text):
-        raw = (match.group(1) or match.group(2) or "").strip()
-        if not raw:
-            continue
-        raw = unquote(raw)
-        raw = raw.removeprefix("./")
-        if raw.startswith("pic/"):
-            normalized = str(Path(raw).as_posix())
+
+    def add_reference(raw: Any) -> None:
+        raw_value = unquote(str(raw or "").strip()).removeprefix("./")
+        if raw_value.startswith("pic/"):
+            normalized = str(Path(raw_value).as_posix())
             if normalized.startswith("pic/") and ".." not in Path(normalized).parts:
                 key = f"local:{normalized}"
                 if key not in seen:
                     references.append({"kind": "archive", "local_path": normalized, "source_url": ""})
                     seen.add(key)
-            continue
-        parsed = urlparse(raw)
+            return
+        parsed = urlparse(raw_value)
+        if not parsed.scheme and base_url and raw_value.startswith(("/", "//")):
+            raw_value = urljoin(base_url, raw_value)
+            parsed = urlparse(raw_value)
         if parsed.scheme in {"http", "https"}:
             source_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", parsed.query, ""))
             key = f"remote:{source_url}"
             if key not in seen:
                 references.append({"kind": "remote", "local_path": "", "source_url": source_url})
                 seen.add(key)
+
+    for match in NEWS_IMAGE_RE.finditer(text):
+        add_reference(match.group(1) or match.group(2))
+    for image in BeautifulSoup(text, "html.parser").find_all("img"):
+        add_reference(news_image_tag_source(image))
     return references
 
 
@@ -347,7 +672,7 @@ def parse_local_markdown(path: Path) -> dict[str, Any]:
     body = strip_markdown_images(body)
     if not body:
         body = summary
-    refs = image_references(text)
+    refs = image_references(text, source_url)
     published_at = normalize_news_date(metadata_field(text, "发布日期"), filename_date)
     tags_line = re.search(r"^- tags[：:]\s*\[([^\]]*)\]", text, re.MULTILINE | re.IGNORECASE)
     tags = normalized_tags(tags_line.group(1) if tags_line else [])
@@ -405,6 +730,29 @@ def inferred_topic_tags(title: str, category: str, body: str = "") -> list[str]:
     ):
         tags.add("voice:offline")
     return [tag for tag in NEWS_TAG_ORDER if tag in tags]
+
+
+def _parse_image_dimension(value: Any) -> int | None:
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*(?:px)?\s*", str(value or ""), re.IGNORECASE)
+    return int(float(match.group(1))) if match else None
+
+
+def news_image_tag_dimensions(image) -> tuple[int | None, int | None]:
+    dimensions: dict[str, int | None] = {
+        "width": _parse_image_dimension(image.get("width")),
+        "height": _parse_image_dimension(image.get("height")),
+    }
+    for name, raw_value in NEWS_IMAGE_STYLE_RE.findall(str(image.get("style") or "")):
+        dimensions[name.lower()] = _parse_image_dimension(raw_value)
+    return dimensions["width"], dimensions["height"]
+
+
+def news_image_dimensions_allowed(width: int | None, height: int | None) -> bool:
+    bounds = (
+        (width, NEWS_IMAGE_MIN_WIDTH, NEWS_IMAGE_MAX_WIDTH),
+        (height, NEWS_IMAGE_MIN_HEIGHT, NEWS_IMAGE_MAX_HEIGHT),
+    )
+    return all(value is None or lower <= value <= upper for value, lower, upper in bounds)
 
 
 def _canonical_page_url(url: str, base_url: str = NEWS_TOPICS_URL) -> str:
@@ -626,11 +974,14 @@ def parse_topic_detail(
         and not NEWS_DATE_RE.fullmatch(line)
     )
     summary = " ".join(body.split())[:500]
-    images: list[dict[str, str]] = []
+    images: list[dict[str, Any]] = []
     seen: set[str] = set()
     for image in root.find_all("img"):
-        raw = str(image.get("data-src") or image.get("data-original") or image.get("src") or "").strip()
+        raw = news_image_tag_source(image)
         if not raw or raw.startswith("data:"):
+            continue
+        width, height = news_image_tag_dimensions(image)
+        if not news_image_dimensions_allowed(width, height):
             continue
         absolute = urljoin(source_url, raw)
         parsed = urlparse(absolute)
@@ -646,6 +997,8 @@ def parse_topic_detail(
                 "local_path": "",
                 "source_url": absolute,
                 "alt_text": _clean_text(image.get("alt") or ""),
+                "width": width or 0,
+                "height": height or 0,
             }
         )
     return {
@@ -746,6 +1099,12 @@ def upsert_news_record(conn, record: dict[str, Any], now: str | None = None) -> 
             {**values, "last_seen_at": timestamp, "updated_at": timestamp if changed else old["updated_at"]},
         )
 
+    tag_keys, _ = sync_news_article_tags(conn, record_id, values["tags_json"])
+    tag_json = json.dumps(tag_keys, ensure_ascii=False)
+    if tag_json != values["tags_json"]:
+        conn.execute("UPDATE news_articles SET tags_json = ? WHERE id = ?", (tag_json, record_id))
+        changed = True
+
     # Reconcile by identity, not DELETE+INSERT: stable image IDs keep existing
     # /api/news/images/{id} links valid across polls and local reimports.
     if "images" in record:
@@ -810,12 +1169,16 @@ def upsert_news_record(conn, record: dict[str, Any], now: str | None = None) -> 
 
 
 __all__ = [
+    "NEWS_ALLOWED_TAGS",
     "NEWS_CATEGORIES",
     "NEWS_EDITABLE_FIELDS",
     "NEWS_SCHEMA_SQL",
     "NEWS_SOURCES",
+    "NEWS_TAG_CATALOG_ORDER",
+    "NEWS_TAG_LABELS",
     "NEWS_SOURCE_LABELS",
     "NEWS_TOPICS_URL",
+    "clean_tag_values",
     "ensure_news_schema",
     "image_references",
     "inferred_topic_tags",
@@ -823,6 +1186,16 @@ __all__ = [
     "news_id",
     "normalize_news_date",
     "normalized_tags",
+    "news_article_tag_ids",
+    "news_tag_catalog",
+    "news_tag_id_for_slug",
+    "normalized_news_tag_labels",
+    "normalized_news_tag_key",
+    "resolve_news_tag_values",
+    "sync_news_article_tags",
+    "news_image_dimensions_allowed",
+    "news_image_tag_dimensions",
+    "news_image_tag_source",
     "parse_local_markdown",
     "parse_topic_detail",
     "parse_topic_listing",

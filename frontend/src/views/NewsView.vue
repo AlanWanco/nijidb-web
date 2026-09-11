@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 import { api } from "../api";
 import { formatLocalDateTime } from "../datetime";
@@ -12,8 +12,21 @@ const router = useRouter();
 const query = ref(typeof route.query.q === "string" ? route.query.q : "");
 const items = ref([]);
 const tagOptions = ref([]);
+const tagCatalog = ref([]);
 const sourceOptions = ref([]);
 const lastSync = ref(null);
+const authenticated = ref(false);
+const tagManagerOpen = ref(false);
+const tagDrafts = ref([]);
+const tagSaving = ref(false);
+const tagError = ref("");
+const tagMessage = ref("");
+const newTag = reactive({
+  key: "",
+  zh: "",
+  ja: "",
+  en: "",
+});
 const total = ref(0);
 const page = ref(Number(route.query.page) || 1);
 const pages = ref(1);
@@ -21,12 +34,21 @@ const loading = ref(true);
 const error = ref("");
 let requestId = 0;
 const heroRef = ref(null);
-const heroStyle = ref({
-  "--news-pointer-x": "0px",
-  "--news-pointer-y": "0px",
-  "--news-focus-x": "0px",
-  "--news-focus-y": "0px",
+const heroScrollStyle = ref({
+  "--news-hero-copy-opacity": "1",
+  "--news-hero-art-opacity": "1",
+  "--news-hero-grid-opacity": ".56",
+  "--news-hero-copy-shift": "0px",
+  "--news-hero-art-shift": "0px",
 });
+const heroPointerStyle = ref({
+  "--news-hero-pointer-x": "0px",
+  "--news-hero-pointer-y": "0px",
+  "--news-hero-focus-x": "0px",
+  "--news-hero-focus-y": "0px",
+  "--news-hero-focus-scale": "1",
+});
+let heroScrollFrame = 0;
 
 const activeTags = computed(() => {
   const raw = typeof route.query.tags === "string" ? route.query.tags : "";
@@ -57,21 +79,44 @@ function handlePointerMove(event) {
   const bounds = hero.getBoundingClientRect();
   const x = (event.clientX - bounds.left) / bounds.width - 0.5;
   const y = (event.clientY - bounds.top) / bounds.height - 0.5;
-  heroStyle.value = {
-    "--news-pointer-x": `${x * 24}px`,
-    "--news-pointer-y": `${y * 18}px`,
-    "--news-focus-x": `${x * 50}px`,
-    "--news-focus-y": `${y * 34}px`,
+  const intensity = Math.min(1, Math.hypot(x, y) * 1.4);
+  heroPointerStyle.value = {
+    "--news-hero-pointer-x": `${x * 24}px`,
+    "--news-hero-pointer-y": `${y * 18}px`,
+    "--news-hero-focus-x": `${x * 46}px`,
+    "--news-hero-focus-y": `${y * 34}px`,
+    "--news-hero-focus-scale": String(1 + intensity * 0.1),
   };
 }
 
 function resetPointer() {
-  heroStyle.value = {
-    "--news-pointer-x": "0px",
-    "--news-pointer-y": "0px",
-    "--news-focus-x": "0px",
-    "--news-focus-y": "0px",
+  heroPointerStyle.value = {
+    "--news-hero-pointer-x": "0px",
+    "--news-hero-pointer-y": "0px",
+    "--news-hero-focus-x": "0px",
+    "--news-hero-focus-y": "0px",
+    "--news-hero-focus-scale": "1",
   };
+}
+
+function updateHeroScrollStyle() {
+  heroScrollFrame = 0;
+  const hero = heroRef.value;
+  if (!hero) return;
+  const fadeDistance = Math.max(hero.offsetHeight * 0.72, window.innerHeight * 0.65);
+  const progress = Math.min(1, Math.max(0, window.scrollY / fadeDistance));
+  heroScrollStyle.value = {
+    "--news-hero-copy-opacity": String(1 - progress),
+    "--news-hero-art-opacity": String(1 - progress * 0.82),
+    "--news-hero-grid-opacity": String(0.56 - progress * 0.45),
+    "--news-hero-copy-shift": `${progress * -28}px`,
+    "--news-hero-art-shift": `${progress * 18}px`,
+  };
+}
+
+function scheduleHeroScrollStyle() {
+  if (heroScrollFrame) return;
+  heroScrollFrame = requestAnimationFrame(updateHeroScrollStyle);
 }
 
 function formatDate(value) {
@@ -81,6 +126,168 @@ function formatDate(value) {
 
 function sourceLabel(source) {
   return newsSourceLabel(source) || t("官网新闻");
+}
+
+function tagLabel(tag) {
+  return newsTagLabel(tag.name, locale.value, tag);
+}
+
+function tagToken(tag) {
+  return tag.id || tag.name;
+}
+
+function tagSelected(tag) {
+  return activeTags.value.includes(tagToken(tag)) || activeTags.value.includes(tag.name);
+}
+
+function cloneTag(tag) {
+  return {
+    id: tag.id,
+    name: tag.name,
+    labels: { ...(tag.labels || {}) },
+  };
+}
+
+function openTagManager() {
+  tagDrafts.value = tagCatalog.value.map(cloneTag);
+  tagError.value = "";
+  tagMessage.value = "";
+  tagManagerOpen.value = true;
+}
+
+function closeTagManager() {
+  if (tagSaving.value) return;
+  tagManagerOpen.value = false;
+  tagError.value = "";
+  tagMessage.value = "";
+}
+
+async function loadAuth() {
+  try {
+    const data = await api("/api/auth/session");
+    authenticated.value = Boolean(data.authenticated);
+  } catch {
+    authenticated.value = false;
+  }
+}
+
+async function saveTagCatalog() {
+  if (tagSaving.value) return;
+  const previousCatalog = tagCatalog.value;
+  tagSaving.value = true;
+  tagError.value = "";
+  tagMessage.value = "";
+  try {
+    const data = await api("/api/admin/news/tags", {
+      method: "PATCH",
+      body: {
+        tags: tagDrafts.value.map((tag) => ({
+          id: tag.id,
+          key: tag.name,
+          labels: tag.labels,
+        })),
+      },
+    });
+    tagCatalog.value = data.tags || [];
+    tagDrafts.value = tagCatalog.value.map(cloneTag);
+    tagMessage.value = t("标签目录已保存");
+    const renamedTokens = new Map();
+    for (const oldTag of previousCatalog) {
+      const nextTag = tagCatalog.value.find((tag) => tag.id === oldTag.id);
+      if (nextTag) {
+        renamedTokens.set(oldTag.id, nextTag.id);
+        renamedTokens.set(oldTag.name, nextTag.id);
+      }
+    }
+    const nextFilterTags = activeTags.value.map((token) => renamedTokens.get(token) || token);
+    if (nextFilterTags.join(",") !== activeTags.value.join(",")) {
+      await router.replace({
+        path: "/news",
+        query: makeQuery({ tags: nextFilterTags.join(","), page: 1 }),
+      });
+    } else {
+      await loadNews();
+    }
+  } catch (requestError) {
+    if (requestError.status === 401) {
+      authenticated.value = false;
+      tagManagerOpen.value = false;
+    }
+    tagError.value = requestError.message || t("标签目录保存失败");
+  } finally {
+    tagSaving.value = false;
+  }
+}
+
+function resetNewTag() {
+  newTag.key = "";
+  newTag.zh = "";
+  newTag.ja = "";
+  newTag.en = "";
+}
+
+async function createTag() {
+  if (tagSaving.value || !newTag.key.trim()) return;
+  tagSaving.value = true;
+  tagError.value = "";
+  tagMessage.value = "";
+  try {
+    const labels = {};
+    if (newTag.zh.trim()) labels["zh-CN"] = newTag.zh.trim();
+    if (newTag.ja.trim()) labels.ja = newTag.ja.trim();
+    if (newTag.en.trim()) labels.en = newTag.en.trim();
+    const data = await api("/api/admin/news/tags", {
+      method: "POST",
+      body: { key: newTag.key.trim(), labels },
+    });
+    tagCatalog.value = data.tags || [];
+    tagDrafts.value = tagCatalog.value.map(cloneTag);
+    resetNewTag();
+    tagMessage.value = t("标签已新增");
+    await loadNews();
+  } catch (requestError) {
+    if (requestError.status === 401) {
+      authenticated.value = false;
+      tagManagerOpen.value = false;
+    }
+    tagError.value = requestError.message || t("标签新增失败");
+  } finally {
+    tagSaving.value = false;
+  }
+}
+
+async function deleteTag(tag) {
+  if (tagSaving.value || !window.confirm(t("删除这个标签？"))) return;
+  tagSaving.value = true;
+  tagError.value = "";
+  tagMessage.value = "";
+  try {
+    const data = await api(`/api/admin/news/tags/${encodeURIComponent(tag.id)}`, {
+      method: "DELETE",
+    });
+    tagCatalog.value = data.tags || [];
+    tagDrafts.value = tagCatalog.value.map(cloneTag);
+    tagMessage.value = t("标签已删除，文章标签已同步");
+    const nextFilterTags = activeTags.value.filter(
+      (token) => token !== tag.id && token !== tag.name,
+    );
+    if (nextFilterTags.length !== activeTags.value.length) {
+      await router.replace({
+        path: "/news",
+        query: makeQuery({ tags: nextFilterTags.join(","), page: 1 }),
+      });
+    } else {
+      await loadNews();
+    }
+  } catch (requestError) {
+    if (requestError.status === 401) {
+      authenticated.value = false;
+      tagManagerOpen.value = false;
+    }
+    tagError.value = requestError.message || t("标签删除失败");
+  } finally {
+    tagSaving.value = false;
+  }
 }
 
 function makeQuery(next = {}) {
@@ -109,9 +316,11 @@ function submitSearch() {
 }
 
 function toggleTag(tag) {
-  const next = activeTags.value.includes(tag)
-    ? activeTags.value.filter((value) => value !== tag)
-    : [...activeTags.value, tag];
+  const token = tagToken(tag);
+  const next = activeTags.value.filter(
+    (value) => value !== token && value !== tag.name,
+  );
+  if (next.length === activeTags.value.length) next.push(token);
   router.push({
     path: "/news",
     query: makeQuery({ tags: next.join(","), page: 1 }),
@@ -162,6 +371,7 @@ async function loadNews() {
     if (id !== requestId) return;
     items.value = data.items || [];
     tagOptions.value = data.tag_options || [];
+    tagCatalog.value = data.tag_catalog || tagOptions.value;
     sourceOptions.value = data.source_options || [];
     total.value = data.total || 0;
     page.value = data.page || 1;
@@ -183,8 +393,19 @@ watch(
   },
   { immediate: true },
 );
+
+onMounted(() => {
+  loadAuth();
+  updateHeroScrollStyle();
+  window.addEventListener("scroll", scheduleHeroScrollStyle, { passive: true });
+  window.addEventListener("resize", scheduleHeroScrollStyle);
+});
+
 onBeforeUnmount(() => {
   requestId += 1;
+  window.removeEventListener("scroll", scheduleHeroScrollStyle);
+  window.removeEventListener("resize", scheduleHeroScrollStyle);
+  if (heroScrollFrame) cancelAnimationFrame(heroScrollFrame);
 });
 </script>
 
@@ -193,7 +414,7 @@ onBeforeUnmount(() => {
     <section
       ref="heroRef"
       class="hero news-hero"
-      :style="heroStyle"
+      :style="[heroScrollStyle, heroPointerStyle]"
       @pointermove="handlePointerMove"
       @pointerleave="resetPointer"
     >
@@ -242,6 +463,10 @@ onBeforeUnmount(() => {
         <span class="news-art-dot news-art-dot-main"></span>
         <span class="news-art-dot news-art-dot-small"></span>
         <span class="news-art-focus"></span>
+        <span class="news-art-scan"></span>
+        <span class="news-hero-art-code"
+          >NO. 04<br /><b>{{ String(total).padStart(3, "0") }} ARTICLES</b></span
+        >
       </div>
       <div class="news-hero-scroll news-hero-fade">
         <span>SCROLL / NEWS</span><i aria-hidden="true"></i>
@@ -281,14 +506,24 @@ onBeforeUnmount(() => {
     <section class="news-filters" aria-label="News filters">
       <div class="news-filter-heading">
         <span class="eyebrow">FILTERS / TAGS</span
-        ><button
-          v-if="activeTags.length || activeSource || route.query.q"
-          class="text-button"
-          type="button"
-          @click="clearFilters"
-        >
-          {{ t("清除筛选") }}
-        </button>
+        ><div class="news-filter-actions">
+          <button
+            v-if="activeTags.length || activeSource || route.query.q"
+            class="text-button"
+            type="button"
+            @click="clearFilters"
+          >
+            {{ t("清除筛选") }}
+          </button>
+          <button
+            v-if="authenticated"
+            class="text-button"
+            type="button"
+            @click="tagManagerOpen ? closeTagManager() : openTagManager()"
+          >
+            {{ tagManagerOpen ? t("关闭") : t("编辑") }}
+          </button>
+        </div>
       </div>
       <div
         v-if="sourceOptions.length"
@@ -308,16 +543,78 @@ onBeforeUnmount(() => {
       <div v-if="visibleTagOptions.length" class="news-filter-row">
         <button
           v-for="tag in visibleTagOptions"
-          :key="tag.name"
+          :key="tag.id || tag.name"
           type="button"
           class="news-filter-chip"
-          :class="{ selected: activeTags.includes(tag.name) }"
-          @click="toggleTag(tag.name)"
+          :class="{ selected: tagSelected(tag) }"
+          @click="toggleTag(tag)"
           :title="tag.name"
         >
-          #{{ newsTagLabel(tag.name, locale) }} <small>{{ tag.count }}</small>
+          #{{ tagLabel(tag) }} <small>{{ tag.count }}</small>
         </button>
       </div>
+      <section v-if="authenticated && tagManagerOpen" class="news-tag-manager">
+        <div class="news-tag-manager-heading">
+          <div>
+            <span class="eyebrow">TAG DIRECTORY / ADMIN</span>
+            <h2>{{ t("管理新闻标签") }}</h2>
+          </div>
+          <button class="text-button" type="button" :disabled="tagSaving" @click="closeTagManager">
+            {{ t("关闭") }}
+          </button>
+        </div>
+        <form class="news-tag-create" @submit.prevent="createTag">
+          <label>
+            {{ t("标签 ID") }}
+            <input v-model="newTag.key" maxlength="80" :placeholder="t('例如：event:2026')" />
+          </label>
+          <label>
+            {{ t("中文名称") }}
+            <input v-model="newTag.zh" maxlength="100" />
+          </label>
+          <label>
+            {{ t("日本語名称") }}
+            <input v-model="newTag.ja" maxlength="100" />
+          </label>
+          <label>
+            {{ t("English name") }}
+            <input v-model="newTag.en" maxlength="100" />
+          </label>
+          <button class="secondary" type="submit" :disabled="tagSaving || !newTag.key.trim()">
+            {{ t("新增标签") }}
+          </button>
+        </form>
+        <div class="news-tag-manager-list">
+          <div v-for="tag in tagDrafts" :key="tag.id" class="news-tag-manager-row">
+            <label class="news-tag-key">
+              <span>{{ t("标签 ID") }}</span>
+              <input v-model="tag.name" maxlength="80" />
+            </label>
+            <label>
+              <span>{{ t("中文名称") }}</span>
+              <input v-model="tag.labels['zh-CN']" maxlength="100" />
+            </label>
+            <label>
+              <span>{{ t("日本語名称") }}</span>
+              <input v-model="tag.labels.ja" maxlength="100" />
+            </label>
+            <label>
+              <span>{{ t("English name") }}</span>
+              <input v-model="tag.labels.en" maxlength="100" />
+            </label>
+            <button class="text-button danger" type="button" :disabled="tagSaving" @click="deleteTag(tag)">
+              {{ t("删除") }}
+            </button>
+          </div>
+        </div>
+        <div class="news-tag-manager-footer">
+          <p v-if="tagMessage" class="success">{{ tagMessage }}</p>
+          <p v-if="tagError" class="state error">{{ tagError }}</p>
+          <button class="secondary" type="button" :disabled="tagSaving" @click="saveTagCatalog">
+            {{ tagSaving ? t("保存中……") : t("保存标签目录") }}
+          </button>
+        </div>
+      </section>
     </section>
 
     <p v-if="loading" class="state">{{ t("正在读取新闻……") }}</p>

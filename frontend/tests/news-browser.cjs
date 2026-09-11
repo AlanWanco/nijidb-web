@@ -174,9 +174,19 @@ async function swipe(page, dx) {
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(base + "/news?source=official_site");
     await page.getByRole("button", { name: "Official Site News 1" }).waitFor();
+    assert.deepEqual(
+      await page.locator(".section-nav a").evaluateAll((links) =>
+        links.map((link) => link.textContent.trim()),
+      ),
+      ["音乐档案", "节目档案", "联动立绘", "官网新闻"],
+    );
     assert.ok(await page.getByRole("button", { name: "#周边 1" }).isVisible());
+    await page.getByRole("button", { name: "编辑", exact: true }).click();
+    await page.getByText("管理新闻标签").waitFor();
+    await page.getByRole("button", { name: "关闭", exact: true }).first().click();
     await page.goto(base + "/news/one?source=official_site&page=2");
     await page.locator(".news-detail-copy h6").waitFor();
+    assert.equal(await page.title(), "测试新闻 · Nijigasaki DB");
     for (const tag of [
       "strong",
       "em",
@@ -219,12 +229,19 @@ async function swipe(page, dx) {
     await page.getByRole("button", { name: "从官网刷新此条" }).click();
     await page.getByText("新闻已刷新，手动修改已保留").waitFor();
     assert.equal(refreshes, 1);
-    await page.getByRole("button", { name: "页面内编辑" }).click();
+    await page.getByRole("button", { name: "编辑该页" }).click();
+    assert.equal(await page.locator(".news-edit-tag").count(), 34);
+    const goodsTag = page.locator(".news-edit-tag").filter({ hasText: "#周边" });
+    const musicTag = page.locator(".news-edit-tag").filter({ hasText: "#音乐" });
+    assert.equal(await goodsTag.getAttribute("aria-pressed"), "true");
+    await musicTag.click();
+    assert.equal(await musicTag.getAttribute("aria-pressed"), "true");
+    await musicTag.click();
     await page.locator(".news-edit-form textarea").first().focus();
     await page.keyboard.press("ArrowRight");
     assert.ok(page.url().includes("/news/one"));
     await page.getByRole("button", { name: "取消", exact: true }).click();
-    await page.getByRole("button", { name: "页面内编辑" }).click();
+    await page.getByRole("button", { name: "编辑该页" }).click();
     page.once("dialog", (dialog) => dialog.accept());
     await page
       .locator(".news-existing-image")
@@ -237,6 +254,14 @@ async function swipe(page, dx) {
     await page.goto(base + "/admin?section=news");
     await page.locator(".news-monitor-card").waitFor();
     assert.equal(await page.locator(".password-form").isVisible(), false);
+    assert.equal(
+      await page.getByRole("button", { name: "打开官网新闻" }).count(),
+      0,
+    );
+    await page.getByRole("link", { name: "Bot 设置", exact: true }).click();
+    await page.locator(".bot-settings-card").waitFor();
+    assert.equal(await page.locator(".bot-settings-card").isVisible(), true);
+    assert.equal(await page.locator(".settings-directory a").count(), 5);
     await page.getByRole("link", { name: "数据库", exact: true }).click();
     await page.locator(".sync-log-list").waitFor();
     assert.equal(await page.locator(".sync-log-list li").count(), 15);

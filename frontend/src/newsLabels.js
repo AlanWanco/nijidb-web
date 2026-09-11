@@ -1,4 +1,4 @@
-// Storage/filter tokens stay unchanged; unknown tags remain readable as-is.
+// Storage/filter tokens are a controlled set shared by the news editor and filters.
 const labels = {
   game: ["游戏", "ゲーム", "Games"],
   "game:loveca": [
@@ -19,6 +19,7 @@ const labels = {
   "anime:spin-off": ["衍生动画", "スピンオフアニメ", "Spin-off anime"],
   "anime:tv-season-1": ["TV动画第1季", "TVアニメ第1期", "TV season 1"],
   "anime:tv-season-2": ["TV动画第2季", "TVアニメ第2期", "TV season 2"],
+  "anime:tv-season-3": ["TV动画第3季", "TVアニメ第3期", "TV season 3"],
   "voice-activity": ["声优活动", "キャスト活動", "Cast activities"],
   "voice:online": ["声优线上活动", "キャスト配信", "Online cast events"],
   "voice:offline": [
@@ -42,10 +43,12 @@ const labels = {
   announcement: ["公告", "お知らせ", "Announcements"],
   other: ["其他", "その他", "Other"],
 };
-export function newsTagLabel(tag, language = "zh-CN") {
-  return (
-    labels[tag]?.[language === "ja" ? 1 : language === "en" ? 2 : 0] || tag
-  );
+export const newsTagOptions = Object.freeze(Object.keys(labels));
+
+export function newsTagLabel(tag, language = "zh-CN", definition = null) {
+  const languageKey = language === "ja" ? "ja" : language === "en" ? "en" : "zh-CN";
+  const dynamicLabel = definition?.labels?.[languageKey] || (languageKey === "zh-CN" ? definition?.label : "");
+  return dynamicLabel || labels[tag]?.[languageKey === "ja" ? 1 : languageKey === "en" ? 2 : 0] || tag;
 }
 export function newsSourceGroup(source) {
   return ["niji_topics", "niji_news"].includes(source)

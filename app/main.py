@@ -3185,12 +3185,13 @@ def news_image_target(row: sqlite3.Row | dict[str, Any]) -> Path | None:
 
 def news_image_url(row: sqlite3.Row | dict[str, Any]) -> str:
     target = news_image_target(row)
+    local_path = str(row["local_path"] if isinstance(row, dict) else row["local_path"] or "").strip()
     if target:
         try:
             relative = target.relative_to(MEDIA_DIR.resolve()).as_posix()
         except ValueError:
             relative = ""
-        if relative and r2_is_configured():
+        if relative and local_path.startswith("runtime:") and r2_is_configured():
             return f"{R2_PUBLIC_BASE_URL}/{quote(r2_object_key(relative), safe='/')}"
         image_id = row["id"]
         return f"/api/news/images/{image_id}"

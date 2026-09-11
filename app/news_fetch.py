@@ -34,6 +34,30 @@ def validate_news_url(url: str) -> str:
     return url
 
 
+def describe_news_fetch_error(error: Exception) -> str:
+    """Return a useful, bounded message without exposing request details."""
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        if status == 403:
+            return "官网返回 HTTP 403（访问被拒绝）"
+        if status == 404:
+            return "官网返回 HTTP 404（页面不存在）"
+        if status == 429:
+            return "官网返回 HTTP 429（请求过于频繁，请稍后重试）"
+        if status >= 500:
+            return f"官网返回 HTTP {status}（官网暂时不可用）"
+        return f"官网返回 HTTP {status}"
+    if isinstance(error, httpx.TimeoutException):
+        return "连接官网超时（30 秒）"
+    if isinstance(error, httpx.NetworkError):
+        return "连接官网失败（网络或 TLS 错误）"
+    if isinstance(error, ValueError):
+        return str(error) or "官网内容无法解析"
+    if isinstance(error, RuntimeError):
+        return str(error) or "官网请求重试失败"
+    return "未知的官网读取错误"
+
+
 async def fetch_news_page(
     client: httpx.AsyncClient,
     url: str,

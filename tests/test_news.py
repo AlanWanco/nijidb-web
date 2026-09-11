@@ -92,6 +92,14 @@ class NewsStorageTests(unittest.TestCase):
             self.assertEqual(upsert_news_record(self.conn, parsed), (False, False))
             self.assertEqual(self.conn.execute("SELECT id FROM news_images").fetchone()[0], first)
 
+    def test_existing_navigation_is_cleaned_by_schema_migration(self):
+        upsert_news_record(self.conn, record())
+        polluted = "- [全てのニュース](https://www.lovelive-anime.jp/nijigasaki/topics.php)\n\n- [グッズ](https://www.lovelive-anime.jp/nijigasaki/topics.php?cat=goods)\n\n正文"
+        self.conn.execute("UPDATE news_articles SET body_markdown = ?", (polluted,))
+        ensure_news_schema(self.conn)
+        body = self.conn.execute("SELECT body_markdown FROM news_articles").fetchone()[0]
+        self.assertEqual(body, "正文")
+
     def test_html_preserves_markdown(self):
         parsed = parse_topic_detail(HTML, URL)
         self.assertIn("**更新本文**", parsed["body_markdown"])
@@ -100,11 +108,13 @@ class NewsStorageTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_topic_detail("<main>Access denied</main>", URL)
 
-    def test_detail_prefers_main_over_navigation_article(self):
-        html = '<body><article><ul id="contentsmenu"><li>全てのニュース</li></ul></article><div id="contents"><div id="main"><h3>有效标题</h3><p>这是正文内容，长度足够通过页面有效性检查，并且包含更多文字以模拟官网真实新闻页面。</p></div></div></body>'
+    def test_detail_filters_navigation_and_category_chrome(self):
+        html = '<body><div id="main"><article><ul id="contentsmenu"><li>全てのニュース</li><li>音楽商品</li><li>グッズ</li></ul></article><article><div class="newsbox"><div class="title"><p class="cat"><a href="topics.php?cat=goods">グッズ</a></p><h6>2026/09/11</h6><h5>有效标题</h5></div><div class="txt"><p>这是正文内容，长度足够通过页面有效性检查，并且包含更多文字以模拟官网真实新闻页面。</p></div></div></article></div></body>'
         parsed = parse_topic_detail(html, URL, {"title": "有效标题", "published_at": "2026-09-11"})
         self.assertIn("正文内容", parsed["body_markdown"])
         self.assertNotIn("全てのニュース", parsed["body_markdown"])
+        self.assertNotIn("音楽商品", parsed["body_markdown"])
+        self.assertNotIn("グッズ", parsed["body_markdown"])
 
 
 class NewsApiTests(unittest.IsolatedAsyncioTestCase):
@@ -151,8 +161,10 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refreshed.status_code, 200)
         self.assertEqual(refreshed.json()["article"]["title"], "手动标题")
         self.assertIn("**更新本文**", refreshed.json()["article"]["body_markdown"])
-        with patch.object(main, "fetch_news_page", AsyncMock(side_effect=ValueError("403"))):
-            self.assertEqual((await self.client.post(endpoint + "/refresh")).status_code, 502)
+        with patch.object(main, "fetch_news_page", AsyncMock(side_effect=ValueError("官网详情未包含有效新闻内容"))):
+            failed = await self.client.post(endpoint + "/refresh")
+        self.assertEqual(failed.status_code, 502)
+        self.assertIn("官网详情未包含有效新闻内容", failed.json()["detail"])
         self.assertEqual((await self.client.get("/api/news/" + record()["id"])).json()["article"]["title"], "手动标题")
         logs = (await self.client.get("/api/admin/settings")).json()["activity_logs"]
         self.assertTrue(any(log["category"] == "news" for log in logs))
@@ -163,6 +175,26 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
                 for log in (await self.client.get("/api/admin/settings")).json()["activity_logs"]
             )
         )
+
+    async def test_delete_source_image_and_keep_suppressed_on_refresh(self):
+        self.login()
+        article_id = record()["id"]
+        with main.db() as conn:
+            image_id = conn.execute("SELECT id FROM news_images WHERE news_id = ?", (article_id,)).fetchone()[0]
+        response = await self.client.delete(f"/api/admin/news/images/{image_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["article"]["images"], [])
+        with main.db() as conn:
+            upsert_news_record(conn, record())
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM news_images WHERE news_id = ?", (article_id,)).fetchone()[0], 0
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM news_image_suppressions WHERE news_id = ?", (article_id,)
+                ).fetchone()[0],
+                1,
+            )
 
     async def test_revalidates_unchanged_listing_and_304(self):
         listing = '<ul><li><a href="/news/01_123.html">同じタイトル</a><span>2026.09.11</span></li></ul>'

@@ -37,7 +37,7 @@ docker run --rm --mount source=nijidb-data,target=/data \
   --entrypoint python nijidb-web /scripts/upload_images_to_r2.py --rewrite-db
 ```
 
-`--rewrite-db` 会先在数据目录创建 SQLite 备份，再把数据库和详情 HTML 中的 `/media/...` 引用改为公开 R2 URL。没有公开访问地址时可以省略该参数，仅执行图片上传。后续同步只配置 Endpoint、Bucket 和 S3 凭证时，会自动把新封面上传到 R2 但继续使用本地 `/media` 引用；补充 `R2_PUBLIC_BASE_URL` 后，才会同时生成 R2 引用。新闻运行时图片位于 `/data/images/news` 时也会按同一公开前缀读取，不需要改写新闻表。
+`--rewrite-db` 会先在数据目录创建 SQLite 备份，再把数据库和详情 HTML 中的 `/media/...` 引用改为公开 R2 URL。没有公开访问地址时可以省略该参数，仅执行图片上传。上传前会列出目标 prefix 的已有对象，按稳定 key 和文件大小跳过已存在文件，因此 SSH 断线或容器重启后可安全续传，不会从头重复上传；日志最后会报告新上传和跳过数量。长任务应使用 detached 容器并通过 `docker logs -f <container>` 查看。后续同步只配置 Endpoint、Bucket 和 S3 凭证时，会自动把新封面上传到 R2 但继续使用本地 `/media` 引用；补充 `R2_PUBLIC_BASE_URL` 后，才会同时生成 R2 引用。新闻运行时图片位于 `/data/images/news` 时也会按同一公开前缀读取，不需要改写新闻表。
 
 ## 开发调试
 
@@ -91,11 +91,11 @@ uv run --locked python scripts/import_official_news.py \
 
 运行本地后端时设置 `NEWS_ARCHIVE_DIR` 指向该归档目录，页面会通过新闻图片接口读取本地图片。需要将图片复制到数据卷时再加 `--copy-images`。
 
-- 正文支持 GFM Markdown（标题、列表、表格、引用、代码等），HTML 经 DOMPurify 清理；正文与图库图片可点击放大，支持灯箱内翻图。
+- 正文支持 GFM Markdown（标题、列表、表格、引用、代码等），HTML 经 DOMPurify 清理；会过滤官网分类导航和当前分类标签；正文与图库图片可点击放大，支持灯箱内翻图。
 - 标签保持原始 token 入库，展示按中文/日文/英文翻译；新闻支持左右键和横向滑动，保留来源、标签、搜索与页码。编辑中/灯箱内不会误切新闻。
 - 自动轮询只访问 `https://www.lovelive-anime.jp/nijigasaki/topics.php` 最近四页及详情，检查正文变化；通过 ETag / Last-Modified 减少重复传输，429/临时错误有界重试。设置开关或间隔变更立即唤醒调度器。
-- `POST /api/admin/news/{id}/refresh` 手动刷新对应官网页面，支持历史来源。服务端检查管理员权限、官网 HTTPS 白名单、重定向与响应大小；失败保留旧内容，已编辑字段及手动图片不覆盖。
-- 图片按来源标识更新而非删除重建，保留图片 ID；正文或图片无变化不刷新 `updated_at`。保存新闻可传 `updated_at` 检测并发冲突，返回 409 时重新加载。
+- `POST /api/admin/news/{id}/refresh` 手动刷新对应官网页面，支持历史来源。服务端检查管理员权限、官网 HTTPS 白名单、重定向与响应大小；失败保留旧内容，并返回 HTTP 状态、超时、网络或解析原因。
+- 编辑模式可以删除手动、归档和官网图片；来源图片删除会写入抑制记录，后续自动刷新不会悄悄恢复。图片按来源标识更新而非删除重建，保留图片 ID；正文或图片无变化不刷新 `updated_at`。保存新闻可传 `updated_at` 检测并发冲突，返回 409 时重新加载。
 - `/admin?section=music|news|database|account` 分区设置；桌面左侧目录、手机顶部页签。数据库页显示音乐/节目/新闻/联动最近 200 条变化记录，支持分类筛选和每页 15 条分页。
 
 离线验证（临时数据库、模拟网络，不修改现有资料）：

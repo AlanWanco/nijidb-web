@@ -13,12 +13,11 @@ import mimetypes
 import os
 import sqlite3
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
 import boto3
-
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".bmp", ".avif"}
 MACOS_METADATA_NAMES = {".DS_Store", ".localized"}
@@ -114,7 +113,9 @@ def rewrite_collaboration_images(connection: sqlite3.Connection, image_dir: Path
     if "public_url" not in columns:
         connection.execute("ALTER TABLE collaboration_images ADD COLUMN public_url TEXT NOT NULL DEFAULT ''")
     updated = 0
-    rows = connection.execute("SELECT id, path FROM collaboration_images WHERE path != '' ORDER BY item_id, position, id").fetchall()
+    rows = connection.execute(
+        "SELECT id, path FROM collaboration_images WHERE path != '' ORDER BY item_id, position, id"
+    ).fetchall()
     for row in rows:
         image_path = collaboration_image_path(image_dir, str(row["path"] or ""))
         if not image_path:
@@ -127,6 +128,17 @@ def rewrite_collaboration_images(connection: sqlite3.Connection, image_dir: Path
         )
         updated += 1
     return updated
+
+
+def existing_object_sizes(client, bucket: str, prefix: str) -> dict[str, int]:
+    clean_prefix = prefix.strip("/")
+    listing_prefix = f"{clean_prefix}/" if clean_prefix else ""
+    objects: dict[str, int] = {}
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=listing_prefix):
+        for item in page.get("Contents", []):
+            objects[str(item["Key"])] = int(item.get("Size") or 0)
+    return objects
 
 
 def rewrite_database(db_path: Path, image_dir: Path, prefix: str, base_url: str) -> tuple[Path, int]:
@@ -190,8 +202,16 @@ def main() -> None:
         aws_secret_access_key=secret_key,
         region_name=os.getenv("R2_REGION", "auto"),
     )
+    existing = existing_object_sizes(client, args.bucket, args.prefix)
+    skipped = 0
+    uploaded = 0
+    print(f"发现 {len(existing)} 个已有 R2 对象，将按 key 和文件大小跳过可复用对象")
     for index, path in enumerate(files, 1):
         key = object_key(path, args.image_dir, args.prefix)
+        if existing.get(key) == path.stat().st_size:
+            skipped += 1
+            print(f"[skip {index}/{len(files)}] {key}")
+            continue
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         client.upload_file(
             str(path),
@@ -199,12 +219,13 @@ def main() -> None:
             key,
             ExtraArgs={"ContentType": content_type, "CacheControl": "no-cache"},
         )
+        uploaded += 1
         print(f"[{index}/{len(files)}] {key}")
 
     if args.rewrite_db:
         backup_path, updated = rewrite_database(args.db_path, args.image_dir, args.prefix, base_url)
         print(f"已更新 {updated} 条图片引用；数据库备份：{backup_path}")
-    print(f"上传完成：{datetime.now(timezone.utc).isoformat()}")
+    print(f"上传完成：{datetime.now(UTC).isoformat()}；新上传 {uploaded} 个，跳过 {skipped} 个")
 
 
 if __name__ == "__main__":

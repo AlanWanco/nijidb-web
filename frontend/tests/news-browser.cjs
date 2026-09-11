@@ -48,6 +48,7 @@ const article = {
   updated_at: "v1",
 };
 let refreshes = 0;
+const deletedImageIds = new Set();
 async function setup(context) {
   await context.addInitScript(() => {
     if (!localStorage.getItem("locale"))
@@ -81,9 +82,29 @@ async function setup(context) {
     if (p.startsWith("/api/news/")) {
       const id = p.split("/").pop();
       return json({
-        article: { ...article, id },
+        article: {
+          ...article,
+          id,
+          images: article.images.filter(
+            (image) => !deletedImageIds.has(image.id),
+          ),
+        },
         previous: id === "two" ? { id: "one", title: "上一篇" } : null,
         following: id === "one" ? { id: "two", title: "下一篇" } : null,
+      });
+    }
+    if (
+      p.startsWith("/api/admin/news/images/") &&
+      route.request().method() === "DELETE"
+    ) {
+      deletedImageIds.add(Number(p.split("/").pop()));
+      return json({
+        article: {
+          ...article,
+          images: article.images.filter(
+            (image) => !deletedImageIds.has(image.id),
+          ),
+        },
       });
     }
     if (p.endsWith("/refresh")) {
@@ -202,6 +223,16 @@ async function swipe(page, dx) {
     await page.locator(".news-edit-form textarea").first().focus();
     await page.keyboard.press("ArrowRight");
     assert.ok(page.url().includes("/news/one"));
+    await page.getByRole("button", { name: "取消", exact: true }).click();
+    await page.getByRole("button", { name: "页面内编辑" }).click();
+    page.once("dialog", (dialog) => dialog.accept());
+    await page
+      .locator(".news-existing-image")
+      .first()
+      .getByRole("button", { name: "删除" })
+      .click();
+    await page.getByText("图片已删除").waitFor();
+    assert.equal(await page.locator(".news-existing-image").count(), 1);
     await page.getByRole("button", { name: "取消", exact: true }).click();
     await page.goto(base + "/admin?section=news");
     await page.locator(".news-monitor-card").waitFor();

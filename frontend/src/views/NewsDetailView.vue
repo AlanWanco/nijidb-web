@@ -247,8 +247,12 @@ function clearSelectedImages() {
 }
 
 async function deleteImage(image) {
-  if (!article.value || image.kind !== "manual" || removingImage.value) return;
-  if (!window.confirm(`${t("删除")}？`)) return;
+  if (!article.value || removingImage.value) return;
+  const prompt =
+    image.kind === "manual"
+      ? t("删除这张图片？")
+      : t("删除来源图片后，自动刷新不会恢复它，确定继续吗？");
+  if (!window.confirm(prompt)) return;
   removingImage.value = image.id;
   saveError.value = "";
   try {
@@ -541,7 +545,6 @@ onMounted(() => {
                         : t("官网图片")
                   }}</span
                   ><button
-                    v-if="image.kind === 'manual'"
                     type="button"
                     class="text-button"
                     :disabled="removingImage === image.id"

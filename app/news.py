@@ -62,6 +62,7 @@ NEWS_DATE_RE = re.compile(r"(?<!\d)(20\d{2})[./年-](\d{1,2})[./月-](\d{1,2})�
 NEWS_FILENAME_RE = re.compile(r"^\[(\d{8})\](niji_topics|niji_news|as_news)_(?:\d+)_([^/]+)\.md$")
 NEWS_PAGE_ID_RE = re.compile(r"^\d+_[^/]+$")
 NEWS_CHROME_LINES = NEWS_CATEGORIES | {
+    "ニュース",
     "全てのニュース",
     "ニュース一覧へ",
     "最新のニュース一覧へ",
@@ -148,6 +149,16 @@ CREATE TABLE IF NOT EXISTS news_images (
   FOREIGN KEY(news_id) REFERENCES news_articles(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_news_images_article ON news_images(news_id, position, id);
+CREATE TABLE IF NOT EXISTS news_image_suppressions (
+  news_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  local_path TEXT NOT NULL DEFAULT '',
+  source_url TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(news_id, kind, local_path, source_url),
+  FOREIGN KEY(news_id) REFERENCES news_articles(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_news_image_suppressions_article ON news_image_suppressions(news_id);
 CREATE TABLE IF NOT EXISTS news_fetch_state (
   news_id TEXT PRIMARY KEY,
   source_url TEXT NOT NULL DEFAULT '',
@@ -165,8 +176,43 @@ CREATE TABLE IF NOT EXISTS news_sync_log (
 """
 
 
+def _is_news_chrome_markdown_line(line: str) -> bool:
+    stripped = line.strip()
+    if stripped in NEWS_CHROME_LINES:
+        return True
+    match = re.fullmatch(r"(?:[-*+]\s*)?\[([^]]+)\]\(([^)]+)\)", stripped)
+    if not match or match.group(1).strip() not in NEWS_CHROME_LINES:
+        return False
+    return urlparse(match.group(2)).path.rstrip("/").endswith("topics.php")
+
+
+def clean_news_markdown(value: Any) -> str:
+    """Remove official-site navigation accidentally captured as article Markdown."""
+    lines: list[str] = []
+    has_content = False
+    for line in str(value or "").replace("\r\n", "\n").replace("\r", "\n").splitlines():
+        if _is_news_chrome_markdown_line(line):
+            continue
+        if not has_content and not line.strip():
+            continue
+        if line.strip():
+            has_content = True
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
 def ensure_news_schema(conn) -> None:
     conn.executescript(NEWS_SCHEMA_SQL)
+    for row in conn.execute("SELECT id, body_markdown, summary, manual_fields_json FROM news_articles").fetchall():
+        manual_fields = decode_json(row["manual_fields_json"], [])
+        if "body_markdown" in manual_fields and "summary" in manual_fields:
+            continue
+        body = row["body_markdown"] if "body_markdown" in manual_fields else clean_news_markdown(row["body_markdown"])
+        summary = row["summary"] if "summary" in manual_fields else clean_news_markdown(row["summary"])
+        if body != row["body_markdown"] or summary != row["summary"]:
+            conn.execute(
+                "UPDATE news_articles SET body_markdown = ?, summary = ? WHERE id = ?", (body, summary, row["id"])
+            )
 
 
 def decode_json(value: str | None, fallback: Any) -> Any:
@@ -480,6 +526,9 @@ def _detail_root(soup: BeautifulSoup):
         ".news_detail",
         ".topics-detail",
         ".detail",
+        ".newsbox",
+        ".news",
+        ".p-page__detail",
         "#main",
         "main",
         ".main",
@@ -496,7 +545,7 @@ def _detail_root(soup: BeautifulSoup):
 def _html_markdown(root, source_url: str) -> str:
     clone = BeautifulSoup(str(root), "html.parser")
     for node in clone.select(
-        "script, style, noscript, nav, header, footer, .breadcrumb, .pankuzu, .share, .pager, .pagination, img"
+        "script, style, noscript, nav, header, footer, .breadcrumb, .pankuzu, .share, .pager, .pagination, #contentsmenu, #contentstitle, #social, .navi, p.cat, #bnr2, img"
     ):
         node.decompose()
     for anchor in clone.select("a[href]"):
@@ -598,8 +647,8 @@ def parse_topic_detail(
         "published_at": normalize_news_date(published_at),
         "category": category,
         "tags": inferred_topic_tags(title, category, body),
-        "summary": summary,
-        "body_markdown": _html_markdown(root, source_url) or body.strip() or summary,
+        "summary": clean_news_markdown(summary),
+        "body_markdown": clean_news_markdown(_html_markdown(root, source_url)) or body.strip() or summary,
         "source_url": _canonical_page_url(source_url),
         "source_file": "",
         "source_hash": hashlib.sha256(html.encode("utf-8")).hexdigest(),
@@ -633,8 +682,8 @@ def upsert_news_record(conn, record: dict[str, Any], now: str | None = None) -> 
         "published_at": normalize_news_date(record.get("published_at")),
         "category": str(record.get("category") or "").strip(),
         "tags_json": json.dumps(tags, ensure_ascii=False),
-        "summary": str(record.get("summary") or "").strip(),
-        "body_markdown": str(record.get("body_markdown") or "").strip(),
+        "summary": clean_news_markdown(record.get("summary")),
+        "body_markdown": clean_news_markdown(record.get("body_markdown")),
         "source_url": str(record.get("source_url") or "").strip(),
         "source_file": str(record.get("source_file") or "").strip(),
         "source_hash": str(record.get("source_hash") or "").strip(),
@@ -694,6 +743,12 @@ def upsert_news_record(conn, record: dict[str, Any], now: str | None = None) -> 
         images = record.get("images") or []
         managed_kinds = {"archive", "remote"} if record.get("source_file") else {"remote"}
         old_images = conn.execute("SELECT * FROM news_images WHERE news_id = ?", (record_id,)).fetchall()
+        suppressed = {
+            (row["kind"], row["local_path"] or row["source_url"])
+            for row in conn.execute(
+                "SELECT kind, local_path, source_url FROM news_image_suppressions WHERE news_id = ?", (record_id,)
+            ).fetchall()
+        }
         remaining = {row["id"]: row for row in old_images if row["kind"] in managed_kinds}
         seen = set()
         for position, image in enumerate(images):
@@ -705,7 +760,7 @@ def upsert_news_record(conn, record: dict[str, Any], now: str | None = None) -> 
             local_path = str(image.get("local_path") or "").strip()
             source_url = str(image.get("source_url") or "").strip()
             identity = (kind, local_path or source_url)
-            if not identity[1] or identity in seen:
+            if not identity[1] or identity in seen or identity in suppressed:
                 continue
             seen.add(identity)
             values = {

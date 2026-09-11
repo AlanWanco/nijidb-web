@@ -46,6 +46,7 @@ from app.news import (
     NEWS_SOURCE_LABELS,
     NEWS_SOURCES,
     NEWS_TOPICS_URL,
+    clean_news_markdown,
     ensure_news_schema,
     news_id,
     news_source_group,
@@ -55,7 +56,7 @@ from app.news import (
     topic_next_offset,
     upsert_news_record,
 )
-from app.news_fetch import NEWS_HEADERS, fetch_news_page, validate_news_url
+from app.news_fetch import NEWS_HEADERS, describe_news_fetch_error, fetch_news_page, validate_news_url
 
 SOURCE_URL = "https://www.lovelive-anime.jp/nijigasaki/cd.php"
 EVENTERNOTE_EVENTS_URL = "https://events.nijigaku.fans/api/events"
@@ -3259,7 +3260,7 @@ def news_summary_payload(
         "published_at": row["published_at"],
         "category": row["category"],
         "tags": normalized_tags(decode_json(row["tags_json"], [])),
-        "summary": row["summary"],
+        "summary": clean_news_markdown(row["summary"]),
         "source_url": row["source_url"],
         "image_count": count,
         "edited": bool(decode_json(row["manual_fields_json"], [])),
@@ -3767,7 +3768,7 @@ def news_article_payload(conn: sqlite3.Connection, row: sqlite3.Row, detail: boo
     payload["available_image_count"] = sum(1 for image in image_rows if news_image_url(image))
     if detail:
         payload.update({
-            "body_markdown": row["body_markdown"],
+            "body_markdown": clean_news_markdown(row["body_markdown"]),
             "last_seen_at": row["last_seen_at"],
             "source_file": row["source_file"],
             "source_hash": row["source_hash"],
@@ -4078,7 +4079,9 @@ async def api_admin_news_refresh(news_id: str, request: Request) -> dict[str, An
             async with httpx.AsyncClient(timeout=30, headers=NEWS_HEADERS) as client:
                 changed = await refresh_news_record(client, news_id, source_url, force=True)
         except (httpx.HTTPError, ValueError, RuntimeError) as exc:
-            raise HTTPException(502, "官网刷新失败，已有内容未被覆盖") from exc
+            reason = describe_news_fetch_error(exc)
+            print(f"[news-refresh] failed {news_id}: {reason}", flush=True)
+            raise HTTPException(502, f"官网刷新失败：{reason}；已有内容未被覆盖") from exc
         with db() as conn:
             updated = conn.execute("SELECT * FROM news_articles WHERE id = ?", (news_id,)).fetchone()
             result = news_article_payload(conn, updated, detail=True)
@@ -4152,11 +4155,17 @@ async def api_admin_news_delete_image(image_id: int, request: Request) -> dict[s
         image = conn.execute("SELECT * FROM news_images WHERE id = ?", (image_id,)).fetchone()
         if not image:
             raise HTTPException(404, "新闻图片不存在")
+        timestamp = datetime.now(timezone.utc).isoformat()
         if image["kind"] != "manual":
-            raise HTTPException(400, "只能删除手动补录的图片")
-        target = news_image_target(image)
+            conn.execute(
+                """INSERT OR IGNORE INTO news_image_suppressions
+                (news_id, kind, local_path, source_url, created_at) VALUES (?, ?, ?, ?, ?)""",
+                (image["news_id"], image["kind"], image["local_path"], image["source_url"], timestamp),
+            )
+        target = news_image_target(image) if image["kind"] == "manual" else None
         conn.execute("DELETE FROM news_images WHERE id = ?", (image_id,))
         still_used = conn.execute("SELECT 1 FROM news_images WHERE local_path = ? LIMIT 1", (image["local_path"],)).fetchone()
+        conn.execute("UPDATE news_articles SET updated_at = ? WHERE id = ?", (timestamp, image["news_id"]))
         article = conn.execute("SELECT * FROM news_articles WHERE id = ?", (image["news_id"],)).fetchone()
         result = news_article_payload(conn, article, detail=True)
     if target and not still_used:

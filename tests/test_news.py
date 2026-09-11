@@ -110,7 +110,8 @@ class NewsStorageTests(unittest.TestCase):
 
     def test_detail_filters_navigation_and_category_chrome(self):
         html = '<body><div id="main"><article><ul id="contentsmenu"><li>全てのニュース</li><li>音楽商品</li><li>グッズ</li></ul></article><article><div class="newsbox"><div class="title"><p class="cat"><a href="topics.php?cat=goods">グッズ</a></p><h6>2026/09/11</h6><h5>有效标题</h5></div><div class="txt"><p>这是正文内容，长度足够通过页面有效性检查，并且包含更多文字以模拟官网真实新闻页面。</p></div></div></article></div></body>'
-        parsed = parse_topic_detail(html, URL, {"title": "有效标题", "published_at": "2026-09-11"})
+        parsed = parse_topic_detail(html, URL)
+        self.assertEqual(parsed["title"], "有效标题")
         self.assertIn("正文内容", parsed["body_markdown"])
         self.assertNotIn("全てのニュース", parsed["body_markdown"])
         self.assertNotIn("音楽商品", parsed["body_markdown"])

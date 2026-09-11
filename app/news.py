@@ -577,9 +577,18 @@ def parse_topic_detail(
     root = _detail_root(soup)
     title = str((listing or {}).get("title") or "").strip()
     if not title:
-        for heading in soup.select("h1, h2, h3"):
+        heading_nodes = root.select("h1, h2, h3, h4, h5, h6")
+        if not heading_nodes:
+            heading_nodes = soup.select("h1, h2, h3, h4, h5, h6")
+        for heading in heading_nodes:
             candidate = _clean_text(heading.get_text(" ", strip=True))
-            if candidate and candidate not in {"ニュース", "NEWS"} and len(candidate) > 2:
+            if (
+                candidate
+                and candidate not in NEWS_CHROME_LINES
+                and candidate not in NEWS_CATEGORIES
+                and not NEWS_DATE_RE.fullmatch(candidate)
+                and len(candidate) > 2
+            ):
                 title = candidate
                 break
     page_name = page_name_from_url(source_url)

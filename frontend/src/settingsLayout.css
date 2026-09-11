@@ -1,0 +1,84 @@
+.settings-page {
+  max-width: 1200px;
+}
+.settings-workspace {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
+}
+.settings-directory {
+  position: sticky;
+  top: 90px;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface);
+}
+.settings-directory a {
+  padding: 12px;
+  border-radius: 9px;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 14px;
+}
+.settings-directory a.selected {
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 700;
+}
+.settings-workspace .settings-stack {
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+}
+.settings-log-toolbar,
+.settings-log-pages {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.settings-log-toolbar label {
+  flex: 1;
+  min-width: 140px;
+}
+.settings-log-pages {
+  justify-content: center;
+  margin-top: 20px;
+}
+.settings-log-toolbar select {
+  width: 100%;
+}
+.settings-workspace .sync-log-list li {
+  overflow-wrap: anywhere;
+}
+.settings-workspace .backup-list code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 760px) {
+  .settings-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+  .settings-directory {
+    position: static;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    padding: 8px;
+  }
+  .settings-directory a {
+    text-align: center;
+    padding: 10px 6px;
+    font-size: 12px;
+  }
+  .settings-workspace .settings-quick-links,
+  .settings-workspace .actions {
+    flex-wrap: wrap;
+  }
+  .settings-workspace .sync-log-list li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

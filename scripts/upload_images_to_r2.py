@@ -21,6 +21,7 @@ import boto3
 
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".bmp", ".avif"}
+MACOS_METADATA_NAMES = {".DS_Store", ".localized"}
 
 
 def required_env(name: str) -> str:
@@ -48,8 +49,13 @@ def image_files(image_dir: Path) -> list[Path]:
     if not image_dir.is_dir():
         raise SystemExit(f"图片目录不存在：{image_dir}")
     return sorted(
-        path for path in image_dir.rglob("*")
-        if path.is_file() and not path.is_symlink() and path.suffix.lower() in SUPPORTED_EXTENSIONS
+        path
+        for path in image_dir.rglob("*")
+        if path.is_file()
+        and not path.is_symlink()
+        and path.suffix.lower() in SUPPORTED_EXTENSIONS
+        and not path.name.startswith("._")
+        and path.name not in MACOS_METADATA_NAMES
     )
 
 
@@ -85,6 +91,44 @@ def backup_database(db_path: Path) -> Path:
     return backup_path
 
 
+def collaboration_image_path(image_dir: Path, stored_path: str) -> Path | None:
+    relative = stored_path.removeprefix("/media/illustrations/").removeprefix("illustrations/").lstrip("/")
+    if not relative or ".." in Path(relative).parts:
+        return None
+    root = image_dir if image_dir.name == "illustrations" else image_dir / "illustrations"
+    target = (root / relative).resolve()
+    try:
+        target.relative_to(root.resolve())
+    except ValueError:
+        return None
+    return target if target.is_file() else None
+
+
+def rewrite_collaboration_images(connection: sqlite3.Connection, image_dir: Path, prefix: str, base_url: str) -> int:
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'collaboration_images'"
+    ).fetchone()
+    if not table:
+        return 0
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(collaboration_images)")}
+    if "public_url" not in columns:
+        connection.execute("ALTER TABLE collaboration_images ADD COLUMN public_url TEXT NOT NULL DEFAULT ''")
+    updated = 0
+    rows = connection.execute("SELECT id, path FROM collaboration_images WHERE path != '' ORDER BY item_id, position, id").fetchall()
+    for row in rows:
+        image_path = collaboration_image_path(image_dir, str(row["path"] or ""))
+        if not image_path:
+            print(f"[warning] 找不到联动图片，跳过 URL 改写：{row['path']}")
+            continue
+        key = object_key(image_path, image_dir, prefix)
+        connection.execute(
+            "UPDATE collaboration_images SET public_url = ? WHERE id = ?",
+            (public_url(base_url, key), row["id"]),
+        )
+        updated += 1
+    return updated
+
+
 def rewrite_database(db_path: Path, image_dir: Path, prefix: str, base_url: str) -> tuple[Path, int]:
     backup_path = backup_database(db_path)
     connection = sqlite3.connect(db_path)
@@ -110,6 +154,7 @@ def rewrite_database(db_path: Path, image_dir: Path, prefix: str, base_url: str)
                 (next_url, detail_html, row["id"]),
             )
             updated += 1
+        updated += rewrite_collaboration_images(connection, image_dir, prefix, base_url)
         connection.commit()
     except Exception:
         connection.rollback()

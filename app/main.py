@@ -42,18 +42,20 @@ from app.collabo import (
 )
 from app.news import (
     NEWS_EDITABLE_FIELDS,
+    NEWS_SOURCE_GROUPS,
     NEWS_SOURCE_LABELS,
     NEWS_SOURCES,
     NEWS_TOPICS_URL,
     ensure_news_schema,
     news_id,
-    normalize_news_date,
+    news_source_group,
     normalized_tags,
     parse_topic_detail,
     parse_topic_listing,
     topic_next_offset,
     upsert_news_record,
 )
+from app.news_fetch import NEWS_HEADERS, fetch_news_page, validate_news_url
 
 SOURCE_URL = "https://www.lovelive-anime.jp/nijigasaki/cd.php"
 EVENTERNOTE_EVENTS_URL = "https://events.nijigaku.fans/api/events"
@@ -111,6 +113,8 @@ BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 os.chmod(BACKUP_DIR, 0o700)
 stop_event = asyncio.Event()
 sync_lock = asyncio.Lock()
+news_run_lock = asyncio.Lock()
+news_settings_event = asyncio.Event()
 _r2_client: Any | None = None
 
 
@@ -560,7 +564,7 @@ def recent_database_logs(limit: int = 20) -> list[dict[str, Any]]:
     ]
     logs.extend(
         {
-            "id": f"program-{row['id']}",
+            "id": f"activity-{row['id']}",
             "checked_at": row["created_at"],
             "category": row["category"],
             "summary": row["summary"],
@@ -3240,13 +3244,16 @@ def news_image_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def news_summary_payload(row: sqlite3.Row | dict[str, Any], image_counts: dict[str, int] | None = None) -> dict[str, Any]:
+def news_summary_payload(
+    row: sqlite3.Row | dict[str, Any], image_counts: dict[str, int] | None = None
+) -> dict[str, Any]:
     article_id = str(row["id"])
     count = image_counts.get(article_id, 0) if image_counts is not None else 0
     return {
         "id": article_id,
         "source": row["source"],
         "source_label": NEWS_SOURCE_LABELS.get(str(row["source"]), str(row["source"])),
+        "source_group": news_source_group(str(row["source"])),
         "page_name": row["page_name"],
         "title": row["title"],
         "published_at": row["published_at"],
@@ -3264,12 +3271,18 @@ def news_query_rows(conn: sqlite3.Connection, q: str = "", tags: str = "", sourc
     conditions = []
     parameters: list[Any] = []
     normalized_source = source.strip()
-    if normalized_source in NEWS_SOURCES:
+    if normalized_source in NEWS_SOURCE_GROUPS:
+        members = NEWS_SOURCE_GROUPS[normalized_source]
+        conditions.append(f"source IN ({','.join('?' for _ in members)})")
+        parameters.extend(members)
+    elif normalized_source in NEWS_SOURCES:
         conditions.append("source = ?")
         parameters.append(normalized_source)
     query = q.strip()
     if query:
-        conditions.append("(title LIKE ? OR summary LIKE ? OR body_markdown LIKE ? OR category LIKE ? OR page_name LIKE ? OR tags_json LIKE ?)")
+        conditions.append(
+            "(title LIKE ? OR summary LIKE ? OR body_markdown LIKE ? OR category LIKE ? OR page_name LIKE ? OR tags_json LIKE ?)"
+        )
         pattern = f"%{query}%"
         parameters.extend([pattern] * 6)
     sql = "SELECT * FROM news_articles"
@@ -3301,9 +3314,13 @@ def normalized_news_edit_value(field: str, value: Any) -> str:
         return json.dumps(normalized_tags(value), ensure_ascii=False)
     if field == "published_at":
         raw = str(value or "").strip()
-        if raw and not normalize_news_date(raw):
-            raise ValueError("发布日期格式无效")
-        return normalize_news_date(raw)
+        if raw:
+            try:
+                if date.fromisoformat(raw).isoformat() != raw:
+                    raise ValueError
+            except ValueError as exc:
+                raise ValueError("发布日期格式无效") from exc
+        return raw
     result = str(value or "").strip()
     limits = {"title": 500, "category": 100, "summary": 10000, "body_markdown": 500000, "source_url": 2000}
     if len(result) > limits.get(field, 500000):
@@ -3343,101 +3360,103 @@ def collaboration_upload_extension(content_type: str, content: bytes, filename: 
     return extension if extension in {".jpg", ".png", ".gif", ".webp", ".bmp"} else None
 
 
-async def news_sync_once() -> dict[str, Any]:
-    """Fetch only the active Nijigasaki topics feed.
-
-    The old niji_news and as_news archives remain readable, but they are never
-    queried here because those endpoints no longer receive updates.
-    """
-    print("[news-sync] started", flush=True)
-    discovered_count = 0
-    changed_count = 0
-    error_message: str | None = None
+async def refresh_news_record(
+    client: httpx.AsyncClient,
+    record_id: str,
+    source_url: str,
+    listing: dict[str, str] | None = None,
+    force: bool = False,
+) -> bool:
+    with db() as conn:
+        old = conn.execute("SELECT * FROM news_articles WHERE id = ?", (record_id,)).fetchone()
+        state = conn.execute("SELECT * FROM news_fetch_state WHERE news_id = ?", (record_id,)).fetchone()
+    headers = {}
+    if state and state["source_url"] == source_url and not force:
+        if state["etag"]:
+            headers["If-None-Match"] = state["etag"]
+        if state["last_modified"]:
+            headers["If-Modified-Since"] = state["last_modified"]
+    response = await fetch_news_page(client, source_url, headers)
+    timestamp = datetime.now(timezone.utc).isoformat()
+    record = None
+    if response.status_code != 304:
+        record = parse_topic_detail(response.text, source_url, listing)
+        record["id"] = record_id
+        # A manual refresh of an old news.php/AS article never creates a Topics clone.
+        if old:
+            record.update(source=old["source"], page_name=old["page_name"])
+            if not record["published_at"]:
+                record["published_at"] = old["published_at"]
+    # No DB transaction or global sync lock is held while waiting on the network.
     async with sync_lock:
-        try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml",
-                "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-                "Referer": NEWS_TOPICS_URL,
-            }
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
-                with db() as conn:
-                    existing = {
-                        row["id"]: row
-                        for row in conn.execute("SELECT * FROM news_articles WHERE source = 'niji_topics'").fetchall()
-                    }
-                entries: list[dict[str, str]] = []
-                seen_urls: set[str] = set()
-                page_size = 6
-                max_pages = 4
-                offset = 0
-                for page in range(max_pages):
-                    response = await client.get(news_listing_url(offset))
-                    response.raise_for_status()
-                    page_entries = parse_topic_listing(response.text, NEWS_TOPICS_URL)
-                    if not page_entries:
-                        break
-                    for entry in page_entries:
-                        if entry["source_url"] not in seen_urls:
-                            entries.append(entry)
-                            seen_urls.add(entry["source_url"])
-                    unknown_on_page = any(news_id("niji_topics", entry["page_name"], entry["source_url"]) not in existing for entry in page_entries)
-                    if not unknown_on_page:
-                        break
-                    next_offset = topic_next_offset(response.text, offset)
-                    if next_offset is None:
-                        if len(page_entries) < page_size:
-                            break
-                        next_offset = offset + len(page_entries)
-                    if next_offset <= offset:
-                        break
-                    offset = next_offset
-            discovered_count = len(entries)
-            if not entries:
-                raise RuntimeError("topics 页面没有解析到新闻条目")
+        with db() as conn:
+            changed = upsert_news_record(conn, record, timestamp)[0] if record else False
+            if response.status_code == 304:
+                conn.execute("UPDATE news_articles SET last_seen_at = ? WHERE id = ?", (timestamp, record_id))
+            conn.execute(
+                """INSERT INTO news_fetch_state (news_id, source_url, etag, last_modified, checked_at)
+                VALUES (?, ?, ?, ?, ?) ON CONFLICT(news_id) DO UPDATE SET source_url=excluded.source_url,
+                etag=excluded.etag, last_modified=excluded.last_modified, checked_at=excluded.checked_at""",
+                (
+                    record_id,
+                    source_url,
+                    response.headers.get("etag", state["etag"] if state and record is None else ""),
+                    response.headers.get("last-modified", state["last_modified"] if state and record is None else ""),
+                    timestamp,
+                ),
+            )
+    return changed
 
-            detail_errors = 0
-            with db() as conn:
-                async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as detail_client:
-                    for entry in entries:
+
+async def news_sync_once() -> dict[str, Any]:
+    """Revalidate recent Topics details, including edits with unchanged listing titles."""
+    if news_run_lock.locked():
+        raise HTTPException(409, "新闻检查正在进行，请稍后再试")
+    async with news_run_lock:
+        print("[news-sync] started", flush=True)
+        discovered_count = changed_count = detail_errors = 0
+        error_message = None
+        try:
+            async with httpx.AsyncClient(timeout=30, headers=NEWS_HEADERS) as client:
+                seen_urls: set[str] = set()
+                offset = 0
+                for _ in range(4):
+                    response = await fetch_news_page(client, news_listing_url(offset))
+                    entries = parse_topic_listing(response.text, NEWS_TOPICS_URL)
+                    if not entries:
+                        raise ValueError("Topics 页面没有解析到新闻条目")
+                    fresh_entries = [entry for entry in entries if entry["source_url"] not in seen_urls]
+                    if not fresh_entries:
+                        break
+                    for entry in fresh_entries:
+                        seen_urls.add(entry["source_url"])
+                        discovered_count += 1
                         record_id = news_id("niji_topics", entry["page_name"], entry["source_url"])
-                        old = existing.get(record_id)
-                        listing_changed = bool(old and any(
-                            str(old[key] or "") != str(entry[key] or "")
-                            for key in ("title", "published_at", "category", "source_url")
-                        ))
-                        if old and not listing_changed:
-                            continue
                         try:
-                            detail_response = await detail_client.get(entry["source_url"])
-                            detail_response.raise_for_status()
-                            record = parse_topic_detail(detail_response.text, entry["source_url"], entry)
-                            changed, _ = upsert_news_record(conn, record)
-                            if changed:
-                                changed_count += 1
+                            changed_count += int(
+                                await refresh_news_record(client, record_id, entry["source_url"], entry)
+                            )
                         except (httpx.HTTPError, ValueError, RuntimeError) as exc:
                             detail_errors += 1
-                            print(f"[news-sync] detail failed {entry['source_url']}: {type(exc).__name__}", flush=True)
-                error_message = f"{detail_errors} 条详情读取失败" if detail_errors else None
-                conn.execute(
-                    "INSERT INTO news_sync_log(checked_at, discovered_count, changed_count, error) VALUES (?, ?, ?, ?)",
-                    (datetime.now(timezone.utc).isoformat(), discovered_count, changed_count, error_message),
-                )
-            print(f"[news-sync] completed: {changed_count} changed, {discovered_count} topics checked", flush=True)
-        except Exception as exc:
-            error_message = str(exc)
-            print(f"[news-sync] failed: {type(exc).__name__}: {exc}", flush=True)
-            with db() as conn:
-                conn.execute(
-                    "INSERT INTO news_sync_log(checked_at, discovered_count, changed_count, error) VALUES (?, ?, ?, ?)",
-                    (datetime.now(timezone.utc).isoformat(), discovered_count, changed_count, error_message),
-                )
-    return {
-        "discovered_count": discovered_count,
-        "changed_count": changed_count,
-        "error": error_message,
-    }
+                            print(f"[news-sync] detail failed {record_id}: {type(exc).__name__}", flush=True)
+                    next_offset = topic_next_offset(response.text, offset)
+                    if next_offset is None:
+                        if len(entries) < 6:
+                            break
+                        next_offset = offset + len(entries)
+                    offset = next_offset
+            if detail_errors:
+                error_message = f"{detail_errors} 条详情读取失败，下次检查将重试"
+        except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+            error_message = f"官网读取失败（{type(exc).__name__}），已保留已有新闻"
+            print(f"[news-sync] failed: {type(exc).__name__}", flush=True)
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO news_sync_log(checked_at, discovered_count, changed_count, error) VALUES (?, ?, ?, ?)",
+                (datetime.now(timezone.utc).isoformat(), discovered_count, changed_count, error_message),
+            )
+        print(f"[news-sync] completed: {changed_count} changed, {discovered_count} topics checked", flush=True)
+        return {"discovered_count": discovered_count, "changed_count": changed_count, "error": error_message}
 
 
 async def wait_or_stop(seconds: int) -> None:
@@ -3471,18 +3490,32 @@ async def detail_scheduler() -> None:
 
 
 async def news_scheduler() -> None:
-    # Let the application finish its first boot before making an external
-    # request. The interval is configured separately from the music crawler.
     await wait_or_stop(20)
     while not stop_event.is_set():
+        news_settings_event.clear()
         config = settings()
-        if boolean_value(config.get("news_auto_sync"), True):
-            await news_sync_once()
+        interval = int(normalized_settings(config)["news_interval_minutes"]) * 60
+        with db() as conn:
+            last = news_sync_status(conn)
         try:
-            seconds = max(600, min(86400, int(float(config.get("news_interval_minutes", "30")) * 60)))
-        except ValueError:
-            seconds = 1800
-        await wait_or_stop(seconds)
+            elapsed = (
+                (datetime.now(timezone.utc) - datetime.fromisoformat(last["checked_at"])).total_seconds()
+                if last
+                else interval
+            )
+        except (ValueError, TypeError):
+            elapsed = interval
+        if boolean_value(config.get("news_auto_sync"), True) and elapsed >= interval and not news_run_lock.locked():
+            try:
+                await news_sync_once()
+            except Exception as exc:
+                print(f"[news-sync] scheduler error: {type(exc).__name__}", flush=True)
+        # Settings wake the scheduler immediately; short waits also observe shutdown
+        # and manual sync timestamps, so neither creates a duplicate run.
+        try:
+            await asyncio.wait_for(news_settings_event.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            pass
 
 
 def next_daily_backup_at(current: datetime) -> datetime:
@@ -3545,6 +3578,9 @@ def collaboration_asset_target(asset_path: str) -> Path | None:
 
 
 def collaboration_image_url(row: sqlite3.Row | dict[str, Any], thumbnail: bool = False) -> str:
+    public_url = str(row["public_url"] or "").strip()
+    if public_url and valid_external_url(public_url):
+        return public_url
     path_key = "thumbnail_path" if thumbnail else "path"
     local_path = str(row[path_key] or "")
     if local_path:
@@ -3567,6 +3603,7 @@ def collaboration_image_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, 
         "position": row["position"],
         "path": url,
         "asset_path": str(row["path"] or ""),
+        "public_url": str(row["public_url"] or ""),
         "thumbnail_path": str(row["thumbnail_path"] or ""),
         "url": url,
         "thumbnail_url": thumbnail_url,
@@ -3731,6 +3768,7 @@ def news_article_payload(conn: sqlite3.Connection, row: sqlite3.Row, detail: boo
     if detail:
         payload.update({
             "body_markdown": row["body_markdown"],
+            "last_seen_at": row["last_seen_at"],
             "source_file": row["source_file"],
             "source_hash": row["source_hash"],
             "manual_fields": decode_json(row["manual_fields_json"], []),
@@ -3756,7 +3794,9 @@ async def api_news_image(image_id: int):
 
 
 @app.get("/api/news")
-async def api_news(q: str = "", tags: str = "", source: str = "", page: int = 1, page_size: int = 24, tag: str = "") -> dict[str, Any]:
+async def api_news(
+    q: str = "", tags: str = "", source: str = "", page: int = 1, page_size: int = 24, tag: str = ""
+) -> dict[str, Any]:
     tags = tags or tag
     page = max(1, page)
     page_size = max(6, min(60, page_size))
@@ -3792,6 +3832,7 @@ async def api_news(q: str = "", tags: str = "", source: str = "", page: int = 1,
             payload["available_image_count"] = available_counts.get(str(row["id"]), 0)
             payloads.append(payload)
         last = news_sync_status(conn)
+        source_rows = news_query_rows(conn, q, tags)
     return {
         "items": payloads,
         "total": total,
@@ -3800,12 +3841,15 @@ async def api_news(q: str = "", tags: str = "", source: str = "", page: int = 1,
         "pages": page_count,
         "q": q,
         "tags": normalized_tags(tags),
-        "source": source if source in NEWS_SOURCES else "",
+        "source": source if source in NEWS_SOURCES or source in NEWS_SOURCE_GROUPS else "",
         "tag_options": news_tag_counts(rows),
         "source_options": [
-            {"name": source_name, "label": NEWS_SOURCE_LABELS[source_name], "count": sum(1 for row in rows if row["source"] == source_name)}
-            for source_name in ("niji_topics", "niji_news", "as_news")
-            if any(row["source"] == source_name for row in rows)
+            {
+                "name": group,
+                "label": NEWS_SOURCE_LABELS[group],
+                "count": sum(1 for row in source_rows if row["source"] in members),
+            }
+            for group, members in NEWS_SOURCE_GROUPS.items()
         ],
         "last_sync": last,
     }
@@ -3829,7 +3873,11 @@ async def api_news_detail(news_id: str, q: str = "", tags: str = "", source: str
         "article": article_payload,
         "previous": previous_payload,
         "following": following_payload,
-        "filter": {"q": q, "tags": normalized_tags(tags), "source": source if source in NEWS_SOURCES else ""},
+        "filter": {
+            "q": q,
+            "tags": normalized_tags(tags),
+            "source": source if source in NEWS_SOURCES or source in NEWS_SOURCE_GROUPS else "",
+        },
     }
 
 
@@ -3962,7 +4010,14 @@ async def api_logout() -> JSONResponse:
 @app.get("/api/admin/settings")
 async def api_get_settings(request: Request) -> dict[str, Any]:
     require_api_admin(request)
-    return {"settings": public_settings(), "activity_logs": recent_database_logs()}
+    with db() as conn:
+        news_last = news_sync_status(conn)
+    return {
+        "settings": public_settings(),
+        "activity_logs": recent_database_logs(200),
+        "news_last_sync": news_last,
+        "news_syncing": news_run_lock.locked(),
+    }
 
 
 @app.patch("/api/admin/settings")
@@ -3976,6 +4031,7 @@ async def api_save_settings(request: Request) -> dict[str, dict[str, str]]:
         raise HTTPException(400, "请求格式无效")
     values = normalized_settings({**settings(), **payload})
     save_settings(values)
+    news_settings_event.set()
     return {"settings": values}
 
 
@@ -4003,7 +4059,32 @@ async def api_admin_news_sync(request: Request) -> dict[str, Any]:
     result = await news_sync_once()
     with db() as conn:
         result["last_sync"] = news_sync_status(conn)
+    result["activity_logs"] = recent_database_logs()
     return result
+
+
+@app.post("/api/admin/news/{news_id}/refresh")
+async def api_admin_news_refresh(news_id: str, request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    if news_run_lock.locked():
+        raise HTTPException(409, "新闻检查正在进行，请稍后再试")
+    async with news_run_lock:
+        with db() as conn:
+            article = conn.execute("SELECT * FROM news_articles WHERE id = ?", (news_id,)).fetchone()
+        if not article:
+            raise HTTPException(404, "新闻不存在")
+        try:
+            source_url = validate_news_url(article["source_url"])
+            async with httpx.AsyncClient(timeout=30, headers=NEWS_HEADERS) as client:
+                changed = await refresh_news_record(client, news_id, source_url, force=True)
+        except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+            raise HTTPException(502, "官网刷新失败，已有内容未被覆盖") from exc
+        with db() as conn:
+            updated = conn.execute("SELECT * FROM news_articles WHERE id = ?", (news_id,)).fetchone()
+            result = news_article_payload(conn, updated, detail=True)
+        if changed:
+            log_database_activity("news", f"刷新官网新闻：{result['title'][:80]}")
+        return {"article": result, "changed": changed, "activity_logs": recent_database_logs()}
 
 
 @app.post("/api/admin/news/{news_id}/images")
@@ -4044,7 +4125,7 @@ async def api_admin_news_upload_image(news_id: str, request: Request) -> dict[st
             temporary.replace(target)
         finally:
             temporary.unlink(missing_ok=True)
-    alt_text = str(request.headers.get("x-alt-text", "")).strip()[:500]
+    alt_text = unquote(str(request.headers.get("x-alt-text", ""))).strip()[:500]
     with db() as conn:
         existing = conn.execute(
             "SELECT id FROM news_images WHERE news_id = ? AND kind = 'manual' AND local_path = ? LIMIT 1",
@@ -4080,6 +4161,7 @@ async def api_admin_news_delete_image(image_id: int, request: Request) -> dict[s
         result = news_article_payload(conn, article, detail=True)
     if target and not still_used:
         target.unlink(missing_ok=True)
+    log_database_activity("news", f"删除官网新闻图片：{result['title'][:80]}")
     return {"article": result}
 
 
@@ -4110,11 +4192,18 @@ async def api_admin_news_edit(news_id: str, request: Request) -> dict[str, Any]:
         article = conn.execute("SELECT * FROM news_articles WHERE id = ?", (news_id,)).fetchone()
         if not article:
             raise HTTPException(404, "新闻不存在")
+        if payload.get("updated_at") and payload["updated_at"] != article["updated_at"]:
+            raise HTTPException(409, "新闻已被其他操作更新，请重新加载后编辑")
+        changes = {field: value for field, value in changes.items() if value != article[field]}
+        if not changes:
+            return {"article": news_article_payload(conn, article, detail=True)}
         manual_fields = set(decode_json(article["manual_fields_json"], []))
         manual_fields.update(changes)
         assignments = ", ".join(f"{field} = ?" for field in changes)
         values = list(changes.values())
-        values.extend([json.dumps(sorted(manual_fields), ensure_ascii=False), datetime.now(timezone.utc).isoformat(), news_id])
+        values.extend(
+            [json.dumps(sorted(manual_fields), ensure_ascii=False), datetime.now(timezone.utc).isoformat(), news_id]
+        )
         conn.execute(
             f"UPDATE news_articles SET {assignments}, manual_fields_json = ?, updated_at = ? WHERE id = ?",
             values,

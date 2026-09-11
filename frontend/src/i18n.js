@@ -1514,6 +1514,67 @@ Object.assign(messages.ja, {
   "暂无图片": "ローカル画像なし",
 });
 
+Object.assign(messages.en, {
+  音乐抓取设置: "Music crawling",
+  新闻抓取设置: "News crawling",
+  数据库: "Database",
+  账号安全: "Account security",
+  设置目录: "Settings sections",
+  管理联动: "Manage collaborations",
+  联动立绘档案: "Collaboration illustrations",
+  每日自动备份: "Daily backup",
+  筛选记录: "Filter activity",
+  上次检查: "Last checked",
+  从官网刷新此条: "Refresh this article",
+  "刷新中……": "Refreshing…",
+  "新闻已刷新，手动修改已保留": "Article refreshed; manual edits kept",
+  官网内容没有变化: "No changes on the official page",
+  来源网址: "Source URL",
+  "还有未保存的修改，确定离开？": "You have unsaved changes. Leave anyway?",
+  "左右按键 / 滑动切换新闻": "Arrow keys / swipe to browse news",
+  查看大图: "Enlarge image",
+  查看原图: "Open original",
+  关闭大图: "Close image",
+  上一张图片: "Previous image",
+  下一张图片: "Next image",
+  "每次检查最近四页 Topics 及详情变化，失败自动重试，手动修改不会被覆盖。":
+    "Checks the latest four Topics pages and their article contents. Failed requests are retried and manual edits are preserved.",
+  "显示音乐、节目、新闻和联动的实际变化；时间按设备时区显示（{timezone}）。":
+    "Actual changes to music, programs, news and collaborations, in your device timezone ({timezone}).",
+  "备份包含设置、节目、音乐、新闻、联动及其图片路径，不包含图片文件。每天自动备份 SQLite，最多保留 30 份；不会备份整卷图库。":
+    "Backups include settings, programs, music, news, collaborations and image paths, not image files. SQLite is backed up daily, retaining up to 30 files; the image volume is not archived.",
+});
+Object.assign(messages.ja, {
+  音乐抓取设置: "音楽の取得設定",
+  新闻抓取设置: "ニュースの取得設定",
+  数据库: "データベース",
+  账号安全: "アカウント",
+  设置目录: "設定メニュー",
+  管理联动: "コラボを管理",
+  联动立绘档案: "コラボイラスト",
+  每日自动备份: "毎日の自動バックアップ",
+  筛选记录: "履歴の絞り込み",
+  上次检查: "最終確認",
+  从官网刷新此条: "この記事を公式から更新",
+  "刷新中……": "更新中…",
+  "新闻已刷新，手动修改已保留": "記事を更新しました。手動編集は保持されます",
+  官网内容没有变化: "公式ページに変更はありません",
+  来源网址: "出典URL",
+  "还有未保存的修改，确定离开？": "未保存の変更があります。移動しますか？",
+  "左右按键 / 滑动切换新闻": "左右キー・スワイプでニュースを移動",
+  查看大图: "画像を拡大",
+  查看原图: "元画像を見る",
+  关闭大图: "拡大表示を閉じる",
+  上一张图片: "前の画像",
+  下一张图片: "次の画像",
+  "每次检查最近四页 Topics 及详情变化，失败自动重试，手动修改不会被覆盖。":
+    "最新4ページのTopicsと本文の変更を確認します。失敗時は再試行し、手動編集を保持します。",
+  "显示音乐、节目、新闻和联动的实际变化；时间按设备时区显示（{timezone}）。":
+    "音楽・番組・ニュース・コラボの変更履歴。時刻は端末のタイムゾーン（{timezone}）です。",
+  "备份包含设置、节目、音乐、新闻、联动及其图片路径，不包含图片文件。每天自动备份 SQLite，最多保留 30 份；不会备份整卷图库。":
+    "設定・番組・音楽・ニュース・コラボと画像パスを含み、画像ファイルは含みません。SQLiteを毎日バックアップし最大30件保持します。画像ボリューム全体の保存は行いません。",
+});
+
 export const languageOptions = [
   { value: "zh-CN", label: "中文", shortLabel: "中" },
   { value: "en", label: "English", shortLabel: "EN" },

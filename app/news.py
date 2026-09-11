@@ -3,20 +3,29 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urljoin, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
+from markdownify import markdownify
 
 NEWS_TOPICS_URL = "https://www.lovelive-anime.jp/nijigasaki/topics.php"
 NEWS_SOURCES = {"niji_topics", "niji_news", "as_news"}
 NEWS_SOURCE_LABELS = {
-    "niji_topics": "Topics",
-    "niji_news": "Nijigasaki News",
+    "niji_topics": "Official Site News",
+    "niji_news": "Official Site News",
+    "official_site": "Official Site News",
     "as_news": "AS News",
 }
+NEWS_SOURCE_GROUPS = {"official_site": ("niji_topics", "niji_news"), "as_news": ("as_news",)}
+
+
+def news_source_group(source: str) -> str:
+    return "official_site" if source in {"niji_topics", "niji_news", "official_site"} else source
+
+
 NEWS_CATEGORIES = {
     "その他",
     "メディア",
@@ -80,9 +89,26 @@ NEWS_CATEGORY_TAGS = {
     "その他": "other",
 }
 NEWS_TAG_ORDER = (
-    "game", "anime", "voice-activity", "voice:online", "voice:offline", "voice:radio",
-    "collaboration", "apology", "goods", "music", "video", "book", "media", "event",
-    "theater", "campaign", "local", "streaming", "announcement", "other",
+    "game",
+    "anime",
+    "voice-activity",
+    "voice:online",
+    "voice:offline",
+    "voice:radio",
+    "collaboration",
+    "apology",
+    "goods",
+    "music",
+    "video",
+    "book",
+    "media",
+    "event",
+    "theater",
+    "campaign",
+    "local",
+    "streaming",
+    "announcement",
+    "other",
 )
 
 NEWS_SCHEMA_SQL = """
@@ -122,6 +148,13 @@ CREATE TABLE IF NOT EXISTS news_images (
   FOREIGN KEY(news_id) REFERENCES news_articles(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_news_images_article ON news_images(news_id, position, id);
+CREATE TABLE IF NOT EXISTS news_fetch_state (
+  news_id TEXT PRIMARY KEY,
+  source_url TEXT NOT NULL DEFAULT '',
+  etag TEXT NOT NULL DEFAULT '',
+  last_modified TEXT NOT NULL DEFAULT '',
+  checked_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS news_sync_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   checked_at TEXT NOT NULL,
@@ -207,8 +240,7 @@ def image_references(text: str) -> list[dict[str, str]]:
         if not raw:
             continue
         raw = unquote(raw)
-        if raw.startswith("./"):
-            raw = raw[2:]
+        raw = raw.removeprefix("./")
         if raw.startswith("pic/"):
             normalized = str(Path(raw).as_posix())
             if normalized.startswith("pic/") and ".." not in Path(normalized).parts:
@@ -228,7 +260,7 @@ def image_references(text: str) -> list[dict[str, str]]:
 
 
 def news_id(source: str, page_name: str, source_url: str = "") -> str:
-    identity = f"{source}:{page_name or source_url}".encode("utf-8")
+    identity = f"{source}:{page_name or source_url}".encode()
     return hashlib.sha256(identity).hexdigest()[:16]
 
 
@@ -257,14 +289,15 @@ def parse_local_markdown(path: Path) -> dict[str, Any]:
     source_url = metadata_field(text, "来源")
     category = metadata_field(text, "分类")
     summary = markdown_section(text, "摘要")
-    body = markdown_section(text, "页面内容")
+    body_heading = re.search(r"^##\s+页面内容\s*$", text, re.MULTILINE)
+    body = text[body_heading.end() :].strip() if body_heading else ""
     if re.search(r"^# ニュース\s*$", body, re.MULTILINE):
         date_heading = re.search(r"^######\s+20\d{2}[./-]\d{1,2}[./-]\d{1,2}.*$", body, re.MULTILINE)
         if date_heading:
-            body = body[date_heading.start():]
+            body = body[date_heading.start() :]
     footer = re.search(r"^\*\s+(?:\[)?最新のニュース一覧へ", body, re.MULTILINE)
     if footer:
-        body = body[:footer.start()]
+        body = body[: footer.start()]
     body = strip_markdown_images(body)
     if not body:
         body = summary
@@ -299,9 +332,7 @@ def inferred_topic_tags(title: str, category: str, body: str = "") -> list[str]:
     category_tag = NEWS_CATEGORY_TAGS.get(category)
     if category_tag:
         tags.add(category_tag)
-    if category == "ゲーム" or re.search(
-        r"スクスタ|スクフェス|ゲーム|ビジュアルノベル", text, re.IGNORECASE
-    ):
+    if category == "ゲーム" or re.search(r"スクスタ|スクフェス|ゲーム|ビジュアルノベル", text, re.IGNORECASE):
         tags.add("game")
     if category in {"アニメ放送/配信", "アニメ映像商品", "劇場"} or re.search(
         r"TVアニメ|アニメーション|劇場版|映画|完結編|OVA|NEXT SKY|にじよん", text, re.IGNORECASE
@@ -319,9 +350,7 @@ def inferred_topic_tags(title: str, category: str, body: str = "") -> list[str]:
         r"生放送|生配信|アーカイブ配信|オンライン|YouTube|ニコニコ|ABEMA|配信", title, re.IGNORECASE
     ):
         tags.add("voice:online")
-    if "voice-activity" in tags and re.search(
-        r"ラジオ|AuDee|がさらじ|Webラジオ", title, re.IGNORECASE
-    ):
+    if "voice-activity" in tags and re.search(r"ラジオ|AuDee|がさらじ|Webラジオ", title, re.IGNORECASE):
         tags.add("voice:radio")
     if "voice-activity" in tags and re.search(
         r"舞台挨拶|公開収録|(?<!ラブ)ライブ|(?<!Love)Live|公演|ステージ|トークショー|お渡し会|イベント",
@@ -355,7 +384,7 @@ def page_name_from_url(url: str) -> str:
 
 def _is_topic_detail_url(url: str, base_url: str = NEWS_TOPICS_URL) -> bool:
     parsed = urlparse(urljoin(base_url, url))
-    if parsed.netloc and not parsed.netloc.endswith("lovelive-anime.jp"):
+    if parsed.hostname not in {"www.lovelive-anime.jp", "lovelive-anime.jp"}:
         return False
     page = page_name_from_url(url)
     return bool(page and (NEWS_PAGE_ID_RE.match(page) or re.match(r"^\d+$", page)))
@@ -417,13 +446,15 @@ def parse_topic_listing(html: str, base_url: str = NEWS_TOPICS_URL) -> list[dict
         if not title or not date_value:
             continue
         seen.add(source_url)
-        entries.append({
-            "source_url": source_url,
-            "page_name": page_name_from_url(source_url),
-            "title": title,
-            "published_at": date_value,
-            "category": _category_from_container(container),
-        })
+        entries.append(
+            {
+                "source_url": source_url,
+                "page_name": page_name_from_url(source_url),
+                "title": title,
+                "published_at": date_value,
+                "category": _category_from_container(container),
+            }
+        )
     return entries
 
 
@@ -444,11 +475,31 @@ def topic_next_offset(html: str, current_offset: int) -> int | None:
 
 
 def _detail_root(soup: BeautifulSoup):
-    for selector in ("main", ".news-detail", ".news_detail", ".topics-detail", ".detail", "#contents", ".contents"):
+    for selector in (
+        ".news-detail",
+        ".news_detail",
+        ".topics-detail",
+        ".detail",
+        "article",
+        "main",
+        "#contents",
+        ".contents",
+    ):
         root = soup.select_one(selector)
         if root and len(_clean_text(root.get_text(" ", strip=True))) > 40:
             return root
     return soup.body or soup
+
+
+def _html_markdown(root, source_url: str) -> str:
+    clone = BeautifulSoup(str(root), "html.parser")
+    for node in clone.select(
+        "script, style, noscript, nav, header, footer, .breadcrumb, .pankuzu, .share, .pager, .pagination, img"
+    ):
+        node.decompose()
+    for anchor in clone.select("a[href]"):
+        anchor["href"] = urljoin(source_url, anchor["href"])
+    return markdownify(str(clone), heading_style="ATX", bullets="-").strip()
 
 
 def _html_text(root) -> str:
@@ -482,6 +533,12 @@ def parse_topic_detail(
                 break
     page_name = page_name_from_url(source_url)
     text = _html_text(root)
+    if (
+        not title
+        or not text
+        or any(marker in text.lower() for marker in ("just a moment", "access denied", "verify you are human"))
+    ):
+        raise ValueError("官网详情未包含有效新闻内容")
     published_at = str((listing or {}).get("published_at") or "") or _date_from_text(text)
     category = str((listing or {}).get("category") or "").strip() or _category_from_container(root)
     body_lines = text.splitlines()
@@ -501,7 +558,8 @@ def parse_topic_detail(
     if footer_index is not None:
         body_lines = body_lines[:footer_index]
     body = "\n\n".join(
-        line for line in body_lines
+        line
+        for line in body_lines
         if line != title
         and line not in {"ニュース", "NEWS"}
         and line not in NEWS_CHROME_LINES
@@ -522,12 +580,14 @@ def parse_topic_detail(
         if absolute in seen:
             continue
         seen.add(absolute)
-        images.append({
-            "kind": "remote",
-            "local_path": "",
-            "source_url": absolute,
-            "alt_text": _clean_text(image.get("alt") or ""),
-        })
+        images.append(
+            {
+                "kind": "remote",
+                "local_path": "",
+                "source_url": absolute,
+                "alt_text": _clean_text(image.get("alt") or ""),
+            }
+        )
     return {
         "id": news_id("niji_topics", page_name, source_url),
         "source": "niji_topics",
@@ -537,7 +597,7 @@ def parse_topic_detail(
         "category": category,
         "tags": inferred_topic_tags(title, category, body),
         "summary": summary,
-        "body_markdown": body.strip() or summary,
+        "body_markdown": _html_markdown(root, source_url) or body.strip() or summary,
         "source_url": _canonical_page_url(source_url),
         "source_file": "",
         "source_hash": hashlib.sha256(html.encode("utf-8")).hexdigest(),
@@ -546,7 +606,7 @@ def parse_topic_detail(
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def upsert_news_record(conn, record: dict[str, Any], now: str | None = None) -> tuple[bool, bool]:
@@ -555,14 +615,12 @@ def upsert_news_record(conn, record: dict[str, Any], now: str | None = None) -> 
     Values explicitly edited by an administrator are kept when a later local
     import or topics crawl supplies a new source version.
     """
-    ensure_news_schema(conn)
     timestamp = now or _now()
     source = str(record.get("source") or "niji_news")
     if source not in NEWS_SOURCES:
         source = "niji_news"
     record_id = str(
-        record.get("id")
-        or news_id(source, str(record.get("page_name") or ""), str(record.get("source_url") or ""))
+        record.get("id") or news_id(source, str(record.get("page_name") or ""), str(record.get("source_url") or ""))
     )
     tags = normalized_tags(record.get("tags", []))
     incoming = {
@@ -588,16 +646,21 @@ def upsert_news_record(conn, record: dict[str, Any], now: str | None = None) -> 
                 values[field] = old[field]
         # Keep the richer tags generated by the local Markdown classifier when
         # a live Topics refresh touches the same imported article.
-        if not incoming["source_file"] and old["source_file"] and old["tags_json"]:
-            values["tags_json"] = old["tags_json"]
-        elif not tags and not incoming["source_file"] and old["tags_json"]:
+        if (
+            not incoming["source_file"]
+            and old["source_file"]
+            and old["tags_json"]
+            or not tags
+            and not incoming["source_file"]
+            and old["tags_json"]
+        ):
             values["tags_json"] = old["tags_json"]
         if not values["source_file"]:
             values["source_file"] = old["source_file"]
     changed = not old or any(
         str(old[field] or "") != str(values[field] or "")
         for field in values
-        if field not in {"id"}
+        if field not in {"id", "source_hash", "source_file"}
     )
     if not old:
         conn.execute(
@@ -620,68 +683,63 @@ def upsert_news_record(conn, record: dict[str, Any], now: str | None = None) -> 
             published_at=:published_at, category=:category, tags_json=:tags_json, summary=:summary,
             body_markdown=:body_markdown, source_url=:source_url, source_file=:source_file,
             source_hash=:source_hash, last_seen_at=:last_seen_at, updated_at=:updated_at WHERE id=:id""",
-            {**values, "last_seen_at": timestamp, "updated_at": timestamp},
+            {**values, "last_seen_at": timestamp, "updated_at": timestamp if changed else old["updated_at"]},
         )
 
-    images = record.get("images") or []
-    has_local_images = bool(
-        old and conn.execute(
-            "SELECT 1 FROM news_images WHERE news_id = ? AND kind IN ('archive', 'manual') LIMIT 1",
-            (record_id,),
-        ).fetchone()
-    )
-    image_kinds = {str(image.get("kind") or "remote") for image in images if isinstance(image, dict)}
-    if "archive" in image_kinds:
-        conn.execute("DELETE FROM news_images WHERE news_id = ? AND kind IN ('archive', 'remote')", (record_id,))
-    elif "remote" in image_kinds:
-        conn.execute("DELETE FROM news_images WHERE news_id = ? AND kind = 'remote'", (record_id,))
-    elif record.get("source_file"):
-        conn.execute("DELETE FROM news_images WHERE news_id = ? AND kind IN ('archive', 'remote')", (record_id,))
-    elif source == "niji_topics":
-        conn.execute("DELETE FROM news_images WHERE news_id = ? AND kind = 'remote'", (record_id,))
-    for position, image in enumerate(images):
-        if not isinstance(image, dict):
-            continue
-        kind = str(image.get("kind") or "remote")
-        if kind not in {"archive", "remote", "manual"}:
-            kind = "remote"
-        if kind == "remote" and has_local_images:
-            continue
-        local_path = str(image.get("local_path") or "").strip()
-        source_url = str(image.get("source_url") or "").strip()
-        sha256 = str(image.get("sha256") or "").strip()
-        duplicate = None
-        if local_path:
-            duplicate = conn.execute(
-                "SELECT id FROM news_images WHERE news_id=? AND kind=? AND local_path=? LIMIT 1",
-                (record_id, kind, local_path),
-            ).fetchone()
-        elif source_url:
-            duplicate = conn.execute(
-                "SELECT id FROM news_images WHERE news_id=? AND kind=? AND source_url=? LIMIT 1",
-                (record_id, kind, source_url),
-            ).fetchone()
-        if duplicate:
-            conn.execute("UPDATE news_images SET position=? WHERE id=?", (position, duplicate["id"]))
-            continue
-        conn.execute(
-            """INSERT INTO news_images
-            (news_id, position, kind, local_path, source_url, alt_text, width, height, bytes, sha256, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                record_id,
-                position,
-                kind,
-                local_path,
-                source_url,
-                str(image.get("alt_text") or "").strip(),
-                int(image.get("width") or 0),
-                int(image.get("height") or 0),
-                int(image.get("bytes") or 0),
-                sha256,
-                timestamp,
-            ),
-        )
+    # Reconcile by identity, not DELETE+INSERT: stable image IDs keep existing
+    # /api/news/images/{id} links valid across polls and local reimports.
+    if "images" in record:
+        images = record.get("images") or []
+        managed_kinds = {"archive", "remote"} if record.get("source_file") else {"remote"}
+        old_images = conn.execute("SELECT * FROM news_images WHERE news_id = ?", (record_id,)).fetchall()
+        remaining = {row["id"]: row for row in old_images if row["kind"] in managed_kinds}
+        seen = set()
+        for position, image in enumerate(images):
+            if not isinstance(image, dict):
+                continue
+            kind = str(image.get("kind") or "remote")
+            if kind not in managed_kinds:
+                continue
+            local_path = str(image.get("local_path") or "").strip()
+            source_url = str(image.get("source_url") or "").strip()
+            identity = (kind, local_path or source_url)
+            if not identity[1] or identity in seen:
+                continue
+            seen.add(identity)
+            values = {
+                "position": position,
+                "local_path": local_path,
+                "source_url": source_url,
+                "alt_text": str(image.get("alt_text") or "").strip(),
+                "width": int(image.get("width") or 0),
+                "height": int(image.get("height") or 0),
+                "bytes": int(image.get("bytes") or 0),
+                "sha256": str(image.get("sha256") or ""),
+            }
+            duplicate = next(
+                (row for row in old_images if (row["kind"], row["local_path"] or row["source_url"]) == identity), None
+            )
+            if duplicate:
+                remaining.pop(duplicate["id"], None)
+                if any(duplicate[key] != value for key, value in values.items()):
+                    assignments = ", ".join(f"{key} = ?" for key in values)
+                    conn.execute(
+                        f"UPDATE news_images SET {assignments} WHERE id = ?", [*values.values(), duplicate["id"]]
+                    )
+                    changed = True
+            else:
+                keys = ", ".join(values)
+                placeholders = ", ".join("?" for _ in values)
+                conn.execute(
+                    f"INSERT INTO news_images (news_id, kind, {keys}, created_at) VALUES (?, ?, {placeholders}, ?)",
+                    [record_id, kind, *values.values(), timestamp],
+                )
+                changed = True
+        if remaining:
+            conn.executemany("DELETE FROM news_images WHERE id = ?", [(image_id,) for image_id in remaining])
+            changed = True
+    if changed:
+        conn.execute("UPDATE news_articles SET updated_at = ? WHERE id = ?", (timestamp, record_id))
     return changed, old is None
 
 
@@ -689,8 +747,8 @@ __all__ = [
     "NEWS_CATEGORIES",
     "NEWS_EDITABLE_FIELDS",
     "NEWS_SCHEMA_SQL",
-    "NEWS_SOURCE_LABELS",
     "NEWS_SOURCES",
+    "NEWS_SOURCE_LABELS",
     "NEWS_TOPICS_URL",
     "ensure_news_schema",
     "image_references",

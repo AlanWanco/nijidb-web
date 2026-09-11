@@ -81,7 +81,7 @@ uv run --locked python scripts/seed_collabo_database.py \
 
 ## 官网新闻
 
-`/news` 使用独立的 `news_articles`、`news_images` 和 `news_sync_log` 表。可以把本地 `ll-offical-site/*.md` 一次导入数据库；导入器默认只保存 `pic/` 相对路径，不会复制约 6GB 的原始图库：
+`/news` 使用独立的 `news_articles`、`news_images`、`news_fetch_state` 和 `news_sync_log` 表。Topics 与 Nijigasaki News 在展示/筛选中合并为 **Official Site News**（`source=official_site`），AS News 单独展示；原始来源、新闻 ID 和链接不变，旧 source 参数仍可使用。可以把本地 `ll-offical-site/*.md` 一次导入数据库；导入器默认只保存 `pic/` 相对路径，不会复制约 6GB 的原始图库：
 
 ```bash
 uv run --locked python scripts/import_official_news.py \
@@ -89,7 +89,23 @@ uv run --locked python scripts/import_official_news.py \
   --database data/nijidb.sqlite3
 ```
 
-运行本地后端时设置 `NEWS_ARCHIVE_DIR` 指向该归档目录，页面会通过新闻图片接口读取本地图片。需要将图片复制到数据卷时再加 `--copy-images`。后台只定时检查 `https://www.lovelive-anime.jp/nijigasaki/topics.php`，不会请求已停止更新的 `news` 或 `as_news`；检查间隔和开关可在设置页调整。管理员登录后可直接在新闻详情页修改标题、日期、分类、tags、摘要和正文。
+运行本地后端时设置 `NEWS_ARCHIVE_DIR` 指向该归档目录，页面会通过新闻图片接口读取本地图片。需要将图片复制到数据卷时再加 `--copy-images`。
+
+- 正文支持 GFM Markdown（标题、列表、表格、引用、代码等），HTML 经 DOMPurify 清理；正文与图库图片可点击放大，支持灯箱内翻图。
+- 标签保持原始 token 入库，展示按中文/日文/英文翻译；新闻支持左右键和横向滑动，保留来源、标签、搜索与页码。编辑中/灯箱内不会误切新闻。
+- 自动轮询只访问 `https://www.lovelive-anime.jp/nijigasaki/topics.php` 最近四页及详情，检查正文变化；通过 ETag / Last-Modified 减少重复传输，429/临时错误有界重试。设置开关或间隔变更立即唤醒调度器。
+- `POST /api/admin/news/{id}/refresh` 手动刷新对应官网页面，支持历史来源。服务端检查管理员权限、官网 HTTPS 白名单、重定向与响应大小；失败保留旧内容，已编辑字段及手动图片不覆盖。
+- 图片按来源标识更新而非删除重建，保留图片 ID；正文或图片无变化不刷新 `updated_at`。保存新闻可传 `updated_at` 检测并发冲突，返回 409 时重新加载。
+- `/admin?section=music|news|database|account` 分区设置；桌面左侧目录、手机顶部页签。数据库页显示音乐/节目/新闻/联动最近 200 条变化记录，支持分类筛选和每页 15 条分页。
+
+离线验证（临时数据库、模拟网络，不修改现有资料）：
+
+```bash
+uv run --locked python -m unittest discover -s tests -v
+PLAYWRIGHT_MODULE=/path/to/playwright node frontend/tests/news-browser.cjs
+```
+
+浏览器测试自动启动临时 Vite，并使用无头 Chrome 验证 Markdown、灯箱、新闻切换、设置分页及移动端布局。
 
 ## 节目档案
 

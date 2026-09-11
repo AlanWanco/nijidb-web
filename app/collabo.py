@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS collaboration_images (
   item_id TEXT NOT NULL,
   position INTEGER NOT NULL DEFAULT 0,
   path TEXT NOT NULL DEFAULT '',
+  public_url TEXT NOT NULL DEFAULT '',
   thumbnail_path TEXT NOT NULL DEFAULT '',
   source_url TEXT NOT NULL DEFAULT '',
   source_page TEXT NOT NULL DEFAULT '',
@@ -73,6 +74,9 @@ def now_iso() -> str:
 
 def ensure_collaboration_schema(conn) -> None:
     conn.executescript(COLLABO_SCHEMA_SQL)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(collaboration_images)")}
+    if "public_url" not in columns:
+        conn.execute("ALTER TABLE collaboration_images ADD COLUMN public_url TEXT NOT NULL DEFAULT ''")
 
 
 def decode_json(value: Any, fallback: Any) -> Any:
@@ -224,6 +228,7 @@ def manifest_image_record(item_id: str, image: dict[str, Any], position: int, ti
         "item_id": item_id,
         "position": position,
         "path": path,
+        "public_url": "",
         "thumbnail_path": image_asset_path(image.get("thumbnail_path") or image.get("thumbnail_url")),
         "source_url": source_url,
         "source_page": str(image.get("source_page") or "").strip(),
@@ -401,9 +406,9 @@ def migrate_collaboration_sources(conn, index_path: Path | None = None, manifest
                 continue
             conn.execute(
                 """INSERT OR IGNORE INTO collaboration_images
-                (id, item_id, position, path, thumbnail_path, source_url, source_page, source_title,
+                (id, item_id, position, path, public_url, thumbnail_path, source_url, source_page, source_title,
                  caption, alt, width, height, bytes, sha256, kind, score, context, review_status, created_at, updated_at)
-                VALUES (:id, :item_id, :position, :path, :thumbnail_path, :source_url, :source_page, :source_title,
+                VALUES (:id, :item_id, :position, :path, :public_url, :thumbnail_path, :source_url, :source_page, :source_title,
                         :caption, :alt, :width, :height, :bytes, :sha256, :kind, :score, :context, :review_status,
                         :created_at, :updated_at)""",
                 image,
@@ -546,9 +551,17 @@ def upsert_collaboration_item(conn, payload: dict[str, Any]) -> str:
         asset_path = image_asset_path(raw_image.get("asset_path"))
         path = image_asset_path(raw_url)
         stored_source_url = existing_image["source_url"] if existing_image else ""
-        if not path and asset_path and existing_image and raw_url == stored_source_url:
+        stored_public_url = existing_image["public_url"] if existing_image else ""
+        if not path and asset_path and existing_image and raw_url in {stored_source_url, stored_public_url}:
             path = asset_path
         source_url = str(raw_image.get("source_url") or "").strip()
+        public_url_value = str(
+            raw_image["public_url"] if "public_url" in raw_image else stored_public_url or ""
+        ).strip()
+        if existing_image and stored_public_url and raw_url not in {stored_public_url, stored_source_url}:
+            public_url_value = ""
+        if public_url_value and not valid_external_url(public_url_value):
+            raise ValueError("图片公开地址无效")
         if not path and valid_external_url(raw_url) and raw_url != stored_source_url:
             source_url = raw_url
         elif not source_url and not path and valid_external_url(raw_url):
@@ -577,6 +590,7 @@ def upsert_collaboration_item(conn, payload: dict[str, Any]) -> str:
                 "item_id": item_id,
                 "position": len(prepared),
                 "path": path,
+                "public_url": public_url_value,
                 "thumbnail_path": image_asset_path(raw_image.get("thumbnail_path") or raw_image.get("thumbnail_url")),
                 "source_url": source_url,
                 "source_page": source_page,
@@ -645,13 +659,13 @@ def upsert_collaboration_item(conn, payload: dict[str, Any]) -> str:
     for image in prepared:
         conn.execute(
             """INSERT INTO collaboration_images
-            (id, item_id, position, path, thumbnail_path, source_url, source_page, source_title,
+            (id, item_id, position, path, public_url, thumbnail_path, source_url, source_page, source_title,
              caption, alt, width, height, bytes, sha256, kind, score, context, review_status, created_at, updated_at)
-            VALUES (:id, :item_id, :position, :path, :thumbnail_path, :source_url, :source_page, :source_title,
+            VALUES (:id, :item_id, :position, :path, :public_url, :thumbnail_path, :source_url, :source_page, :source_title,
                     :caption, :alt, :width, :height, :bytes, :sha256, :kind, :score, :context, :review_status,
                     :created_at, :updated_at)
             ON CONFLICT(id) DO UPDATE SET position=excluded.position, path=excluded.path,
-              thumbnail_path=excluded.thumbnail_path, source_url=excluded.source_url, source_page=excluded.source_page,
+              public_url=excluded.public_url, thumbnail_path=excluded.thumbnail_path, source_url=excluded.source_url, source_page=excluded.source_page,
               source_title=excluded.source_title, caption=excluded.caption, alt=excluded.alt, width=excluded.width,
               height=excluded.height, bytes=excluded.bytes, sha256=excluded.sha256, kind=excluded.kind,
               score=excluded.score, context=excluded.context, review_status=excluded.review_status,

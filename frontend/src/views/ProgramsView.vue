@@ -603,9 +603,11 @@ function handleCalendarTouchCancel() {
 function goToToday() {
   const calendarApi = calendarRef.value?.getApi?.();
   if (!calendarApi) return;
-  const targetMonth = monthKey(today);
+  const now = new Date();
+  const targetMonth = monthKey(now);
   if (targetMonth !== visibleMonth.value) animateCalendar(targetMonth > visibleMonth.value ? "next" : "previous");
-  calendarApi.today();
+  updateVisibleMonth(now);
+  calendarApi.gotoDate(now);
 }
 
 function screenshotDateValue(date) {

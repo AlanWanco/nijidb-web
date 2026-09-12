@@ -1,0 +1,125 @@
+// Verifies the language-specific font stacks used by the three archive hero titles.
+// All APIs are mocked; this test does not touch any local or remote database.
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE || "playwright");
+const { spawn } = require("node:child_process");
+const path = require("node:path");
+const assert = require("node:assert/strict");
+
+const root = path.resolve(__dirname, "../..");
+const port = 15180;
+const base = `http://127.0.0.1:${port}`;
+const server = spawn(
+  process.execPath,
+  [
+    "frontend/node_modules/vite/bin/vite.js",
+    "frontend",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    String(port),
+    "--strictPort",
+  ],
+  { cwd: root, stdio: "ignore" },
+);
+
+async function setup(context) {
+  await context.addInitScript(() => {
+    if (!localStorage.getItem("locale")) localStorage.setItem("locale", "zh-CN");
+    localStorage.setItem("theme", "latte");
+  });
+  await context.route("https://**/*", (route) => route.abort());
+  await context.route("**/api/**", async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    const json = (data) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify(data),
+      });
+    if (pathname === "/api/releases") return json({ releases: [], last: null });
+    if (pathname === "/api/auth/session") return json({ authenticated: false });
+    if (pathname === "/api/collaboration-illustrations") return json({ items: {} });
+    if (pathname.startsWith("/api/collabo")) {
+      return json({ items: [], total: 0, pages: 1, page: 1, years: [] });
+    }
+    if (pathname === "/api/news") {
+      return json({
+        items: [],
+        total: 0,
+        pages: 1,
+        page: 1,
+        tag_options: [],
+        tag_catalog: [],
+        source_options: [],
+      });
+    }
+    return json({});
+  });
+}
+
+async function assertHeroFont(page, path, selector, expectedFamily) {
+  await page.goto(base + path);
+  const title = page.locator(selector);
+  await title.waitFor();
+  const details = await title.evaluate(async (element) => {
+    await Promise.all([
+      document.fonts.load('800 60px "Logo SC Unbounded Sans"'),
+      document.fonts.load('800 60px "Dela Gothic One"'),
+    ]);
+    return {
+      family: getComputedStyle(element).fontFamily,
+      lang: document.documentElement.lang,
+      logoLoaded: document.fonts.check('800 60px "Logo SC Unbounded Sans"'),
+      delaLoaded: document.fonts.check('800 60px "Dela Gothic One"'),
+    };
+  });
+  assert.match(details.family, new RegExp(expectedFamily));
+  assert.equal(details.logoLoaded, true);
+  assert.equal(details.delaLoaded, true);
+  return details;
+}
+
+(async () => {
+  let browser;
+  try {
+    for (let i = 0; i < 100; i++) {
+      try {
+        if ((await fetch(base)).ok) break;
+      } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    browser = await chromium.launch({
+      headless: true,
+      executablePath:
+        process.env.CHROME_PATH ||
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    });
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+    });
+    await setup(context);
+    const page = await context.newPage();
+    const heroes = [
+      ["/music", ".music-hero h1"],
+      ["/collabo", ".cb-hero h1"],
+      ["/news", ".news-hero h1"],
+    ];
+
+    for (const [path, selector] of heroes) {
+      const details = await assertHeroFont(page, path, selector, "Logo SC Unbounded Sans");
+      assert.equal(details.lang, "zh-CN");
+    }
+
+    await page.evaluate(() => localStorage.setItem("locale", "ja"));
+    for (const [path, selector] of heroes) {
+      const details = await assertHeroFont(page, path, selector, "Dela Gothic One");
+      assert.equal(details.lang, "ja-JP");
+    }
+    console.log("PASS: Chinese and Japanese hero-title font stacks and bundled font loading.");
+  } finally {
+    await browser?.close();
+    server.kill("SIGTERM");
+  }
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

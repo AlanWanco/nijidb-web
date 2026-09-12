@@ -94,6 +94,7 @@ function blankPeriod() {
     start_date: "",
     end_date: "",
     frequency: "weekly",
+    auto_generate: true,
     week_interval: 1,
     week_direction: "first",
     week_number: 1,
@@ -316,7 +317,7 @@ function programDateRangeLabel(program) {
 function periodScheduleLabel(period) {
   const time = period.schedule_time ? ` ${period.schedule_time}` : "";
   if (period.frequency === "single") return `${t("单次")}${time}`;
-  if (period.frequency === "individual") return `${t("月更 · 逐期设置")}${time}`;
+  if (period.frequency === "individual") return `${period.auto_generate ? t("月更 · 逐期设置") : t("逐期设置")}${time}`;
   const weekday = weekdayNames.value[period.weekday] || "";
   if (period.frequency === "monthly") {
     const direction = period.week_direction || (period.week_index < 0 ? "last" : "first");
@@ -674,11 +675,19 @@ function applyProgram(program) {
     official_url: program.official_url || "",
     description: program.description || "",
     periods: (program.periods && program.periods.length ? program.periods : [legacyPeriod(program)]).map(period => {
+      const frequency = period.frequency === "irregular" ? "single" : period.frequency || "weekly";
+      const hasAutoGenerate = period.auto_generate !== undefined
+        && period.auto_generate !== null
+        && period.auto_generate !== "";
+      const autoGenerate = hasAutoGenerate
+        ? ![false, 0, "0", "false"].includes(period.auto_generate)
+        : !["individual", "single"].includes(frequency);
       const weekIndex = Number(period.week_index) || 1;
       return {
         ...blankPeriod(),
         ...period,
-        frequency: period.frequency === "irregular" ? "single" : period.frequency || "weekly",
+        frequency,
+        auto_generate: autoGenerate,
         week_interval: Number(period.week_interval) || 1,
         week_direction: weekIndex < 0 ? "last" : "first",
         week_number: Math.abs(weekIndex) || 1,
@@ -781,6 +790,13 @@ function setPeriodFrequency(period, value) {
   period.frequency = value;
   if (value === "single") period.end_date = period.start_date;
   else if (previousFrequency === "single") period.end_date = "";
+  const noAutoGenerationByDefault = ["individual", "single"];
+  if (value !== previousFrequency && noAutoGenerationByDefault.includes(value)) period.auto_generate = false;
+  else if (
+    value !== previousFrequency
+    && !noAutoGenerationByDefault.includes(value)
+    && noAutoGenerationByDefault.includes(previousFrequency)
+  ) period.auto_generate = true;
 }
 
 function setPeriodWeekDirection(period, value) {
@@ -912,6 +928,7 @@ function programBody() {
     start_date: period.start_date,
     end_date: period.frequency === "single" ? period.start_date : period.end_date,
     frequency: period.frequency,
+    auto_generate: period.auto_generate !== false,
     week_interval: Number(period.week_interval) || 0,
     week_index: period.frequency === "monthly" ? (period.week_direction === "last" ? -Number(period.week_number) : Number(period.week_number)) : 0,
     weekday: Number(period.weekday),
@@ -1602,15 +1619,23 @@ onUnmounted(() => {
                <span class="program-field-label">{{ t("更新方式") }}</span>
                <div class="choice-tags" role="radiogroup" :aria-label="t('更新方式')">
                  <button type="button" :class="{ selected: period.frequency === 'weekly' }" @click="setPeriodFrequency(period, 'weekly')">{{ t("周更") }}</button>
-                 <button v-if="!['monthly', 'individual'].includes(period.frequency)" type="button" :class="{ selected: period.frequency === 'monthly' }" @click="setPeriodFrequency(period, 'monthly')">{{ t("月更") }}</button>
-                <span v-else class="program-frequency-monthly">
-                   <button type="button" :class="{ selected: period.frequency === 'monthly' }" @click="setPeriodFrequency(period, 'monthly')">{{ t("月更") }}</button>
-                   <button type="button" :class="{ selected: period.frequency === 'individual' }" @click="setPeriodFrequency(period, 'individual')">{{ t("逐期设置") }}</button>
-                </span>
+                 <button type="button" :class="{ selected: period.frequency === 'monthly' }" @click="setPeriodFrequency(period, 'monthly')">{{ t("月更") }}</button>
+                 <button type="button" :class="{ selected: period.frequency === 'individual' }" @click="setPeriodFrequency(period, 'individual')">{{ t("逐期设置") }}</button>
                  <button type="button" :class="{ selected: period.frequency === 'single' }" @click="setPeriodFrequency(period, 'single')">{{ t("单次") }}</button>
               </div>
+              <label class="period-auto-toggle program-field-wide">
+                <input v-model="period.auto_generate" type="checkbox" :disabled="saving || occurrenceSaving">
+                <span>
+                  <strong>{{ t("自动生成后续单集") }}</strong>
+                  <small v-if="period.frequency === 'individual' && period.auto_generate">{{ t("按月生成单集：首期使用时期开始日，后续从每月 1 日作为占位；之后可在单集列表中直接修改每期原定日期和时间。") }}</small>
+                  <small v-else-if="period.frequency === 'individual'">{{ t("关闭后不会按月生成占位单集，可在单集列表中手动添加不定期节目。") }}</small>
+                  <small v-else-if="period.frequency === 'single' && period.auto_generate">{{ t("开启后只生成时期开始日的一期。") }}</small>
+                  <small v-else-if="period.frequency === 'single'">{{ t("已关闭自动生成，只保留已播出的单集和手动添加的单集。") }}</small>
+                  <small v-else-if="period.auto_generate">{{ t("按排期规则生成未来约半年的单集。") }}</small>
+                  <small v-else>{{ t("已关闭自动生成，只保留已播出的单集和手动添加的单集。") }}</small>
+                </span>
+              </label>
                <small v-if="period.frequency === 'single'">{{ t("单次表示一个单独的节目，只需要选择播出日期和时间。") }}</small>
-                <small v-else-if="period.frequency === 'individual'">{{ t("按月生成单集：首期使用时期开始日，后续从每月 1 日作为占位；之后可在单集列表中直接修改每期原定日期和时间。") }}</small>
             </div>
             <div v-if="period.frequency === 'weekly'" class="program-form-field">
                <span class="program-field-label">{{ t("更新间隔") }}</span>

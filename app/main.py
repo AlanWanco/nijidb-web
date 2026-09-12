@@ -426,6 +426,7 @@ def init_db() -> None:
            start_date TEXT NOT NULL,
            end_date TEXT NOT NULL DEFAULT '',
            frequency TEXT NOT NULL DEFAULT 'weekly',
+           auto_generate INTEGER NOT NULL DEFAULT 1,
            week_interval INTEGER NOT NULL DEFAULT 1,
            week_index INTEGER NOT NULL DEFAULT 0,
            weekday INTEGER NOT NULL DEFAULT 0,
@@ -484,6 +485,8 @@ def init_db() -> None:
         conn.execute("UPDATE programs SET subprogram_name = '主节目' WHERE trim(coalesce(subprogram_name, '')) = ''")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_programs_parent ON programs(parent_id, title)")
         period_columns = {row["name"] for row in conn.execute("PRAGMA table_info(program_periods)")}
+        if "auto_generate" not in period_columns:
+            conn.execute("ALTER TABLE program_periods ADD COLUMN auto_generate INTEGER NOT NULL DEFAULT 1")
         if "timezone" not in period_columns:
             conn.execute("ALTER TABLE program_periods ADD COLUMN timezone TEXT NOT NULL DEFAULT 'Asia/Tokyo'")
         occurrence_columns = {row["name"] for row in conn.execute("PRAGMA table_info(program_occurrences)")}
@@ -785,6 +788,7 @@ def occurrence_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
 
 def period_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     payload = dict(row)
+    payload["auto_generate"] = boolean_value(payload.get("auto_generate"), True)
     payload["week_interval"] = int(payload.get("week_interval") or 1)
     payload["week_index"] = int(payload.get("week_index") or 0)
     payload["weekday"] = int(payload.get("weekday") or 0)
@@ -800,6 +804,7 @@ def period_summary(period: dict[str, Any]) -> dict[str, Any]:
             "start_date",
             "end_date",
             "frequency",
+            "auto_generate",
             "week_interval",
             "week_index",
             "weekday",
@@ -829,6 +834,7 @@ def legacy_period(values: dict[str, Any]) -> dict[str, Any]:
         "start_date": start_date,
         "end_date": end_date,
         "frequency": frequency,
+        "auto_generate": boolean_value(values.get("auto_generate"), True),
         "week_interval": int(values.get("week_interval") or 1),
         "week_index": week_index,
         "weekday": int(values.get("weekday") or 0),
@@ -899,6 +905,7 @@ def normalized_period(values: dict[str, Any], program_start: date, program_end: 
         frequency = "single"
     if frequency not in PROGRAM_FREQUENCIES:
         raise ValueError("时期更新方式无效")
+    period_auto_generate = boolean_value(values.get("auto_generate"), frequency not in {"individual", "single"})
     try:
         parsed_start = date.fromisoformat(start_date)
         parsed_end = date.fromisoformat(str(values.get("end_date") or "").strip()) if values.get("end_date") else None
@@ -933,6 +940,7 @@ def normalized_period(values: dict[str, Any], program_start: date, program_end: 
         "start_date": parsed_start.isoformat(),
         "end_date": parsed_end.isoformat() if parsed_end else "",
         "frequency": frequency,
+        "auto_generate": period_auto_generate,
         "week_interval": week_interval,
         "week_index": week_index,
         "weekday": weekday,
@@ -1130,6 +1138,7 @@ def program_json_metadata() -> dict[str, Any]:
             "program.episode_start": "首集编号支持 0 到 9999，默认是 1；第一个非 EX 单集从该编号开始，之后按规则递增。EX 始终不占期。",
             "program.people": "节目固定参与成员、主持人或常驻嘉宾数组。推荐使用以下 14 个虹咲成员日文原名以启用成员筛选和彩色标记：大西亜玖璃、相良茉優、前田佳織里、久保田未夢、村上奈津実、鬼頭明里、楠木ともり、林鼓子、指出毬亜、田中ちえ美、小泉萌香、内田秀、法元明菜、矢野妃菜喜。其他主持人或嘉宾也可直接填写姓名，会被保存和显示，但不会被识别为虹咲成员。",
             "program.periods[].frequency": "weekly、monthly、individual 或 single。",
+            "program.periods[].auto_generate": "是否按本时期的排期规则自动生成后续单集；individual 逐期设置和 single 单次时期默认关闭，开启后分别从每月 1 日或时期开始日生成占位单集。节目级 auto_generate 仍是总开关。",
             "program.periods[].week_interval": "周更间隔；填写 2 表示隔周。",
             "program.periods[].week_index": "固定月更的第几周，1–5 表示顺数，-1–-5 表示倒数。",
             "program.periods[].start_date": "时期开始日期必填；第一段时期的 start_date 就是节目第一期的原定日期。",
@@ -1162,7 +1171,8 @@ def program_json_metadata() -> dict[str, Any]:
             "program.people 用于节目级固定成员、主持人和常驻嘉宾；单期临时嘉宾使用 occurrences[].guests，固定虹咲成员本期缺席使用 occurrences[].absent_members。",
             "schedule_mode 缺省为 individual：导入的 occurrences 是准确的最终逐期数据，program.auto_generate 会被关闭，不会凭 periods 生成额外单集。",
             "需要手动指定导入行为时，可将 schedule_mode 设置为 individual 或 generated；current 由导出文件使用，按每个 program 的 auto_generate 还原当前设置。",
-            "导出 JSON 会根据当前节目设置保留 auto_generate、periods 和当前生效的 occurrences；自动生成节目按系统现有约半年的生成窗口导出。",
+            "导出 JSON 会根据当前节目设置保留 auto_generate、periods（包括每个时期的 auto_generate）和当前生效的 occurrences；自动生成节目按系统现有约半年的生成窗口导出。",
+            "individual 逐期设置和 single 单次时期默认关闭 auto_generate；需要从每月 1 日或时期开始日生成占位单集时，请在该时期单独开启。weekly 和 monthly 时期默认开启。",
             "target_mode 缺省为 new；覆盖导入必须指定 target_program_id，并在网页导入预览中明确选择覆盖目标。",
             "子节目 JSON 导入必须在预览中选择一个已有的主节目；new 会在该主节目下新建子节目，overwrite 会覆盖该主节目下同名或同 ID 的子节目。",
             "JSON 可以保留这些说明字段；导入器也兼容 // 和 /* */ 注释。",
@@ -1194,6 +1204,7 @@ def program_json_template() -> dict[str, Any]:
                 "start_date": "2026-01-01",
                 "end_date": "2026-06-30",
                 "frequency": "weekly",
+                "auto_generate": True,
                 "week_interval": 2,
                 "week_index": 0,
                 "weekday": 2,
@@ -1204,6 +1215,7 @@ def program_json_template() -> dict[str, Any]:
                 "start_date": "2026-07-01",
                 "end_date": "",
                 "frequency": "monthly",
+                "auto_generate": True,
                 "week_interval": 1,
                 "week_index": 1,
                 "weekday": 2,
@@ -1743,9 +1755,9 @@ def seed_program_periods(conn: sqlite3.Connection) -> None:
         if period["frequency"] not in PROGRAM_FREQUENCIES:
             period["frequency"] = "weekly"
         conn.execute("""INSERT INTO program_periods (
-            program_id, start_date, end_date, frequency, week_interval, week_index, weekday, schedule_time, timezone, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
-            row["id"], period["start_date"], period["end_date"], period["frequency"], period["week_interval"],
+            program_id, start_date, end_date, frequency, auto_generate, week_interval, week_index, weekday, schedule_time, timezone, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+            row["id"], period["start_date"], period["end_date"], period["frequency"], period["auto_generate"], period["week_interval"],
             period["week_index"], period["weekday"], period["schedule_time"], period["timezone"], row["created_at"] or now, row["updated_at"] or now,
         ))
 
@@ -1959,6 +1971,8 @@ def program_occurrence_records(program: dict[str, Any], range_start: date, range
     consumed_override_ids: set[int] = set()
     if boolean_value(program.get("auto_generate"), True):
         for period in periods:
+            if not boolean_value(period.get("auto_generate"), True):
+                continue
             period_start = date.fromisoformat(period["start_date"])
             period_end = date.fromisoformat(period["end_date"]) if period.get("end_date") else program_end
             period_generation_end = min(generation_end, period_end) if period_end else generation_end
@@ -2333,13 +2347,14 @@ def backfill_individual_occurrence_anchors(
 def replace_program_periods(conn: sqlite3.Connection, program_id: str, periods: list[dict[str, Any]], timestamp: str) -> None:
     conn.execute("DELETE FROM program_periods WHERE program_id = ?", (program_id,))
     conn.executemany("""INSERT INTO program_periods (
-        program_id, start_date, end_date, frequency, week_interval, week_index, weekday, schedule_time, timezone, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", [
+        program_id, start_date, end_date, frequency, auto_generate, week_interval, week_index, weekday, schedule_time, timezone, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", [
         (
             program_id,
             period["start_date"],
             period["end_date"],
             period["frequency"],
+            period["auto_generate"],
             period["week_interval"],
             period["week_index"],
             period["weekday"],
@@ -2586,8 +2601,8 @@ def program_json_export(
             "title": parent.get("title", root.get("title", "")),
         }
     payload["_export_notes"] = [
-        "这是根据导出时当前节目设置生成的 JSON；auto_generate、periods 和当前生效的 occurrences 均按当前状态导出。",
-        "导入此文件时会按每个 program 的 auto_generate 还原当前设置；开启自动生成的节目仍按 periods 生成，occurrences 作为覆盖或例外。",
+        "这是根据导出时当前节目设置生成的 JSON；auto_generate、periods（包括每个时期的 auto_generate）和当前生效的 occurrences 均按当前状态导出。",
+        "导入此文件时会按每个 program 和 period 的 auto_generate 还原当前设置；开启自动生成的时期仍按自身 periods 规则生成，occurrences 作为覆盖或例外。",
         "开启自动生成的节目按系统现有约半年的生成窗口导出。",
     ]
     return payload

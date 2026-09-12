@@ -147,7 +147,7 @@
   max-width: 680px;
   margin: 0 0 21px;
   color: var(--ink);
-  font-family: var(--display-font);
+  font-family: var(--hero-title-font);
   font-size: clamp(48px, 7.2vw, 92px);
   font-weight: 800;
   letter-spacing: -.08em;

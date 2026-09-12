@@ -18,6 +18,8 @@ const themeOptions = computed(() => [
   { value: "mocha", label: t("夜间"), description: t("深色模式") },
 ]);
 const languageMenuOpen = ref(false);
+const archiveTransition = ref(false);
+let archiveTransitionTimer = 0;
 document.documentElement.dataset.theme = theme.value;
 
 function accentInk(hex) {
@@ -53,6 +55,24 @@ function chooseLanguage(nextLocale) {
   languageMenuOpen.value = false;
 }
 
+function prepareArchiveTransition(targetPath, event) {
+  if (
+    route.path === targetPath ||
+    event.button !== 0 ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.shiftKey ||
+    event.altKey
+  )
+    return;
+  archiveTransition.value = true;
+  window.clearTimeout(archiveTransitionTimer);
+  archiveTransitionTimer = window.setTimeout(() => {
+    archiveTransition.value = false;
+    archiveTransitionTimer = 0;
+  }, 500);
+}
+
 function handleSchemeChange(event) {
   systemDark.value = event.matches;
 }
@@ -69,6 +89,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   colorScheme.removeEventListener("change", handleSchemeChange);
+  window.clearTimeout(archiveTransitionTimer);
 });
 </script>
 
@@ -81,10 +102,10 @@ onBeforeUnmount(() => {
           <span class="brand-copy"><strong>NIJIGASAKI DB</strong><small>NIJIGASAKI DATA ARCHIVE</small></span>
         </RouterLink>
         <nav class="section-nav" :aria-label="t('内容分类')">
-          <RouterLink class="music-link" to="/music">{{ t("音乐档案") }}</RouterLink>
-          <RouterLink class="program-link" to="/programs">{{ t("节目档案") }}</RouterLink>
-          <RouterLink class="illustration-link" to="/collabo">{{ t("联动立绘") }}</RouterLink>
-          <RouterLink class="news-link" to="/news">{{ t("官网新闻") }}</RouterLink>
+          <RouterLink class="music-link" to="/music" @click="prepareArchiveTransition('/music', $event)">{{ t("音乐档案") }}</RouterLink>
+          <RouterLink class="program-link" to="/programs" @click="prepareArchiveTransition('/programs', $event)">{{ t("节目档案") }}</RouterLink>
+          <RouterLink class="illustration-link" to="/collabo" @click="prepareArchiveTransition('/collabo', $event)">{{ t("联动立绘") }}</RouterLink>
+          <RouterLink class="news-link" to="/news" @click="prepareArchiveTransition('/news', $event)">{{ t("官网新闻") }}</RouterLink>
         </nav>
       </div>
       <nav class="site-nav">
@@ -113,7 +134,12 @@ onBeforeUnmount(() => {
         <PalettePicker :flavor="flavor" :selected="palette" @select="setPalette" />
       </nav>
     </header>
-    <RouterView />
+    <RouterView v-slot="{ Component, route: viewRoute }">
+      <Transition v-if="archiveTransition && viewRoute.meta.pageTransition" name="route-content" mode="out-in" appear>
+        <component :is="Component" />
+      </Transition>
+      <component v-else :is="Component" />
+    </RouterView>
     <footer>
        <span v-if="route.path === '/music'" class="footer-source"><strong class="footer-title">{{ t("数据源：") }}</strong><a href="https://www.lovelive-anime.jp/nijigasaki/cd.php" target="_blank" rel="noopener noreferrer">lovelive-anime.jp</a></span>
        <span v-if="route.path.startsWith('/news')" class="footer-source"><strong class="footer-title">{{ t("数据源：") }}</strong><a href="https://www.lovelive-anime.jp/nijigasaki/topics.php" target="_blank" rel="noopener noreferrer">lovelive-anime.jp/topics.php</a></span>

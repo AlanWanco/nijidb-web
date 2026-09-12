@@ -10,11 +10,23 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: "/", component: () => import("./views/ArchiveLandingView.vue"), meta: { title: "选择档案" } },
-    { path: "/music", component: () => import("./views/HomeView.vue"), meta: { title: "虹咲音乐档案" } },
-    { path: "/news", component: () => import("./views/NewsView.vue"), meta: { title: "官网新闻" } },
+    {
+      path: "/music",
+      component: () => import("./views/HomeView.vue"),
+      meta: { title: "虹咲音乐档案", pageTransition: true },
+    },
+    {
+      path: "/news",
+      component: () => import("./views/NewsView.vue"),
+      meta: { title: "官网新闻", pageTransition: true },
+    },
     { path: "/news/:newsId", component: () => import("./views/NewsDetailView.vue"), meta: { title: "新闻详情" } },
     { path: "/release/:releaseId", component: () => import("./views/ReleaseView.vue"), meta: { title: "发行详情" } },
-    { path: "/programs", component: () => import("./views/ProgramsView.vue"), meta: { title: "节目档案" } },
+    {
+      path: "/programs",
+      component: () => import("./views/ProgramsView.vue"),
+      meta: { title: "节目档案", pageTransition: true },
+    },
     {
       path: "/programs/:month(\\d{6})",
       component: () => import("./views/ProgramsView.vue"),
@@ -35,7 +47,11 @@ const router = createRouter({
       component: () => import("./views/CollaborationIllustrationsView.vue"),
       meta: { title: "联动立绘" },
     },
-    { path: "/collabo", component: () => import("./views/CollaboView.vue"), meta: { title: "联动立绘" } },
+    {
+      path: "/collabo",
+      component: () => import("./views/CollaboView.vue"),
+      meta: { title: "联动立绘", pageTransition: true },
+    },
     {
       path: "/collabo/:slug(\\d{8}-[a-f0-9]{6})",
       component: () => import("./views/CollaboDetailView.vue"),

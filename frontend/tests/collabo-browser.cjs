@@ -18,7 +18,21 @@ const sample = rawItems.find((i) => images(i.id).length > 1);
 const slug = (i) => `${i.first_seen.replaceAll("-", "")}-${i.id.slice(0, 6)}`;
 let dbMode = false;
 let saves = 0;
-const dbItem = { ...sample, slug: slug(sample), images: images(sample.id), review_status: "pending" };
+const dbItem = {
+  ...sample,
+  slug: slug(sample),
+  images: images(sample.id),
+  tags: ["ayumu"],
+  periods: [
+    {
+      start_date: "2026-01-01",
+      end_date: "2026-01-31",
+      title: "第一期",
+      description: "活动说明",
+    },
+  ],
+  review_status: "pending",
+};
 const browserErrors = [];
 async function configure(context) {
   await context.addInitScript(() => {
@@ -101,6 +115,7 @@ async function swipe(page, selector, dx, dy = 2) {
     page.on("pageerror", (e) => browserErrors.push(e.message));
     await page.goto("http://127.0.0.1:15173/collabo");
     await page.waitForSelector(".cb-card");
+    assert.equal(await page.title(), "联动立绘 · Nijigasaki DB");
     assert.equal(await page.locator(".cb-hero .cb-search").count(), 1);
     assert.equal(await page.locator(".cb-toolbar .cb-search").count(), 0);
     assert.equal(await page.locator(".cb-card").count(), 24);
@@ -130,6 +145,12 @@ async function swipe(page, selector, dx, dy = 2) {
     await page.getByRole("button", { name: /全部年份/ }).click();
     await page.waitForURL((url) => !url.searchParams.has("year"));
     assert.equal(await page.locator(".cb-year-chip.selected").count(), 1);
+    await page.getByRole("button", { name: "上原步梦", exact: true }).click();
+    await page.waitForURL(/tags=ayumu/);
+    assert.equal(await page.locator(".cb-character-chip.selected").count(), 1);
+    await page.locator(".cb-character-filter").getByRole("button", { name: /全员/ }).click();
+    await page.waitForURL((url) => !url.searchParams.has("tags"));
+    assert.equal(await page.locator(".cb-character-chip.selected").count(), 1);
     await page.screenshot({ path: "/tmp/nijidb-collabo-desktop.png", fullPage: false });
     await page.getByRole("button", { name: "夜间", exact: true }).click();
     await page.screenshot({ path: "/tmp/nijidb-collabo-dark.png", fullPage: false });
@@ -146,6 +167,7 @@ async function swipe(page, selector, dx, dy = 2) {
     assert.ok(Math.abs((await page.evaluate(() => window.scrollY)) - listScroll) < 100, "restore list scroll");
     await page.goto(`http://127.0.0.1:15173/collabo/${slug(sample)}`);
     await page.waitForSelector(".cb-detail-layout");
+    assert.equal(await page.title(), `${sample.title} · Nijigasaki DB`);
     await page.waitForFunction(() => document.querySelector(".cb-gallery-stage img")?.naturalWidth > 0);
     assert.equal((await page.locator(".cb-related a").count()) >= sample.official_links.length, true);
     await page.screenshot({ path: "/tmp/nijidb-collabo-detail.png", fullPage: false });
@@ -162,6 +184,18 @@ async function swipe(page, selector, dx, dy = 2) {
     assert.equal(await page.evaluate(() => document.body.style.overflow), "");
     await page.goto(`http://127.0.0.1:15173/admin/collabo/${sample.id}`);
     await page.waitForSelector(".cb-editor");
+    assert.equal(await page.locator(".cb-editor-assets .cb-upload-actions").count(), 1);
+    assert.equal(
+      await page.getByText("全部审核完成后，再批量生成 R2 缩略图。此页面不会提前生成或覆盖原图。", { exact: true }).count(),
+      0,
+    );
+    assert.equal(
+      await page.locator(".cb-editor-assets .cb-image-editor").first().evaluate((image) => {
+        const actions = image.closest(".cb-edit-section").querySelector(".cb-upload-actions");
+        return Boolean(image.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING);
+      }),
+      true,
+    );
     assert.equal(await page.getByRole("button", { name: "保存到数据库", exact: true }).isDisabled(), true);
     await page.getByLabel("标题", { exact: true }).fill("edited local draft");
     const downloadPromise = page.waitForEvent("download");
@@ -169,16 +203,29 @@ async function swipe(page, selector, dx, dy = 2) {
     const download = await downloadPromise;
     const payload = JSON.parse(fs.readFileSync(await download.path(), "utf8"));
     assert.equal(payload.item.title, "edited local draft");
-    page.on("dialog", (d) => d.accept());
+    let leaveDialogs = 0;
+    page.on("dialog", (d) => {
+      leaveDialogs++;
+      d.accept();
+    });
     dbMode = true;
     await page.reload();
     await page.waitForSelector(".cb-editor");
+    leaveDialogs = 0;
     assert.equal(await page.getByRole("button", { name: "保存到数据库", exact: true }).isEnabled(), true);
     await page.getByLabel("标题", { exact: true }).fill("Database save test");
+    assert.equal(await page.getByRole("button", { name: "上原步梦", exact: true }).count(), 1);
+    assert.equal(await page.getByText("时间段 1", { exact: true }).count(), 1);
+    await page.getByRole("radio", { name: "已审核", exact: true }).click();
+    assert.equal(await page.locator(".cb-image-controls select").count(), 0);
     await page.getByRole("button", { name: "保存到数据库", exact: true }).click();
     await page.getByRole("status").filter({ hasText: "保存成功" }).waitFor();
     assert.equal(saves, 1);
+    await page.getByRole("link", { name: "管理联动", exact: false }).first().click();
+    await page.waitForSelector(".cb-review-list");
+    assert.equal(leaveDialogs, 0);
     const deleted = rawItems.find((item) => item.id !== sample.id);
+
     await page.goto(`http://127.0.0.1:15173/collabo/${slug(deleted)}`);
     await page.getByRole("alert").filter({ hasText: "未找到联动" }).waitFor();
     assert.equal(await page.locator(".cb-detail-layout").count(), 0);

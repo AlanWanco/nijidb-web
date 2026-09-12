@@ -196,6 +196,12 @@ async function swipe(page, dx) {
       ["音乐档案", "节目档案", "联动立绘", "官网新闻"],
     );
     assert.ok(await page.getByRole("button", { name: "#周边 1" }).isVisible());
+    await page.evaluate(() => window.scrollTo(0, Math.min(700, document.documentElement.scrollHeight - innerHeight)));
+    const tagScroll = await page.evaluate(() => window.scrollY);
+    await page.getByRole("button", { name: "#周边 1" }).click();
+    await page.waitForURL(/tags=goods/);
+    await page.waitForTimeout(150);
+    assert.ok(Math.abs((await page.evaluate(() => window.scrollY)) - tagScroll) < 2, "preserve tag filter scroll");
     assert.equal(await page.getByRole("button", { name: "清除筛选", exact: true }).count(), 1);
     await page.getByRole("button", { name: "编辑", exact: true }).click();
     await page.getByText("管理新闻标签").waitFor();

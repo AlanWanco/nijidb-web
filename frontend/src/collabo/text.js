@@ -11,8 +11,24 @@ const labels = {
   编辑联动: ["Edit collaboration", "コラボを編集"],
   新增联动: ["New collaboration", "コラボを追加"],
   管理联动: ["Manage collaborations", "コラボを管理"],
-  "标题、合作方或关键词": ["Title, partner, or keyword", "タイトル・コラボ先・キーワード"],
+  "标题、合作方、备注或关键词": ["Title, partner, notes, or keyword", "タイトル・コラボ先・備考・キーワード"],
   全部年份: ["All years", "すべての年"],
+  角色: ["Characters", "キャラクター"],
+  全员: ["All characters", "全員"],
+  角色标签: ["Character tags", "キャラクタータグ"],
+  联动时间段: ["Collaboration periods", "コラボ期間"],
+  "每个时间段都需要开始、结束日期，以及标题或描述；可以添加多个时间段。": [
+    "Each period needs start/end dates and a title or description; multiple periods are supported.",
+    "各期間には開始日・終了日とタイトルまたは説明が必要です。複数追加できます。",
+  ],
+  "时间段 {count}": ["Period {count}", "期間 {count}"],
+  移除时间段: ["Remove period", "期間を削除"],
+  添加时间段: ["Add period", "期間を追加"],
+  开始日期: ["Start date", "開始日"],
+  结束日期: ["End date", "終了日"],
+  时间段标题: ["Period title", "期間タイトル"],
+  时间段描述: ["Period description", "期間の説明"],
+  清空: ["Clear", "クリア"],
   搜索: ["Search", "検索"],
   重试: ["Retry", "再試行"],
   上一页: ["Previous page", "前のページ"],
@@ -21,9 +37,9 @@ const labels = {
   "{count} 次联动": ["{count} collaborations", "{count} 件のコラボ"],
   "{count} 张图片": ["{count} images", "画像 {count} 枚"],
   立绘整理中: ["Illustrations being curated", "イラストを整理中"],
-  "本地采集预览 · 图片尚待人工审核": [
-    "Local collection preview · Images await review",
-    "ローカル収集プレビュー・画像は確認待ちです",
+  "本地采集预览 · 图片已直接展示": [
+    "Local collection preview · Images are shown directly",
+    "ローカル収集プレビュー・画像はそのまま表示しています",
   ],
   "当前为前端预览，数据库接口尚未接入。可编辑并导出草稿，不会写入数据库。": [
     "Frontend preview: database API is not connected. Edit and export a draft; no database writes.",
@@ -65,7 +81,6 @@ const labels = {
   移除: ["Remove", "削除"],
   待审核: ["Pending review", "確認待ち"],
   已审核: ["Reviewed", "確認済み"],
-  排除: ["Exclude", "除外"],
   审核状态: ["Review status", "確認状態"],
   设为封面: ["Set cover", "表紙に設定"],
   当前封面: ["Cover image", "現在の表紙"],
@@ -83,13 +98,9 @@ const labels = {
     "Enter a title, valid date, and complete link titles and URLs.",
     "タイトル・正しい日付・リンクのタイトルとURLを入力してください。",
   ],
-  "图片仍有待审核项，或封面尚未通过审核。": [
-    "Images are still pending or the cover is not approved.",
-    "未確認の画像があるか、表紙が未承認です。",
-  ],
-  "全部审核完成后，再批量生成 R2 缩略图。此页面不会提前生成或覆盖原图。": [
-    "Generate R2 thumbnails only after the entire collection is reviewed. Originals are never overwritten here.",
-    "全件確認後にR2サムネイルを一括生成します。この画面では原画像を変更しません。",
+  "请完整填写每个时间段的开始、结束日期，以及标题或描述。": [
+    "Complete each period with start/end dates and a title or description.",
+    "各期間の開始日・終了日とタイトルまたは説明を入力してください。",
   ],
   "正在上传……": ["Uploading…", "アップロード中…"],
 };

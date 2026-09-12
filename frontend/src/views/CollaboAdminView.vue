@@ -3,6 +3,11 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { onBeforeRouteLeave, onBeforeRouteUpdate, RouterLink, useRoute, useRouter } from "vue-router";
 import CollaboImage from "../components/CollaboImage.vue";
 import { getCollaboration, listCollaborations, saveCollaboration, uploadCollaborationImages } from "../collabo/api";
+import {
+  COLLABO_CHARACTER_TAG_IDS,
+  COLLABO_CHARACTER_TAGS,
+  characterLabel,
+} from "../collabo/characters.js";
 import { coverUrl, dateLabel, normalizeImage, PAGE_SIZE, safeUrl } from "../collabo/model";
 import { c } from "../collabo/text";
 import { localeTag } from "../i18n";
@@ -26,6 +31,9 @@ const editing = computed(() => Boolean(route.params.id));
 const writable = computed(() => data.value?.mode === "database");
 const dirty = computed(() => form.value && JSON.stringify(form.value) !== baseline.value);
 const pages = computed(() => Math.max(1, Math.ceil((data.value?.total || 0) / PAGE_SIZE)));
+const allCharacterTagsSelected = computed(
+  () => form.value?.tags?.length === COLLABO_CHARACTER_TAG_IDS.length,
+);
 const partnersText = computed({
   get: () => form.value?.partners.join("\n") || "",
   set: (value) => {
@@ -40,6 +48,8 @@ function emptyForm() {
     date: "",
     date_kind: "announced",
     partners: [],
+    tags: [],
+    periods: [],
     credit: "",
     note: "",
     links: [],
@@ -123,8 +133,48 @@ function removeImage(index) {
   const [image] = form.value.images.splice(index, 1);
   if (form.value.cover_image_id === image.id) form.value.cover_image_id = "";
 }
+function toggleCharacterTag(id) {
+  const selected = new Set(form.value.tags);
+  if (selected.has(id)) selected.delete(id);
+  else selected.add(id);
+  form.value.tags = COLLABO_CHARACTER_TAG_IDS.filter((tagId) => selected.has(tagId));
+}
+function selectAllCharacterTags() {
+  form.value.tags = [...COLLABO_CHARACTER_TAG_IDS];
+}
+function clearCharacterTags() {
+  form.value.tags = [];
+}
+function addPeriod() {
+  form.value.periods.push({ start_date: "", end_date: "", title: "", description: "" });
+}
+function removePeriod(index) {
+  form.value.periods.splice(index, 1);
+}
+function validDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T12:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
 function validForm() {
   const value = form.value;
+  const periods = value.periods.filter((period) =>
+    [period.start_date, period.end_date, period.title, period.description].some((entry) => String(entry || "").trim()),
+  );
+  const invalidPeriod = periods.some((period) => {
+    const start = String(period.start_date || "");
+    const end = String(period.end_date || "");
+    const startDate = new Date(`${start}T12:00:00Z`);
+    const endDate = new Date(`${end}T12:00:00Z`);
+    return (
+      !validDate(start) ||
+      !validDate(end) ||
+      Number.isNaN(startDate.getTime()) ||
+      Number.isNaN(endDate.getTime()) ||
+      startDate > endDate ||
+      (!String(period.title || "").trim() && !String(period.description || "").trim())
+    );
+  });
   const parsed = new Date(`${value.date}T12:00:00Z`);
   if (
     !value.title.trim() ||
@@ -132,17 +182,10 @@ function validForm() {
     Number.isNaN(parsed.getTime()) ||
     parsed.toISOString().slice(0, 10) !== value.date ||
     value.links.some((link) => !link.title.trim() || !safeUrl(link.url)) ||
-    value.images.some((image) => !safeUrl(image.url, true) || (image.source_page && !safeUrl(image.source_page)))
+    value.images.some((image) => !safeUrl(image.url, true) || (image.source_page && !safeUrl(image.source_page))) ||
+    invalidPeriod
   ) {
-    error.value = c("请填写标题和有效日期，并补齐链接标题及网址。");
-    return false;
-  }
-  if (
-    value.review_status === "approved" &&
-    (value.images.some((image) => image.review_status === "pending") ||
-      !value.images.some((image) => image.id === value.cover_image_id && image.review_status === "approved"))
-  ) {
-    error.value = c("图片仍有待审核项，或封面尚未通过审核。");
+    error.value = invalidPeriod ? c("请完整填写每个时间段的开始、结束日期，以及标题或描述。") : c("请填写标题和有效日期，并补齐链接标题及网址。");
     return false;
   }
   return true;
@@ -231,8 +274,8 @@ async function upload(event) {
         <input
           v-model="keyword"
           type="search"
-          :aria-label="c('标题、合作方或关键词')"
-          :placeholder="c('标题、合作方或关键词')"
+          :aria-label="c('标题、合作方、备注或关键词')"
+          :placeholder="c('标题、合作方、备注或关键词')"
         /><button>{{ c("搜索") }}</button><span>{{ c("{count} 次联动", { count: data?.total || 0 }) }}</span>
       </form>
       <div class="cb-review-list">
@@ -240,7 +283,10 @@ async function upload(event) {
           ><CollaboImage :src="coverUrl(item)" alt="" /><span
             ><strong>{{ item.title }}</strong
             ><small>{{ dateLabel(item.date, localeTag()) }} · {{ item.image_count }} IMG</small></span
-          ><em>{{ c(item.review_status === "approved" ? "已审核" : "待审核") }}</em
+          ><em
+            class="cb-review-status"
+            :class="{ 'is-approved': item.review_status === 'approved' }"
+            >{{ c(item.review_status === "approved" ? "已审核" : "待审核") }}</em
           ><b>↗</b></RouterLink
         >
       </div>
@@ -269,16 +315,77 @@ async function upload(event) {
           <label>{{ c("合作方（每行一项）") }}<textarea v-model="partnersText" rows="3"></textarea></label>
           <label>{{ c("版权标注") }}<input v-model="form.credit" /></label>
           <label>{{ c("备注") }}<textarea v-model="form.note" rows="5"></textarea></label>
-          <label
-            >{{ c("审核状态")
-            }}<select v-model="form.review_status">
-              <option value="pending">{{ c("待审核") }}</option>
-              <option value="approved">{{ c("已审核") }}</option>
-            </select></label
-          >
+          <div class="cb-status-field">
+            <span class="cb-field-label">{{ c("审核状态") }}</span>
+            <div class="cb-status-pills" role="radiogroup" :aria-label="c('审核状态')">
+              <button
+                type="button"
+                role="radio"
+                class="cb-status-pill"
+                :class="{ selected: form.review_status === 'pending' }"
+                :aria-checked="form.review_status === 'pending'"
+                @click="form.review_status = 'pending'"
+              >
+                {{ c("待审核") }}
+              </button>
+              <button
+                type="button"
+                role="radio"
+                class="cb-status-pill"
+                :class="{ selected: form.review_status === 'approved' }"
+                :aria-checked="form.review_status === 'approved'"
+                @click="form.review_status = 'approved'"
+              >
+                {{ c("已审核") }}
+              </button>
+            </div>
+          </div>
+          <div class="cb-status-field">
+            <span class="cb-field-label">{{ c("角色标签") }}</span>
+            <div class="cb-character-picker" role="group" :aria-label="c('角色标签')">
+              <button
+                type="button"
+                class="cb-character-pill cb-character-pill-all"
+                :class="{ selected: allCharacterTagsSelected }"
+                :aria-pressed="allCharacterTagsSelected"
+                @click="selectAllCharacterTags"
+              >
+                <b>ALL</b>{{ c("全员") }}
+              </button>
+              <button
+                v-for="tag in COLLABO_CHARACTER_TAGS"
+                :key="tag.id"
+                type="button"
+                class="cb-character-pill"
+                :class="{ selected: form.tags.includes(tag.id) }"
+                :aria-pressed="form.tags.includes(tag.id)"
+                @click="toggleCharacterTag(tag.id)"
+              >
+                <i class="cb-character-dot" :style="{ backgroundColor: tag.color }"></i>{{ characterLabel(tag.id, localeTag()) }}
+              </button>
+              <button type="button" class="cb-character-clear cb-quiet" @click="clearCharacterTags">{{ c("清空") }}</button>
+            </div>
+          </div>
         </div>
         <div class="cb-edit-section">
-          <h2>02 / {{ c("相关页面") }}</h2>
+          <h2>02 / {{ c("联动时间段") }} <small>{{ form.periods.length }}</small></h2>
+          <p class="cb-muted">{{ c("每个时间段都需要开始、结束日期，以及标题或描述；可以添加多个时间段。") }}</p>
+          <article v-for="(period, index) in form.periods" :key="index" class="cb-period-editor">
+            <div class="cb-period-editor-heading">
+              <strong>{{ c("时间段 {count}", { count: index + 1 }) }}</strong>
+              <button type="button" class="cb-quiet" @click="removePeriod(index)">{{ c("移除时间段") }}</button>
+            </div>
+            <div class="cb-field-pair">
+              <label>{{ c("开始日期") }}<input v-model="period.start_date" type="date" /></label>
+              <label>{{ c("结束日期") }}<input v-model="period.end_date" type="date" /></label>
+            </div>
+            <label>{{ c("时间段标题") }}<input v-model="period.title" maxlength="200" /></label>
+            <label>{{ c("时间段描述") }}<textarea v-model="period.description" rows="3" maxlength="2000"></textarea></label>
+          </article>
+          <button type="button" class="cb-quiet" @click="addPeriod">＋ {{ c("添加时间段") }}</button>
+        </div>
+        <div class="cb-edit-section">
+          <h2>03 / {{ c("相关页面") }}</h2>
           <div v-for="(link, index) in form.links" :key="index" class="cb-link-editor">
             <label>{{ c("链接标题") }}<input v-model="link.title" required /></label
             ><label>URL<input v-model="link.url" type="url" required /></label
@@ -292,26 +399,13 @@ async function upload(event) {
       <fieldset class="cb-editor-assets" :disabled="saving || uploading">
         <div class="cb-edit-section">
           <h2>
-            03 / {{ c("图片画廊") }} <small>{{ form.images.length }}</small>
+            04 / {{ c("图片画廊") }} <small>{{ form.images.length }}</small>
           </h2>
-          <p class="cb-muted">{{ c("全部审核完成后，再批量生成 R2 缩略图。此页面不会提前生成或覆盖原图。") }}</p>
-          <div class="cb-upload-actions">
-            <button type="button" class="cb-quiet" @click="addImage">＋ {{ c("添加图片 URL") }}</button
-            ><button type="button" :disabled="!writable" @click="fileInput.click()">↑ {{ c("上传图片") }}</button
-            ><input
-              ref="fileInput"
-              hidden
-              type="file"
-              accept="image/jpeg,image/png,image/webp"
-              multiple
-              @change="upload"
-            />
-          </div>
           <article
             v-for="(image, index) in form.images"
             :key="image.id"
             class="cb-image-editor"
-            :class="{ 'is-cover': form.cover_image_id === image.id, 'is-rejected': image.review_status === 'rejected' }"
+            :class="{ 'is-cover': form.cover_image_id === image.id }"
           >
             <div class="cb-review-image">
               <CollaboImage :src="safeUrl(image.url, true)" :alt="image.alt || form.title" /><span>{{
@@ -324,14 +418,9 @@ async function upload(event) {
               ><label>{{ c("图片来源") }}<input v-model="image.source_page" type="url" /></label
               ><label>{{ c("链接标题") }}<input v-model="image.source_title" /></label>
               <div class="cb-image-controls">
-                <select v-model="image.review_status" :aria-label="c('审核状态')">
-                  <option value="pending">{{ c("待审核") }}</option>
-                  <option value="approved">{{ c("已审核") }}</option>
-                  <option value="rejected">{{ c("排除") }}</option></select
-                ><button
+                <button
                   type="button"
                   class="cb-quiet"
-                  :disabled="image.review_status === 'rejected'"
                   @click="form.cover_image_id = image.id"
                 >
                   {{ c(form.cover_image_id === image.id ? "当前封面" : "设为封面") }}</button
@@ -355,6 +444,18 @@ async function upload(event) {
               </div>
             </div>
           </article>
+          <div class="cb-upload-actions">
+            <button type="button" class="cb-quiet" @click="addImage">＋ {{ c("添加图片 URL") }}</button
+            ><button type="button" :disabled="!writable" @click="fileInput.click()">↑ {{ c("上传图片") }}</button
+            ><input
+              ref="fileInput"
+              hidden
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              multiple
+              @change="upload"
+            />
+          </div>
         </div>
       </fieldset>
       <div class="cb-editor-actions">

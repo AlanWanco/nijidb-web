@@ -12,8 +12,30 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 COLLABO_REVIEW_STATUSES = {"pending", "approved"}
-COLLABO_IMAGE_REVIEW_STATUSES = {"pending", "approved", "rejected"}
 COLLABO_COLLECTION_STATUSES = {"complete", "partial", "unavailable"}
+COLLABO_CHARACTER_TAGS = (
+    ("ayumu", ("上原歩夢", "上原步梦", "歩夢", "步梦", "Ayumu Uehara")),
+    ("kasumi", ("中須かすみ", "中须霞", "かすみ", "霞", "Kasumi Nakasu")),
+    ("shizuku", ("桜坂しずく", "樱坂雫", "しずく", "雫", "Shizuku Osaka")),
+    ("karin", ("朝香果林", "果林", "Karin Asaka")),
+    ("ai", ("宮下愛", "宫下爱", "愛", "爱", "Ai Miyashita")),
+    ("kanata", ("近江彼方", "彼方", "Kanata Konoe")),
+    ("setsuna", ("優木せつ菜", "优木雪菜", "中川菜々", "中川菜菜", "せつ菜", "雪菜", "Setsuna Yuki")),
+    ("emma", ("エマ・ヴェルデ", "艾玛", "エマ", "Emma Verde")),
+    ("rina", ("天王寺璃奈", "璃奈", "Rina Tennoji")),
+    ("shioriko", ("三船栞子", "栞子", "Shioriko Mifune")),
+    ("mia", ("ミア・テイラー", "米娅", "ミア", "Mia Taylor")),
+    ("lanzhu", ("鐘嵐珠", "钟岚珠", "ランジュ", "嵐珠", "岚珠", "Lanzhu Zhong")),
+    ("yu", ("高咲侑", "侑", "Yuu Takasaki", "Yuu")),
+)
+COLLABO_CHARACTER_TAG_IDS = tuple(tag_id for tag_id, _ in COLLABO_CHARACTER_TAGS)
+COLLABO_CHARACTER_TAG_ALIASES = {
+    alias.casefold(): tag_id
+    for tag_id, aliases in COLLABO_CHARACTER_TAGS
+    for alias in (tag_id, *aliases)
+}
+# collaboration_images.review_status remains in the schema for old databases only;
+# image-level review is no longer part of the API or publishing workflow.
 COLLABO_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS collaboration_items (
   id TEXT PRIMARY KEY,
@@ -25,6 +47,8 @@ CREATE TABLE IF NOT EXISTS collaboration_items (
   credit TEXT NOT NULL DEFAULT '',
   note TEXT NOT NULL DEFAULT '',
   links_json TEXT NOT NULL DEFAULT '[]',
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  periods_json TEXT NOT NULL DEFAULT '[]',
   collection_status TEXT NOT NULL DEFAULT 'unavailable',
   review_status TEXT NOT NULL DEFAULT 'pending',
   cover_image_id TEXT NOT NULL DEFAULT '',
@@ -74,8 +98,15 @@ def now_iso() -> str:
 
 def ensure_collaboration_schema(conn) -> None:
     conn.executescript(COLLABO_SCHEMA_SQL)
-    columns = {row["name"] for row in conn.execute("PRAGMA table_info(collaboration_images)")}
-    if "public_url" not in columns:
+    item_columns = {row["name"] for row in conn.execute("PRAGMA table_info(collaboration_items)")}
+    for column, definition in (
+        ("tags_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("periods_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ):
+        if column not in item_columns:
+            conn.execute(f"ALTER TABLE collaboration_items ADD COLUMN {column} {definition}")
+    image_columns = {row["name"] for row in conn.execute("PRAGMA table_info(collaboration_images)")}
+    if "public_url" not in image_columns:
         conn.execute("ALTER TABLE collaboration_images ADD COLUMN public_url TEXT NOT NULL DEFAULT ''")
 
 
@@ -106,6 +137,76 @@ def text_list(value: Any) -> list[str]:
         if text and text not in result:
             result.append(text)
     return result
+
+
+def collaboration_tags(value: Any) -> list[str]:
+    parsed = decode_json(value, value)
+    if isinstance(parsed, str):
+        parsed = re.split(r"[,，、\n]+", parsed)
+    if not isinstance(parsed, (list, tuple, set)):
+        return []
+    values = [part for entry in parsed for part in re.split(r"[,，、\n]+", str(entry or ""))]
+    selected: set[str] = set()
+    for entry in values:
+        token = str(entry or "").strip()
+        if not token:
+            continue
+        if token.casefold() in {"all", "全部", "全员"}:
+            selected.update(COLLABO_CHARACTER_TAG_IDS)
+            continue
+        tag_id = COLLABO_CHARACTER_TAG_ALIASES.get(token.casefold())
+        if tag_id:
+            selected.add(tag_id)
+    return [tag_id for tag_id in COLLABO_CHARACTER_TAG_IDS if tag_id in selected]
+
+
+def collaboration_tag_search_text(value: Any) -> str:
+    selected = set(collaboration_tags(value))
+    parts: list[str] = []
+    for tag_id, aliases in COLLABO_CHARACTER_TAGS:
+        if tag_id in selected:
+            parts.extend((tag_id, *aliases))
+    return " ".join(parts)
+
+
+def normalize_collaboration_periods(value: Any) -> list[dict[str, str]]:
+    parsed = decode_json(value, value)
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    if not isinstance(parsed, (list, tuple)):
+        return []
+    periods: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for entry in parsed:
+        if not isinstance(entry, dict):
+            continue
+        start_raw = str(entry.get("start_date") or entry.get("start") or "").strip()
+        end_raw = str(entry.get("end_date") or entry.get("end") or "").strip()
+        title = str(entry.get("title") or entry.get("label") or "").strip()
+        description = str(entry.get("description") or entry.get("note") or "").strip()
+        if not any((start_raw, end_raw, title, description)):
+            continue
+        if len(title) > 200 or len(description) > 2000:
+            raise ValueError("时间段标题或描述过长")
+        start = normalize_date(start_raw) if start_raw else ""
+        end = normalize_date(end_raw) if end_raw else ""
+        if start_raw and not start:
+            raise ValueError("时间段开始日期格式无效")
+        if end_raw and not end:
+            raise ValueError("时间段结束日期格式无效")
+        if not start or not end:
+            raise ValueError("时间段需要填写开始和结束日期")
+        if start > end:
+            raise ValueError("时间段结束日期不能早于开始日期")
+        if not title and not description:
+            raise ValueError("时间段需要填写标题或描述")
+        key = (start, end, title, description)
+        if key not in seen:
+            seen.add(key)
+            periods.append({"start_date": start, "end_date": end, "title": title, "description": description})
+    if len(periods) > 50:
+        raise ValueError("最多只能添加 50 个时间段")
+    return periods
 
 
 def normalize_links(value: Any) -> list[dict[str, str]]:
@@ -220,9 +321,6 @@ def manifest_image_record(item_id: str, image: dict[str, Any], position: int, ti
     source_url = source_url_from_image(image, path)
     if not path and not source_url:
         return None
-    image_review_status = str(image.get("review_status") or "").strip()
-    if image_review_status not in COLLABO_IMAGE_REVIEW_STATUSES:
-        image_review_status = "pending"
     return {
         "id": image_id(item_id, path, source_url),
         "item_id": item_id,
@@ -242,7 +340,8 @@ def manifest_image_record(item_id: str, image: dict[str, Any], position: int, ti
         "kind": str(image.get("kind") or "").strip(),
         "score": float(image.get("score") or 0),
         "context": str(image.get("context") or "").strip(),
-        "review_status": image_review_status,
+        # Keep the legacy column consistent while treating every image as usable.
+        "review_status": "approved",
         "created_at": timestamp,
         "updated_at": timestamp,
     }
@@ -317,11 +416,18 @@ def migrate_collaboration_sources(conn, index_path: Path | None = None, manifest
                 collection_status = "complete" if manifest_images else "unavailable"
             links = normalize_links(raw_item.get("links") or raw_item.get("official_links"))
             partners = text_list(raw_item.get("partners") or raw_item.get("collaboration"))
+            raw_tags = raw_item["tags"] if "tags" in raw_item else raw_item.get("character_tags", [])
+            raw_periods = raw_item["periods"] if "periods" in raw_item else raw_item.get("time_periods", [])
+            try:
+                periods = normalize_collaboration_periods(raw_periods)
+            except ValueError:
+                periods = []
+            tags = collaboration_tags(raw_tags)
             conn.execute(
                 """INSERT INTO collaboration_items
-                (id, slug, title, date, date_kind, partners_json, credit, note, links_json,
+                (id, slug, title, date, date_kind, partners_json, credit, note, links_json, tags_json, periods_json,
                  collection_status, review_status, cover_image_id, metadata_json, source_hash, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)""",
                 (
                     item_id,
                     slug,
@@ -332,6 +438,8 @@ def migrate_collaboration_sources(conn, index_path: Path | None = None, manifest
                     str(raw_item.get("credit") or "").strip(),
                     str(raw_item.get("note") or "").strip(),
                     json.dumps(links, ensure_ascii=False),
+                    json.dumps(tags, ensure_ascii=False),
+                    json.dumps(periods, ensure_ascii=False),
                     collection_status,
                     str(raw_item.get("review_status") or "").strip() if str(raw_item.get("review_status") or "").strip() in COLLABO_REVIEW_STATUSES else "pending",
                     json.dumps(
@@ -356,6 +464,13 @@ def migrate_collaboration_sources(conn, index_path: Path | None = None, manifest
             if not isinstance(source_index, dict) or not source_index:
                 source_links = normalize_links(raw_item.get("links") or raw_item.get("official_links"))
                 source_partners = text_list(raw_item.get("partners") or raw_item.get("collaboration"))
+                raw_tags = raw_item["tags"] if "tags" in raw_item else raw_item.get("character_tags", [])
+                raw_periods = raw_item["periods"] if "periods" in raw_item else raw_item.get("time_periods", [])
+                source_tags = collaboration_tags(raw_tags)
+                try:
+                    source_periods = normalize_collaboration_periods(raw_periods)
+                except ValueError:
+                    source_periods = []
                 assignments: list[str] = []
                 values: list[Any] = []
                 if not existing["partners_json"] or not text_list(existing["partners_json"]):
@@ -371,6 +486,12 @@ def migrate_collaboration_sources(conn, index_path: Path | None = None, manifest
                 if not normalize_links(existing["links_json"]) and source_links:
                     assignments.append("links_json = ?")
                     values.append(json.dumps(source_links, ensure_ascii=False))
+                if not collaboration_tags(existing["tags_json"]) and source_tags:
+                    assignments.append("tags_json = ?")
+                    values.append(json.dumps(source_tags, ensure_ascii=False))
+                if not normalize_collaboration_periods(existing["periods_json"]) and source_periods:
+                    assignments.append("periods_json = ?")
+                    values.append(json.dumps(source_periods, ensure_ascii=False))
                 if existing["date_kind"] == "first_seen" and raw_item.get("date_kind") in {"announced", "starts", "first_seen"}:
                     assignments.append("date_kind = ?")
                     values.append(str(raw_item["date_kind"]))
@@ -440,22 +561,48 @@ def collaboration_year_values(value: Any) -> list[str]:
     return result
 
 
-def collaboration_rows(conn, q: str = "", year: Any = "") -> list[Any]:
+def collaboration_rows(conn, q: str = "", year: Any = "", tags: Any = "") -> list[Any]:
     rows = conn.execute("SELECT * FROM collaboration_items ORDER BY CASE WHEN date = '' THEN 1 ELSE 0 END, date DESC, id DESC").fetchall()
     years = set(collaboration_year_values(year))
+    normalized_tags = collaboration_tags(tags)
+    selected_tags = set(normalized_tags) if len(normalized_tags) < len(COLLABO_CHARACTER_TAG_IDS) else set()
     keyword = str(q or "").strip().casefold()
+    image_search: dict[str, str] = {}
+    if keyword:
+        image_rows = conn.execute(
+            "SELECT item_id, caption, alt, source_page, source_title, source_url, context FROM collaboration_images"
+        ).fetchall()
+        for image in image_rows:
+            item_id = str(image["item_id"])
+            image_search[item_id] = " ".join(
+                [
+                    image_search.get(item_id, ""),
+                    str(image["caption"] or ""),
+                    str(image["alt"] or ""),
+                    str(image["source_page"] or ""),
+                    str(image["source_title"] or ""),
+                    str(image["source_url"] or ""),
+                    str(image["context"] or ""),
+                ]
+            )
     result = []
     for row in rows:
         if years and row["date"][:4] not in years:
             continue
+        if selected_tags and not selected_tags.intersection(collaboration_tags(row["tags_json"])):
+            continue
         if keyword:
             searchable = " ".join(
                 [
-                    row["title"],
-                    row["credit"],
-                    row["note"],
+                    str(row["title"] or ""),
+                    str(row["credit"] or ""),
+                    str(row["note"] or ""),
                     " ".join(text_list(row["partners_json"])),
                     json.dumps(normalize_links(row["links_json"]), ensure_ascii=False),
+                    collaboration_tag_search_text(row["tags_json"]),
+                    json.dumps(normalize_collaboration_periods(row["periods_json"]), ensure_ascii=False),
+                    str(row["metadata_json"] or ""),
+                    image_search.get(str(row["id"]), ""),
                 ]
             ).casefold()
             if keyword not in searchable:
@@ -496,6 +643,17 @@ def normalized_item_payload(payload: dict[str, Any], existing: Any = None) -> di
         if len(link["title"]) > 500 or not valid_external_url(link["url"]):
             raise ValueError("相关页面需要填写有效的 HTTP/HTTPS 地址")
     partners = text_list(payload.get("partners") if "partners" in payload else (existing["partners_json"] if existing else []))
+    tags_value = payload["tags"] if "tags" in payload else (
+        payload.get("character_tags") if "character_tags" in payload else (existing["tags_json"] if existing else [])
+    )
+    tags = collaboration_tags(tags_value)
+    if "periods" in payload:
+        periods_value = payload["periods"]
+    elif "start_date" in payload or "end_date" in payload:
+        periods_value = [{"start_date": payload.get("start_date"), "end_date": payload.get("end_date")}]
+    else:
+        periods_value = existing["periods_json"] if existing else []
+    periods = normalize_collaboration_periods(periods_value)
     credit_value = payload["credit"] if "credit" in payload else (existing["credit"] if existing else "")
     note_value = payload["note"] if "note" in payload else (existing["note"] if existing else "")
     if len(title) > 500 or len(partners) > 100 or any(len(value) > 200 for value in partners):
@@ -505,6 +663,8 @@ def normalized_item_payload(payload: dict[str, Any], existing: Any = None) -> di
         "date": item_date,
         "date_kind": date_kind,
         "partners": partners,
+        "tags": tags,
+        "periods": periods,
         "credit": str(credit_value or "").strip(),
         "note": str(note_value or "").strip(),
         "links": links,
@@ -585,10 +745,6 @@ def upsert_collaboration_item(conn, payload: dict[str, Any]) -> str:
         actual_id = requested_image_id if requested_image_id in existing_images else image_id(item_id, path, source_url)
         id_mapping[requested_image_id] = actual_id
         existing_image = existing_images.get(actual_id)
-        existing_review_status = existing_image["review_status"] if existing_image else "pending"
-        review_status = str(raw_image.get("review_status") or existing_review_status).strip()
-        if review_status not in COLLABO_IMAGE_REVIEW_STATUSES:
-            review_status = "pending"
         prepared.append(
             {
                 "id": actual_id,
@@ -609,7 +765,8 @@ def upsert_collaboration_item(conn, payload: dict[str, Any]) -> str:
                 "kind": str(raw_image.get("kind") or "manual").strip(),
                 "score": float(raw_image.get("score") or 0),
                 "context": str(raw_image.get("context") or "").strip(),
-                "review_status": review_status,
+                # Kept only for compatibility with the existing SQLite schema.
+                "review_status": "approved",
                 "created_at": existing_images[actual_id]["created_at"] if actual_id in existing_images else timestamp,
                 "updated_at": timestamp,
             }
@@ -618,22 +775,16 @@ def upsert_collaboration_item(conn, payload: dict[str, Any]) -> str:
     cover_image_id = id_mapping.get(requested_cover, requested_cover)
     if cover_image_id not in {image["id"] for image in prepared}:
         cover_image_id = prepared[0]["id"] if prepared else ""
-    if normalized["review_status"] == "approved":
-        if any(image["review_status"] == "pending" for image in prepared):
-            raise ValueError("图片仍有待审核项")
-        if not cover_image_id or not any(
-            image["id"] == cover_image_id and image["review_status"] == "approved" for image in prepared
-        ):
-            raise ValueError("封面尚未通过审核")
     metadata = json_dict(existing["metadata_json"] if existing else payload.get("metadata_json", {}))
     conn.execute(
         """INSERT INTO collaboration_items
-        (id, slug, title, date, date_kind, partners_json, credit, note, links_json,
+        (id, slug, title, date, date_kind, partners_json, credit, note, links_json, tags_json, periods_json,
          collection_status, review_status, cover_image_id, metadata_json, source_hash, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET slug=excluded.slug, title=excluded.title, date=excluded.date,
           date_kind=excluded.date_kind, partners_json=excluded.partners_json, credit=excluded.credit,
-          note=excluded.note, links_json=excluded.links_json, collection_status=excluded.collection_status,
+          note=excluded.note, links_json=excluded.links_json, tags_json=excluded.tags_json,
+          periods_json=excluded.periods_json, collection_status=excluded.collection_status,
           review_status=excluded.review_status, cover_image_id=excluded.cover_image_id,
           metadata_json=excluded.metadata_json, updated_at=excluded.updated_at""",
         (
@@ -646,6 +797,8 @@ def upsert_collaboration_item(conn, payload: dict[str, Any]) -> str:
             normalized["credit"],
             normalized["note"],
             json.dumps(normalized["links"], ensure_ascii=False),
+            json.dumps(normalized["tags"], ensure_ascii=False),
+            json.dumps(normalized["periods"], ensure_ascii=False),
             normalized["collection_status"],
             normalized["review_status"],
             cover_image_id,
@@ -681,18 +834,22 @@ def upsert_collaboration_item(conn, payload: dict[str, Any]) -> str:
 
 
 __all__ = [
+    "COLLABO_CHARACTER_TAG_IDS",
+    "COLLABO_CHARACTER_TAGS",
     "COLLABO_COLLECTION_STATUSES",
-    "COLLABO_IMAGE_REVIEW_STATUSES",
     "COLLABO_REVIEW_STATUSES",
     "COLLABO_SCHEMA_SQL",
     "collaboration_rows",
     "collaboration_source",
+    "collaboration_tag_search_text",
+    "collaboration_tags",
     "collaboration_year_values",
     "collaboration_years",
     "ensure_collaboration_schema",
     "find_collaboration",
     "image_asset_path",
     "migrate_collaboration_sources",
+    "normalize_collaboration_periods",
     "normalize_links",
     "normalized_item_payload",
     "text_list",

@@ -3,6 +3,12 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 import CollaboImage from "../components/CollaboImage.vue";
 import { listCollaborations } from "../collabo/api";
+import {
+  COLLABO_CHARACTER_TAG_IDS,
+  COLLABO_CHARACTER_TAGS,
+  characterLabel,
+  normalizeCharacterTags,
+} from "../collabo/characters.js";
 import { coverUrl, dateLabel, PAGE_SIZE, pageNumber, safeUrl, yearValues } from "../collabo/model";
 import { c } from "../collabo/text";
 import { localeTag } from "../i18n";
@@ -51,6 +57,11 @@ function resetHeroPointer() {
 const q = computed(() => (typeof route.query.q === "string" ? route.query.q : ""));
 const selectedYears = computed(() => yearValues(route.query.year));
 const yearQuery = computed(() => selectedYears.value.join(","));
+const selectedCharacterTags = computed(() => normalizeCharacterTags(route.query.tags));
+const allCharactersSelected = computed(
+  () => !selectedCharacterTags.value.length || selectedCharacterTags.value.length === COLLABO_CHARACTER_TAG_IDS.length,
+);
+const characterTagQuery = computed(() => (allCharactersSelected.value ? "" : selectedCharacterTags.value.join(",")));
 const page = computed(() => pageNumber(route.query.page));
 const pages = computed(() => Math.max(1, Math.ceil((data.value?.total || 0) / PAGE_SIZE)));
 const source = computed(() => data.value?.source);
@@ -58,6 +69,7 @@ function queryFor(nextPage = 1) {
   return {
     ...(q.value ? { q: q.value } : {}),
     ...(yearQuery.value ? { year: yearQuery.value } : {}),
+    ...(characterTagQuery.value ? { tags: characterTagQuery.value } : {}),
     ...(nextPage > 1 ? { page: nextPage } : {}),
   };
 }
@@ -67,8 +79,33 @@ function searchItems() {
     query: {
       ...(search.value.trim() ? { q: search.value.trim() } : {}),
       ...(yearQuery.value ? { year: yearQuery.value } : {}),
+      ...(characterTagQuery.value ? { tags: characterTagQuery.value } : {}),
     },
   });
+}
+function pushCharacterQuery(tags) {
+  router.push({
+    path: "/collabo",
+    query: {
+      ...(q.value ? { q: q.value } : {}),
+      ...(yearQuery.value ? { year: yearQuery.value } : {}),
+      ...(tags.length ? { tags: tags.join(",") } : {}),
+    },
+  });
+}
+function toggleCharacterTag(id) {
+  const next = new Set(selectedCharacterTags.value);
+  if (!selectedCharacterTags.value.length) {
+    next.add(id);
+  } else if (next.has(id)) {
+    next.delete(id);
+  } else {
+    next.add(id);
+  }
+  pushCharacterQuery(next.size === COLLABO_CHARACTER_TAG_IDS.length ? [] : [...next]);
+}
+function selectAllCharacterTags() {
+  pushCharacterQuery([]);
 }
 function toggleYear(value) {
   const next = new Set(selectedYears.value);
@@ -85,6 +122,7 @@ function toggleYear(value) {
     query: {
       ...(q.value ? { q: q.value } : {}),
       ...(years.length ? { year: years.join(",") } : {}),
+      ...(characterTagQuery.value ? { tags: characterTagQuery.value } : {}),
     },
   });
 }
@@ -94,7 +132,12 @@ async function load() {
   error.value = "";
   search.value = q.value;
   try {
-    const result = await listCollaborations({ q: q.value, year: yearQuery.value, page: page.value });
+    const result = await listCollaborations({
+      q: q.value,
+      year: yearQuery.value,
+      tags: characterTagQuery.value,
+      page: page.value,
+    });
     if (id === requestId) {
       data.value = result;
       const last = Math.max(1, Math.ceil(result.total / PAGE_SIZE));
@@ -106,7 +149,7 @@ async function load() {
     if (id === requestId) loading.value = false;
   }
 }
-watch(() => [q.value, yearQuery.value, page.value], load, { immediate: true });
+watch(() => [q.value, yearQuery.value, characterTagQuery.value, page.value], load, { immediate: true });
 onBeforeUnmount(() => {
   requestId += 1;
 });
@@ -138,8 +181,8 @@ onBeforeUnmount(() => {
           <input
             v-model="search"
             type="search"
-            :aria-label="c('标题、合作方或关键词')"
-            :placeholder="c('标题、合作方或关键词')"
+            :aria-label="c('标题、合作方、备注或关键词')"
+            :placeholder="c('标题、合作方、备注或关键词')"
           /><button type="submit">{{ c("搜索") }} ↗</button>
         </form>
       </div>
@@ -195,12 +238,40 @@ onBeforeUnmount(() => {
         </button>
       </div>
     </section>
+    <section class="cb-character-filter" :aria-label="c('角色')">
+      <div class="cb-year-filter-heading">
+        <span>CHARACTER / TAG</span>
+        <strong>{{ allCharactersSelected ? "ALL CHARACTERS" : `${selectedCharacterTags.length} SELECTED` }}</strong>
+      </div>
+      <div class="cb-character-options" role="group" :aria-label="c('角色')">
+        <button
+          type="button"
+          class="cb-character-chip"
+          :class="{ selected: allCharactersSelected }"
+          :aria-pressed="allCharactersSelected"
+          @click="selectAllCharacterTags"
+        >
+          <b>ALL</b>{{ c("全员") }}
+        </button>
+        <button
+          v-for="tag in COLLABO_CHARACTER_TAGS"
+          :key="tag.id"
+          type="button"
+          class="cb-character-chip"
+          :class="{ selected: selectedCharacterTags.includes(tag.id) }"
+          :aria-pressed="selectedCharacterTags.includes(tag.id)"
+          @click="toggleCharacterTag(tag.id)"
+        >
+          <i class="cb-character-dot" :style="{ backgroundColor: tag.color }"></i>{{ characterLabel(tag.id, localeTag()) }}
+        </button>
+      </div>
+    </section>
     <div class="cb-index-heading">
       <span
         >{{ c("联动一览") }} <b>{{ String(data?.total || 0).padStart(3, "0") }}</b></span
       ><small>CHRONOLOGICAL INDEX</small>
     </div>
-    <p v-if="data?.mode === 'preview'" class="cb-notice">{{ c("本地采集预览 · 图片尚待人工审核") }}</p>
+    <p v-if="data?.mode === 'preview'" class="cb-notice">{{ c("本地采集预览 · 图片已直接展示") }}</p>
     <div v-if="loading" class="cb-grid" aria-busy="true" :aria-label="c('读取中……')">
       <div v-for="n in PAGE_SIZE" :key="n" class="cb-skeleton"></div>
     </div>
@@ -229,6 +300,9 @@ onBeforeUnmount(() => {
           </div>
           <h2>{{ item.title }}</h2>
           <p>{{ item.partners.join(" · ") }}</p>
+          <div v-if="item.tags.length" class="cb-card-tags" :aria-label="c('角色标签')">
+            <span v-for="tag in item.tags" :key="tag">{{ characterLabel(tag, localeTag()) }}</span>
+          </div>
         </div>
       </RouterLink>
     </div>

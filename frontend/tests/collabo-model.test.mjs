@@ -10,6 +10,7 @@ import {
   yearValues,
 } from "../src/collabo/model.js";
 import { swipeDirection } from "../src/composables/useDetailNavigation.js";
+import { COLLABO_CHARACTER_TAG_IDS, normalizeCharacterTags } from "../src/collabo/characters.js";
 
 test("source and image URLs reject active schemes and credentials", () => {
   for (const url of [
@@ -26,7 +27,7 @@ test("source and image URLs reject active schemes and credentials", () => {
   assert.equal(safeUrl("/admin/secret", true), "");
 });
 
-test("legacy fields and all original links survive normalization; image counts do not imply approval", () => {
+test("legacy fields and all original links survive normalization without image review state", () => {
   const raw = {
     id: "legacy",
     first_seen: "2026-09-11",
@@ -43,10 +44,29 @@ test("legacy fields and all original links survive normalization; image counts d
   assert.deepEqual(item.links, raw.official_links);
   assert.deepEqual(item.partners, raw.collaboration);
   assert.equal(item.review_status, "pending");
-  assert.ok(item.images.every((image) => image.review_status === "pending"));
+  assert.ok(item.images.every((image) => !Object.hasOwn(image, "review_status")));
 });
 
-test("approved thumbnail preferred; rejected cover excluded", () => {
+test("character tags normalize aliases and all selection", () => {
+  assert.deepEqual(normalizeCharacterTags(["上原歩夢", "lanzhu"]), ["ayumu", "lanzhu"]);
+  assert.deepEqual(normalizeCharacterTags("全员"), COLLABO_CHARACTER_TAG_IDS);
+});
+
+test("periods and character tags survive item normalization and filtering", () => {
+  const item = normalizeItem({
+    id: "tagged",
+    date: "2026-01-01",
+    title: "Tagged",
+    tags: ["ayumu"],
+    periods: [{ start_date: "2026-01-02", end_date: "2026-01-03", title: "First", description: "Details" }],
+  });
+  assert.deepEqual(item.tags, ["ayumu"]);
+  assert.equal(item.periods[0].title, "First");
+  assert.deepEqual(filterItems([item], { tags: ["ayumu"] }).map((entry) => entry.id), ["tagged"]);
+  assert.deepEqual(filterItems([item], { tags: ["kasumi"] }), []);
+});
+
+test("legacy rejected flags no longer hide a cover or gallery image", () => {
   const item = normalizeItem({
     id: "one",
     cover_image_id: "a",
@@ -55,7 +75,8 @@ test("approved thumbnail preferred; rejected cover excluded", () => {
       { id: "b", url: "/media/b.png", thumbnail_url: "/media/b-small.webp", review_status: "approved" },
     ],
   });
-  assert.equal(coverUrl(item), "/media/b-small.webp");
+  assert.equal(coverUrl(item), "/media/a.png");
+  assert.equal(item.images.length, 2);
   assert.equal(normalizeImage({ url: "javascript:alert(1)" }).url, "");
 });
 

@@ -1,4 +1,5 @@
 import { api } from "../api";
+import { COLLABO_CHARACTER_TAG_IDS, normalizeCharacterTags } from "./characters.js";
 import { filterItems, normalizeItem, PAGE_SIZE, pageNumber } from "./model";
 
 // The database API is the primary source. A missing endpoint alone falls back to
@@ -31,6 +32,11 @@ async function previewCatalog() {
   return previewPromise;
 }
 
+function characterTagQuery(tags) {
+  const normalized = normalizeCharacterTags(tags);
+  return normalized.length === COLLABO_CHARACTER_TAG_IDS.length ? "" : normalized.join(",");
+}
+
 async function optionalApi(path, options) {
   try {
     const result = await api(path, options);
@@ -44,8 +50,14 @@ async function optionalApi(path, options) {
   }
 }
 
-export async function listCollaborations({ q = "", year = "", page = 1, admin = false } = {}) {
-  const params = new URLSearchParams({ q, year, page: String(pageNumber(page)), page_size: String(PAGE_SIZE) });
+export async function listCollaborations({ q = "", year = "", tags = [], page = 1, admin = false } = {}) {
+  const params = new URLSearchParams({
+    q,
+    year,
+    tags: characterTagQuery(tags),
+    page: String(pageNumber(page)),
+    page_size: String(PAGE_SIZE),
+  });
   const payload = await optionalApi(`${admin ? "/api/admin/collabo" : "/api/collabo"}?${params}`);
   if (payload) {
     if (!Array.isArray(payload.items)) throw new Error("联动接口缺少 items 字段");
@@ -54,7 +66,7 @@ export async function listCollaborations({ q = "", year = "", page = 1, admin = 
     return { ...payload, items, mode: "database" };
   }
   const catalog = await previewCatalog();
-  const items = filterItems(catalog.items, { q, year });
+  const items = filterItems(catalog.items, { q, year, tags });
   const offset = (pageNumber(page) - 1) * PAGE_SIZE;
   return {
     items: items.slice(offset, offset + PAGE_SIZE),
@@ -65,9 +77,10 @@ export async function listCollaborations({ q = "", year = "", page = 1, admin = 
   };
 }
 
-export async function getCollaboration(slugOrId, { admin = false, q = "", year = "" } = {}) {
+export async function getCollaboration(slugOrId, { admin = false, q = "", year = "", tags = [] } = {}) {
   const prefix = admin ? "/api/admin/collabo" : "/api/collabo";
-  const payload = await optionalApi(`${prefix}/${encodeURIComponent(slugOrId)}?${new URLSearchParams({ q, year })}`);
+  const params = new URLSearchParams({ q, year, tags: characterTagQuery(tags) });
+  const payload = await optionalApi(`${prefix}/${encodeURIComponent(slugOrId)}?${params}`);
   if (payload) {
     if (!payload.item) throw new Error("联动接口缺少 item 字段");
     const item = normalizeItem(payload.item);
@@ -80,7 +93,7 @@ export async function getCollaboration(slugOrId, { admin = false, q = "", year =
   const catalog = await previewCatalog();
   const item = catalog.items.find((entry) => (admin ? entry.id : entry.slug) === slugOrId);
   if (!item) throw Object.assign(new Error("联动记录不存在"), { status: 404 });
-  const ordered = filterItems(catalog.items, { q, year });
+  const ordered = filterItems(catalog.items, { q, year, tags });
   const position = ordered.findIndex((entry) => entry.id === item.id);
   const summary = (entry) => (entry ? { id: entry.id, slug: entry.slug, title: entry.title } : null);
   return {

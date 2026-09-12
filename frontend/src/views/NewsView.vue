@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 import { api } from "../api";
 import { formatLocalDateTime } from "../datetime";
@@ -33,6 +33,7 @@ const pages = ref(1);
 const loading = ref(true);
 const error = ref("");
 let requestId = 0;
+let pendingTagScrollY = null;
 const heroRef = ref(null);
 const heroScrollStyle = ref({
   "--news-hero-copy-opacity": "1",
@@ -316,6 +317,7 @@ function submitSearch() {
 }
 
 function toggleTag(tag) {
+  pendingTagScrollY = window.scrollY;
   const token = tagToken(tag);
   const next = activeTags.value.filter(
     (value) => value !== token && value !== tag.name,
@@ -355,7 +357,9 @@ function detailTo(item) {
 
 async function loadNews() {
   const id = ++requestId;
-  loading.value = true;
+  const restoreTagScrollY = pendingTagScrollY;
+  // Keep the current result in place while a tag filter is loading, so the viewport does not jump to a skeleton.
+  if (restoreTagScrollY === null) loading.value = true;
   error.value = "";
   try {
     const params = new URLSearchParams();
@@ -381,7 +385,18 @@ async function loadNews() {
     if (id === requestId)
       error.value = requestError.message || t("新闻加载失败");
   } finally {
-    if (id === requestId) loading.value = false;
+    if (id === requestId) {
+      loading.value = false;
+      if (restoreTagScrollY !== null) {
+        await nextTick();
+        const restore = () => {
+          if (id === requestId) window.scrollTo({ left: 0, top: restoreTagScrollY, behavior: "auto" });
+        };
+        restore();
+        requestAnimationFrame(restore);
+        pendingTagScrollY = null;
+      }
+    }
   }
 }
 
@@ -444,8 +459,8 @@ onBeforeUnmount(() => {
           <input
             v-model="query"
             name="q"
-            :placeholder="t('搜索新闻标题、摘要或标签')"
-            :aria-label="t('搜索新闻标题、摘要或标签')"
+            :placeholder="t('搜索新闻标题、摘要、正文或标签')"
+            :aria-label="t('搜索新闻标题、摘要、正文或标签')"
           />
           <button>
             <span>{{ t("搜索新闻") }}</span

@@ -212,6 +212,17 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
     def login(self):
         self.client.cookies.set("nijidb_admin", main.admin_cookie_value(main.settings()["admin_password_hash"]))
 
+    async def test_search_matches_article_body(self):
+        article_id = news_id("niji_topics", "01_123")
+        with main.db() as conn:
+            conn.execute(
+                "UPDATE news_articles SET body_markdown = ? WHERE id = ?",
+                ("正文搜索专用关键词", article_id),
+            )
+        data = (await self.client.get("/api/news?q=正文搜索专用关键词")).json()
+        self.assertEqual(data["total"], 1)
+        self.assertEqual(data["items"][0]["id"], article_id)
+
     async def test_group_sources_and_filters(self):
         data = (await self.client.get("/api/news?source=official_site")).json()
         self.assertEqual(data["total"], 2)

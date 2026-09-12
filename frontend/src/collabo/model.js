@@ -1,3 +1,5 @@
+import { COLLABO_CHARACTER_TAG_IDS, characterTag, normalizeCharacterTags } from "./characters.js";
+
 export const PAGE_SIZE = 24;
 export const SLUG_PATTERN = /^\d{8}-[a-f0-9]{6}$/;
 
@@ -26,9 +28,24 @@ export function dateLabel(value, language = "zh-CN") {
       }).format(date);
 }
 
+export function normalizePeriods(value) {
+  const entries = Array.isArray(value) ? value : value && typeof value === "object" ? [value] : [];
+  return entries
+    .map((period) => ({
+      start_date: String(period.start_date || period.start || ""),
+      end_date: String(period.end_date || period.end || ""),
+      title: String(period.title || period.label || ""),
+      description: String(period.description || period.note || ""),
+    }))
+    .filter((period) => period.start_date || period.end_date || period.title || period.description);
+}
+
 export function normalizeImage(image, index = 0) {
+  const normalized = { ...image };
+  // Older API responses may still contain this legacy field. Do not expose or submit image review state anymore.
+  delete normalized.review_status;
   return {
-    ...image,
+    ...normalized,
     id: String(image.id || image.sha256 || `image-${index}`),
     url: safeUrl(image.url || image.path, true),
     thumbnail_url: safeUrl(image.thumbnail_url, true),
@@ -39,7 +56,6 @@ export function normalizeImage(image, index = 0) {
     alt: String(image.alt || ""),
     width: Number(image.width) || null,
     height: Number(image.height) || null,
-    review_status: ["approved", "rejected"].includes(image.review_status) ? image.review_status : "pending",
   };
 }
 
@@ -56,12 +72,14 @@ export function normalizeItem(item) {
     title: String(item.title || ""),
     date: item.date || item.announced_on || item.starts_on || item.first_seen || "",
     date_kind: item.date_kind || "first_seen",
-    partners: item.partners || item.collaboration || [],
+    partners: Array.isArray(item.partners || item.collaboration) ? (item.partners || item.collaboration) : [],
+    tags: normalizeCharacterTags(item.tags ?? item.character_tags ?? []),
+    periods: normalizePeriods(item.periods ?? item.time_periods ?? []),
     credit: item.credit || "",
     note: item.note || "",
     links,
     images,
-    image_count: item.image_count ?? images.filter((image) => image.review_status !== "rejected").length,
+    image_count: item.image_count ?? images.length,
     cover_image_id: String(item.cover_image_id || images[0]?.id || ""),
     cover_url: safeUrl(item.cover_url, true),
     thumbnail_url: safeUrl(item.thumbnail_url, true),
@@ -70,11 +88,7 @@ export function normalizeItem(item) {
 }
 
 export function coverImage(item) {
-  return (
-    item.images?.find((image) => image.id === item.cover_image_id && image.review_status !== "rejected") ||
-    item.images?.find((image) => image.review_status !== "rejected") ||
-    null
-  );
+  return item.images?.find((image) => image.id === item.cover_image_id) || item.images?.[0] || null;
 }
 
 export function coverUrl(item) {
@@ -94,15 +108,31 @@ export function yearValues(value) {
   ];
 }
 
-export function filterItems(items, { q = "", year = "" } = {}) {
-  const keyword = q.trim().toLocaleLowerCase();
+export function filterItems(items, { q = "", year = "", tags = [] } = {}) {
+  const keyword = String(q || "").trim().toLocaleLowerCase();
   const years = yearValues(year);
+  const normalizedTags = normalizeCharacterTags(tags);
+  const selectedTags = normalizedTags.length === COLLABO_CHARACTER_TAG_IDS.length ? [] : normalizedTags;
   return items
-    .filter(
-      (item) =>
-        (!years.length || years.includes(item.date.slice(0, 4))) &&
-        (!keyword || [item.title, ...item.partners, item.note].join(" ").toLocaleLowerCase().includes(keyword)),
-    )
+    .filter((item) => {
+      const itemTags = normalizeCharacterTags(item.tags ?? item.character_tags ?? []);
+      const periods = normalizePeriods(item.periods ?? item.time_periods ?? []);
+      const tagSearch = itemTags.flatMap((tag) => {
+        const definition = characterTag(tag);
+        return definition ? [tag, ...Object.values(definition.labels), ...definition.aliases] : [tag];
+      });
+      return (
+        (!years.length || years.includes(String(item.date || "").slice(0, 4))) &&
+        (!selectedTags.length || selectedTags.some((tag) => itemTags.includes(tag))) &&
+        (!keyword || [
+          item.title,
+          ...item.partners,
+          ...tagSearch,
+          item.note,
+          ...periods.flatMap((period) => [period.title, period.description, period.start_date, period.end_date]),
+        ].join(" ").toLocaleLowerCase().includes(keyword))
+      );
+    })
     .sort((a, b) => b.date.localeCompare(a.date) || a.id.localeCompare(b.id));
 }
 

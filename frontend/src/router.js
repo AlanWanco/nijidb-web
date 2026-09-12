@@ -4,6 +4,7 @@ import { api } from "./api";
 import { locale, t } from "./i18n";
 
 const appTitle = "Nijigasaki DB";
+const collaboPageTitle = "联动立绘";
 const collaboScrollPositions = new Map();
 
 const router = createRouter({
@@ -45,22 +46,22 @@ const router = createRouter({
     {
       path: "/illustrations",
       component: () => import("./views/CollaborationIllustrationsView.vue"),
-      meta: { title: "联动立绘" },
+      meta: { title: collaboPageTitle },
     },
     {
       path: "/collabo",
       component: () => import("./views/CollaboView.vue"),
-      meta: { title: "联动立绘", pageTransition: true },
+      meta: { title: collaboPageTitle, pageTransition: true },
     },
     {
       path: "/collabo/:slug(\\d{8}-[a-f0-9]{6})",
       component: () => import("./views/CollaboDetailView.vue"),
-      meta: { title: "联动立绘" },
+      meta: { title: collaboPageTitle },
     },
     {
       path: "/admin/collabo/:id?",
       component: () => import("./views/CollaboAdminView.vue"),
-      meta: { requiresAuth: true, title: "联动立绘" },
+      meta: { requiresAuth: true, title: collaboPageTitle },
     },
     { path: "/admin/login", component: () => import("./views/LoginView.vue"), meta: { title: "管理员登录" } },
     { path: "/admin", component: () => import("./views/AdminView.vue"), meta: { requiresAuth: true, title: "设置" } },
@@ -72,6 +73,8 @@ const router = createRouter({
     { path: "/:pathMatch(.*)*", redirect: "/" },
   ],
   scrollBehavior(to, from, savedPosition) {
+    // Tag filters update the news query in place; keep the reader at the same vertical position.
+    if (to.path === "/news" && from.path === "/news" && to.query.tags !== from.query.tags) return false;
     if (to.path === "/collabo" && (from.path === "/collabo" || from.path.startsWith("/collabo/"))) {
       const key = from.path === "/collabo" ? from.fullPath : to.fullPath;
       const position = collaboScrollPositions.get(key);

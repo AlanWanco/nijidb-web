@@ -60,7 +60,7 @@ npm run dev
 
 ## 联动立绘档案
 
-`/collabo` 使用 SQLite 中的联动记录和图片元数据，管理员可在 `/admin/collabo` 编辑资料、排序图片、审核候选图和上传本地图片。应用启动时会从本地 `frontend/src/content/collaborationIllustrations.json` 与 `data/images/illustrations/manifest.json` 导入尚未入库的记录；容器部署可使用 `scripts/seed_collabo_database.py` 对数据卷执行同样的导入。原有 `/illustrations` 和 `/api/collaboration-illustrations` 保留兼容。图片文件仍保存在 Git 忽略的 `data/` / `/data` 下，不写入 SQLite；若需要在容器中启用本地图片，将该目录复制到数据卷的 `/data/images/illustrations/`，然后重启应用即可。采集脚本包括：
+`/collabo` 使用 SQLite 中的联动记录和图片元数据，管理员可在 `/admin/collabo` 编辑资料、角色标签、多个带标题/描述的开始—结束日期时间段、排序图片、设置封面、标记整条记录状态和上传本地图片。公开页支持按角色标签筛选，“全员”表示选中全部角色。应用启动时会从本地 `frontend/src/content/collaborationIllustrations.json` 与 `data/images/illustrations/manifest.json` 导入尚未入库的记录；容器部署可使用 `scripts/seed_collabo_database.py` 对数据卷执行同样的导入。原有 `/illustrations` 和 `/api/collaboration-illustrations` 保留兼容。图片文件仍保存在 Git 忽略的 `data/` / `/data` 下，不写入 SQLite；若需要在容器中启用本地图片，将该目录复制到数据卷的 `/data/images/illustrations/`，然后重启应用即可。采集脚本包括：
 
 ```bash
 uv run --locked python scripts/import_collaboration_illustrations.py
@@ -70,7 +70,7 @@ uv run --locked python scripts/collect_pdf_illustrations.py
 uv run --locked python scripts/collect_local_illustrations.py --source-dir /Volumes/SSK/Download/bangumi-parser/ll-offical-site
 ```
 
-联网采集脚本只接受官方页面、官方 PDF、Wayback 的官方页面快照和官方账号的原图候选，并会过滤 logo、导航、二维码、头像和站点装饰图。`collect_local_illustrations.py` 不联网，只按本地 Markdown 的页面 ID 和已审核图片序号补入资源，并按 SHA-256 去重且不覆盖已有文件。清单中的 `complete` 表示已收录 3 张，`partial` 表示目前只有 1–2 张，`unavailable` 表示暂未找到可验证的本地资源，需继续人工审核。初次部署时可执行：
+联网采集脚本只接受官方页面、官方 PDF、Wayback 的官方页面快照和官方账号的原图候选，并会过滤 logo、导航、二维码、头像和站点装饰图。`collect_local_illustrations.py` 不联网，只按本地 Markdown 的页面 ID 和图片序号补入资源，并按 SHA-256 去重且不覆盖已有文件。清单中的 `complete` 表示已收录 3 张，`partial` 表示目前只有 1–2 张，`unavailable` 表示暂未找到可验证的本地资源，需继续补充来源。初次部署时可执行：
 
 ```bash
 uv run --locked python scripts/seed_collabo_database.py \
@@ -91,7 +91,7 @@ uv run --locked python scripts/import_official_news.py \
 
 运行本地后端时设置 `NEWS_ARCHIVE_DIR` 指向该归档目录，页面会通过新闻图片接口读取本地图片。需要将图片复制到数据卷时再加 `--copy-images`。
 
-- 正文支持 GFM Markdown（标题、列表、表格、引用、代码等），HTML 经 DOMPurify 清理；会过滤官网分类导航和当前分类标签；正文与图库图片可点击放大，支持灯箱内翻图。
+- 搜索支持标题、摘要、正文、分类、来源页名和标签；联动搜索支持标题、备注、来源、图片说明、角色标签和时间段标题/描述等元数据。正文支持 GFM Markdown（标题、列表、表格、引用、代码等），HTML 经 DOMPurify 清理；会过滤官网分类导航和当前分类标签；正文与图库图片可点击放大，支持灯箱内翻图。
 - 官网图片仅保留宽度至少 240 px、高度至少 120 px 且不超过 10000 px 的资源；页面未声明尺寸时读取官方图片头部判断，图标、追踪图和异常尺寸图片不会进入图库。
 - 标签保持原始 token 入库，展示按中文/日文/英文翻译；新闻支持左右键和横向滑动，保留来源、标签、搜索与页码。编辑中/灯箱内不会误切新闻。
 - 自动轮询只访问 `https://www.lovelive-anime.jp/nijigasaki/topics.php` 最近四页及详情，检查正文变化；通过 ETag / Last-Modified 减少重复传输，429/临时错误有界重试。设置开关或间隔变更立即唤醒调度器。

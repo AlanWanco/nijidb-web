@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 import CollaboGallery from "../components/CollaboGallery.vue";
 import { getCollaboration } from "../collabo/api";
+import { characterLabel } from "../collabo/characters.js";
 import { dateLabel, safeUrl } from "../collabo/model";
 import { c } from "../collabo/text";
 import { localeTag } from "../i18n";
@@ -17,11 +18,11 @@ const error = ref("");
 const lightbox = ref(false);
 let requestId = 0;
 const item = computed(() => data.value?.item);
-const images = computed(() => item.value?.images.filter((image) => image.review_status !== "rejected") || []);
+const images = computed(() => item.value?.images || []);
 const dateTitle = computed(() => ({ announced: "公布日期", starts: "开启日期" })[item.value?.date_kind] || "首次公开");
 const context = computed(() =>
   Object.fromEntries(
-    ["q", "year", "page"].filter((key) => typeof route.query[key] === "string").map((key) => [key, route.query[key]]),
+    ["q", "year", "tags", "page"].filter((key) => typeof route.query[key] === "string").map((key) => [key, route.query[key]]),
   ),
 );
 const relatedLinks = computed(() => {
@@ -33,6 +34,10 @@ const relatedLinks = computed(() => {
   }
   return [...links.values()];
 });
+function periodDateLabel(period) {
+  return `${dateLabel(period.start_date, localeTag())} → ${dateLabel(period.end_date, localeTag())}`;
+}
+
 function target(entry) {
   return { path: `/collabo/${entry.slug}`, query: context.value };
 }
@@ -94,7 +99,7 @@ onBeforeUnmount(() => {
           ><span>{{ c("下一联动") }} →</span><strong>{{ data.following.title }}</strong></RouterLink
         ><span v-else class="cb-muted">{{ c("没有更早或更晚的记录") }}</span>
       </nav>
-      <p v-if="data.mode === 'preview'" class="cb-notice">{{ c("本地采集预览 · 图片尚待人工审核") }}</p>
+      <p v-if="data.mode === 'preview'" class="cb-notice">{{ c("本地采集预览 · 图片已直接展示") }}</p>
       <article :key="item.id" class="cb-detail-layout">
         <CollaboGallery
           :images="images"
@@ -109,6 +114,25 @@ onBeforeUnmount(() => {
             <dt>{{ c(dateTitle) }}</dt>
             <dd>
               <time :datetime="item.date">{{ dateLabel(item.date, localeTag()) }}</time>
+            </dd>
+            <dt v-if="item.periods.length">{{ c("联动时间段") }}</dt>
+            <dd v-if="item.periods.length">
+              <ol class="cb-period-list">
+                <li v-for="(period, index) in item.periods" :key="`${period.start_date}-${period.end_date}-${index}`">
+                  <div class="cb-period-heading">
+                    <strong v-if="period.title">{{ period.title }}</strong>
+                    <time :datetime="`${period.start_date}/${period.end_date}`">{{ periodDateLabel(period) }}</time>
+                  </div>
+                  <p v-if="period.description">{{ period.description }}</p>
+                </li>
+              </ol>
+            </dd>
+            <dt>{{ c("角色标签") }}</dt>
+            <dd>
+              <div v-if="item.tags.length" class="cb-character-tags" :aria-label="c('角色标签')">
+                <span v-for="tag in item.tags" :key="tag">{{ characterLabel(tag, localeTag()) }}</span>
+              </div>
+              <span v-else>—</span>
             </dd>
             <dt>{{ c("合作方") }}</dt>
             <dd>{{ item.partners.join(" · ") || "—" }}</dd>

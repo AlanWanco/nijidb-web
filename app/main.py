@@ -30,11 +30,13 @@ from starlette.middleware.gzip import GZipMiddleware
 from app.collabo import (
     collaboration_rows,
     collaboration_source,
+    collaboration_tags,
     collaboration_years,
     ensure_collaboration_schema,
     find_collaboration,
     image_asset_path,
     migrate_collaboration_sources,
+    normalize_collaboration_periods,
     normalize_links,
     text_list,
     upsert_collaboration_item,
@@ -3936,7 +3938,6 @@ def collaboration_image_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, 
         "kind": str(row["kind"] or ""),
         "score": row["score"],
         "context": str(row["context"] or ""),
-        "review_status": str(row["review_status"] or "pending"),
         "available": bool(url),
     }
 
@@ -3946,11 +3947,12 @@ def collaboration_item_payload(conn: sqlite3.Connection, row: sqlite3.Row, detai
         "SELECT * FROM collaboration_images WHERE item_id = ? ORDER BY position, id",
         (row["id"],),
     ).fetchall()
-    visible_images = image_rows if admin else [image for image in image_rows if image["review_status"] != "rejected"]
+    # Image-level review was removed; every stored image is published and can be selected as cover.
+    visible_images = image_rows
     image_payloads = [collaboration_image_payload(image) for image in visible_images]
     available_images = [image for image in image_payloads if image["available"]]
     cover = next((image for image in visible_images if image["id"] == row["cover_image_id"]), None)
-    if not cover or (not admin and cover["review_status"] == "rejected"):
+    if not cover:
         cover = visible_images[0] if visible_images else None
     cover_url = collaboration_image_url(cover) if cover else ""
     thumbnail_url = collaboration_image_url(cover, thumbnail=True) if cover else ""
@@ -3961,6 +3963,8 @@ def collaboration_item_payload(conn: sqlite3.Connection, row: sqlite3.Row, detai
         "date": str(row["date"] or ""),
         "date_kind": str(row["date_kind"] or "first_seen"),
         "partners": text_list(row["partners_json"]),
+        "tags": collaboration_tags(row["tags_json"]),
+        "periods": normalize_collaboration_periods(row["periods_json"]),
         "credit": str(row["credit"] or ""),
         "note": str(row["note"] or ""),
         "links": normalize_links(row["links_json"]),
@@ -3986,8 +3990,16 @@ def collaboration_source_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
-def collaboration_list_payload(conn: sqlite3.Connection, q: str = "", year: str = "", page: int = 1, page_size: int = 24, admin: bool = False) -> dict[str, Any]:
-    rows = collaboration_rows(conn, q, year)
+def collaboration_list_payload(
+    conn: sqlite3.Connection,
+    q: str = "",
+    year: str = "",
+    page: int = 1,
+    page_size: int = 24,
+    admin: bool = False,
+    tags: Any = "",
+) -> dict[str, Any]:
+    rows = collaboration_rows(conn, q, year, tags)
     page_size = max(1, min(60, page_size))
     pages = max(1, (len(rows) + page_size - 1) // page_size)
     page = min(max(1, page), pages)
@@ -4004,11 +4016,18 @@ def collaboration_list_payload(conn: sqlite3.Connection, q: str = "", year: str 
     }
 
 
-def collaboration_detail_payload(conn: sqlite3.Connection, identifier: str, q: str = "", year: str = "", admin: bool = False) -> dict[str, Any]:
+def collaboration_detail_payload(
+    conn: sqlite3.Connection,
+    identifier: str,
+    q: str = "",
+    year: str = "",
+    admin: bool = False,
+    tags: Any = "",
+) -> dict[str, Any]:
     row = find_collaboration(conn, identifier, admin=admin)
     if not row:
         raise HTTPException(404, "联动记录不存在")
-    rows = collaboration_rows(conn, q, year)
+    rows = collaboration_rows(conn, q, year, tags)
     index = next((index for index, candidate in enumerate(rows) if candidate["id"] == row["id"]), -1)
     previous = collaboration_item_payload(conn, rows[index - 1]) if index > 0 else None
     following = collaboration_item_payload(conn, rows[index + 1]) if index >= 0 and index + 1 < len(rows) else None
@@ -4029,9 +4048,9 @@ def serve_collaboration_asset(asset_path: str) -> FileResponse:
 
 
 @app.get("/api/collabo")
-async def api_collabo(q: str = "", year: str = "", page: int = 1, page_size: int = 24) -> dict[str, Any]:
+async def api_collabo(q: str = "", year: str = "", tags: str = "", page: int = 1, page_size: int = 24) -> dict[str, Any]:
     with db() as conn:
-        return collaboration_list_payload(conn, q, year, page, page_size)
+        return collaboration_list_payload(conn, q, year, page, page_size, tags=tags)
 
 
 @app.get("/api/collabo/assets/{asset_path:path}", include_in_schema=False)
@@ -4040,9 +4059,9 @@ async def collabo_asset(asset_path: str):
 
 
 @app.get("/api/collabo/{identifier}")
-async def api_collabo_detail(identifier: str, q: str = "", year: str = "") -> dict[str, Any]:
+async def api_collabo_detail(identifier: str, q: str = "", year: str = "", tags: str = "") -> dict[str, Any]:
     with db() as conn:
-        return collaboration_detail_payload(conn, identifier, q, year)
+        return collaboration_detail_payload(conn, identifier, q, year, tags=tags)
 
 
 @app.get("/api/collaboration-illustrations")
@@ -4807,10 +4826,10 @@ async def api_admin_news_edit(news_id: str, request: Request) -> dict[str, Any]:
 
 
 @app.get("/api/admin/collabo")
-async def api_admin_collabo(request: Request, q: str = "", year: str = "", page: int = 1, page_size: int = 24) -> dict[str, Any]:
+async def api_admin_collabo(request: Request, q: str = "", year: str = "", tags: str = "", page: int = 1, page_size: int = 24) -> dict[str, Any]:
     require_api_admin(request)
     with db() as conn:
-        return collaboration_list_payload(conn, q, year, page, page_size, admin=True)
+        return collaboration_list_payload(conn, q, year, page, page_size, admin=True, tags=tags)
 
 
 @app.post("/api/admin/collabo/assets")
@@ -4910,17 +4929,16 @@ async def api_admin_collabo_upload(request: Request) -> dict[str, list[dict[str,
             "kind": "manual",
             "score": 0,
             "context": "",
-            "review_status": "pending",
             "available": True,
         })
     return {"images": images}
 
 
 @app.get("/api/admin/collabo/{identifier}")
-async def api_admin_collabo_detail(identifier: str, request: Request, q: str = "", year: str = "") -> dict[str, Any]:
+async def api_admin_collabo_detail(identifier: str, request: Request, q: str = "", year: str = "", tags: str = "") -> dict[str, Any]:
     require_api_admin(request)
     with db() as conn:
-        return collaboration_detail_payload(conn, identifier, q, year, admin=True)
+        return collaboration_detail_payload(conn, identifier, q, year, admin=True, tags=tags)
 
 
 @app.post("/api/admin/collabo")

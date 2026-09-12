@@ -21,22 +21,22 @@ const archiveChoices = [
     action: "进入节目档案",
   },
   {
+    path: "/collabo",
+    theme: "illustration",
+    index: "03",
+    eyebrow: "COLLABORATION ILLUSTRATIONS",
+    title: "联动立绘",
+    description: "按年份浏览官方联动记录，查看本地整理的立绘与来源页面。",
+    action: "浏览联动立绘",
+  },
+  {
     path: "/news",
     theme: "news",
-    index: "03",
+    index: "04",
     eyebrow: "NEWS ARCHIVE",
     title: "官网新闻",
     description: "整理虹咲官方 Topics、News 与历史公告。",
     action: "进入官网新闻",
-  },
-  {
-    path: "/collabo",
-    theme: "illustration",
-    index: "04",
-    eyebrow: "COLLABORATION ILLUSTRATIONS",
-    title: "联动立绘档案",
-    description: "按年份浏览官方联动记录，查看本地整理的立绘与来源页面。",
-    action: "浏览联动立绘",
   },
 ];
 </script>

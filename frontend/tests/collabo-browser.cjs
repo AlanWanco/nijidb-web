@@ -119,10 +119,18 @@ async function swipe(page, selector, dx, dy = 2) {
     const filterAlignment = await page.evaluate(() => {
       const year = document.querySelector(".cb-year-filter").getBoundingClientRect();
       const characters = document.querySelector(".cb-character-filter").getBoundingClientRect();
-      return { left: Math.abs(year.left - characters.left), width: Math.abs(year.width - characters.width) };
+      const chip = document.querySelector(".cb-character-chip").getBoundingClientRect();
+      return {
+        left: Math.abs(year.left - characters.left),
+        width: Math.abs(year.width - characters.width),
+        topGap: chip.top - characters.top,
+        bottomGap: characters.bottom - chip.bottom,
+      };
     });
     assert.ok(filterAlignment.left < 1, "character filter left edge is centered with year filter");
     assert.ok(filterAlignment.width < 1, "character filter width matches year filter");
+    assert.ok(filterAlignment.topGap >= 8, "character chips are separated from the upper divider");
+    assert.ok(filterAlignment.bottomGap >= 8, "character chips are separated from the lower divider");
     assert.equal(
       await page
         .getByRole("button", { name: "高咲侑", exact: true })

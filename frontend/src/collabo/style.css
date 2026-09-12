@@ -537,12 +537,13 @@
   gap: 18px;
   margin: -30px 0 30px;
   border-bottom: 1px solid var(--line);
-  padding: 0 0 14px;
+  padding: 14px 0;
 }
 .cb-character-options,
 .cb-character-picker {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
 }
 .cb-character-chip {

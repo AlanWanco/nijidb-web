@@ -7016,7 +7016,7 @@ html[data-theme="mocha"] .dp__theme_dark {
   font-family: var(--hero-title-font);
   font-size: clamp(48px, 7.2vw, 92px);
   font-weight: 800;
-  letter-spacing: -.08em;
+  letter-spacing: -.04em;
   line-height: .98;
   text-wrap: balance;
 }

@@ -175,7 +175,7 @@
   margin: 0 0 21px;
   color: var(--ink);
   font: 800 clamp(48px, 7.2vw, 92px) / 0.98 var(--hero-title-font);
-  letter-spacing: -0.08em;
+  letter-spacing: -0.04em;
   text-wrap: balance;
 }
 .cb-title-mark {

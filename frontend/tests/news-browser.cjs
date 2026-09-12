@@ -67,18 +67,20 @@ async function setup(context) {
     if (p.startsWith("/api/news/images/"))
       return route.fulfill({ contentType: "image/png", body: png });
     if (p === "/api/auth/session") return json({ authenticated: true });
-    if (p === "/api/news")
+    if (p === "/api/news") {
+      const requestedPage = Math.max(1, Number(u.searchParams.get("page")) || 1);
       return json({
         items: [{ ...article, image_count: 2 }],
-        total: 1,
-        pages: 1,
-        page: 1,
+        total: 48,
+        pages: 2,
+        page: Math.min(requestedPage, 2),
         tag_options: [{ name: "goods", count: 1 }],
         source_options: [
           { name: "official_site", label: "Official Site News", count: 1 },
           { name: "as_news", label: "AS News", count: 0 },
         ],
       });
+    }
     if (p.startsWith("/api/news/")) {
       const id = p.split("/").pop();
       return json({
@@ -187,6 +189,14 @@ async function swipe(page, dx) {
     const page = await context.newPage();
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
+    await page.goto(base + "/news?source=official_site");
+    await page.getByRole("button", { name: "Official Site News 1" }).waitFor();
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight - innerHeight));
+    await page.getByRole("button", { name: /下一页/ }).click();
+    await page.waitForURL(/page=2/);
+    await page.locator(".news-card-index").waitFor();
+    assert.equal(await page.locator(".news-card-index").first().innerText(), "025");
+    assert.ok((await page.evaluate(() => window.scrollY)) < 100, "reset news pagination scroll");
     await page.goto(base + "/news?source=official_site");
     await page.getByRole("button", { name: "Official Site News 1" }).waitFor();
     assert.deepEqual(

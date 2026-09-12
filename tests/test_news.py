@@ -312,6 +312,39 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(image["public_url"].startswith("https://images.example.test/images/illustrations/"))
         upload.assert_called_once()
 
+    async def test_collabo_delete_requires_admin_and_removes_record(self):
+        self.assertEqual((await self.client.delete("/api/admin/collabo/missing")).status_code, 401)
+        self.login()
+        created = await self.client.post(
+            "/api/admin/collabo",
+            json={"title": "待删除联动", "date": "2026-09-11", "images": []},
+        )
+        self.assertEqual(created.status_code, 200)
+        item = created.json()["item"]
+        deleted = await self.client.delete(f"/api/admin/collabo/{item['id']}")
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.json()["message"], "联动已删除")
+        self.assertEqual((await self.client.get(f"/api/collabo/{item['slug']}")).status_code, 404)
+        with main.db() as conn:
+            self.assertIsNone(conn.execute("SELECT 1 FROM collaboration_items WHERE id = ?", (item["id"],)).fetchone())
+
+    async def test_collabo_combination_filter_uses_defined_sets(self):
+        self.login()
+        movie1 = ["ayumu", "shizuku", "kanata", "emma", "lanzhu", "kasumi"]
+        movie2 = ["ai", "rina", "setsuna", "shioriko", "mia", "karin"]
+        for title, tags in (("第一章", movie1), ("第二章", movie2), ("其他", ["ayumu", "ai"])):
+            response = await self.client.post(
+                "/api/admin/collabo",
+                json={"title": title, "date": "2026-09-11", "tags": tags, "images": []},
+            )
+            self.assertEqual(response.status_code, 200)
+        first = (await self.client.get("/api/collabo?group=movie1")).json()
+        second = (await self.client.get("/api/collabo?group=movie2")).json()
+        self.assertEqual(first["total"], 1)
+        self.assertEqual(first["items"][0]["title"], "第一章")
+        self.assertEqual(second["total"], 1)
+        self.assertEqual(second["items"][0]["title"], "第二章")
+
     async def test_refresh_auth_failure_and_manual_edit(self):
         endpoint = f"/api/admin/news/{record()['id']}"
         self.assertEqual((await self.client.post(endpoint + "/refresh")).status_code, 401)
@@ -395,13 +428,28 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(304)
             return httpx.Response(200, text=HTML, headers={"etag": "v1"})
 
-        with patch.object(main, "fetch_news_page", fetch):
+        bot_config = {
+            "onebot_url": "https://bot.example.test",
+            "onebot_token": "",
+            "onebot_target": "123",
+            "onebot_profile": "bot",
+        }
+        with (
+            patch.object(main, "fetch_news_page", fetch),
+            patch.object(main, "settings", return_value=bot_config),
+            patch.object(main, "send_onebot", new_callable=AsyncMock) as send,
+        ):
             first = await main.news_sync_once()
             second = await main.news_sync_once()
         self.assertEqual(first["changed_count"], 1)
         self.assertEqual(second["changed_count"], 0)
         self.assertTrue(any(headers and headers.get("If-None-Match") == "v1" for _, headers in requests))
         self.assertTrue(all("news.php" not in url for url, _ in requests))
+        send.assert_awaited_once()
+        message = send.await_args.args[0]
+        self.assertIn("[官网新闻更新]", message)
+        self.assertIn("同じタイトル", message)
+        self.assertIn(URL, message)
 
     async def test_slow_refresh_uses_official_images_and_removes_archive_refs(self):
         article_id = news_id("niji_topics", "01_123")

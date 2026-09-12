@@ -1,4 +1,10 @@
-import { COLLABO_CHARACTER_TAG_IDS, characterTag, normalizeCharacterTags } from "./characters.js";
+import {
+  COLLABO_CHARACTER_TAG_IDS,
+  automaticCombinationGroupIds,
+  characterTag,
+  combinationGroupMatches,
+  normalizeCharacterTags,
+} from "./characters.js";
 
 export const PAGE_SIZE = 24;
 export const SLUG_PATTERN = /^\d{8}-[a-f0-9]{6}$/;
@@ -108,13 +114,14 @@ export function yearValues(value) {
   ];
 }
 
-export function filterItems(items, { q = "", year = "", tags = [] } = {}) {
+export function filterItems(items, { q = "", year = "", tags = [], group = "" } = {}) {
   const keyword = String(q || "").trim().toLocaleLowerCase();
   const years = yearValues(year);
   const normalizedTags = normalizeCharacterTags(tags);
   const selectedTags = normalizedTags.length === COLLABO_CHARACTER_TAG_IDS.length ? [] : normalizedTags;
   return items
     .filter((item) => {
+      if (group && !combinationGroupMatches(item.tags ?? item.character_tags ?? [], group)) return false;
       const itemTags = normalizeCharacterTags(item.tags ?? item.character_tags ?? []);
       const periods = normalizePeriods(item.periods ?? item.time_periods ?? []);
       const tagSearch = itemTags.flatMap((tag) => {
@@ -134,6 +141,10 @@ export function filterItems(items, { q = "", year = "", tags = [] } = {}) {
       );
     })
     .sort((a, b) => b.date.localeCompare(a.date) || a.id.localeCompare(b.id));
+}
+
+export function cardCombinationTagIds(value) {
+  return automaticCombinationGroupIds(value);
 }
 
 export function pageNumber(value) {

@@ -2,7 +2,13 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { onBeforeRouteLeave, onBeforeRouteUpdate, RouterLink, useRoute, useRouter } from "vue-router";
 import CollaboImage from "../components/CollaboImage.vue";
-import { getCollaboration, listCollaborations, saveCollaboration, uploadCollaborationImages } from "../collabo/api";
+import {
+  deleteCollaboration,
+  getCollaboration,
+  listCollaborations,
+  saveCollaboration,
+  uploadCollaborationImages,
+} from "../collabo/api";
 import {
   COLLABO_CHARACTER_TAG_IDS,
   COLLABO_CHARACTER_TAGS,
@@ -20,6 +26,7 @@ const form = ref(null);
 const baseline = ref("");
 const loading = ref(true);
 const saving = ref(false);
+const deleting = ref(false);
 const uploading = ref(false);
 const error = ref("");
 const message = ref("");
@@ -95,8 +102,8 @@ async function load() {
 function confirmLeave() {
   return !dirty.value || window.confirm(c("还有未保存的修改，确定离开？"));
 }
-onBeforeRouteLeave(() => !uploading.value && !saving.value && confirmLeave());
-onBeforeRouteUpdate((to) => to.params.id === route.params.id || (!uploading.value && !saving.value && confirmLeave()));
+onBeforeRouteLeave(() => deleting.value || (!uploading.value && !saving.value && confirmLeave()));
+onBeforeRouteUpdate((to) => to.params.id === route.params.id || deleting.value || (!uploading.value && !saving.value && confirmLeave()));
 function beforeUnload(event) {
   if (dirty.value) {
     event.preventDefault();
@@ -191,7 +198,7 @@ function validForm() {
   return true;
 }
 async function save(next = false) {
-  if (!writable.value || saving.value || uploading.value || !validForm()) return;
+  if (!writable.value || saving.value || deleting.value || uploading.value || !validForm()) return;
   const followingId = data.value?.following?.id;
   saving.value = true;
   error.value = "";
@@ -210,6 +217,23 @@ async function save(next = false) {
     error.value = err.message;
   } finally {
     saving.value = false;
+  }
+}
+async function deleteItem() {
+  if (!writable.value || !editing.value || saving.value || deleting.value || uploading.value) return;
+  const title = String(form.value?.title || "").trim() || c("该联动");
+  if (!window.confirm(c("第一次确认：确定删除「{title}」吗？", { title }))) return;
+  if (!window.confirm(c("第二次确认：删除「{title}」不可恢复，继续删除吗？", { title }))) return;
+  deleting.value = true;
+  error.value = "";
+  message.value = "";
+  try {
+    await deleteCollaboration(route.params.id);
+    await router.replace("/admin/collabo");
+  } catch (err) {
+    error.value = err.message;
+  } finally {
+    deleting.value = false;
   }
 }
 function exportDraft() {
@@ -270,7 +294,7 @@ async function upload(event) {
     </div>
     <p v-if="loading" class="cb-state" aria-busy="true">{{ c("读取中……") }}</p>
     <template v-else-if="!editing">
-      <form class="cb-toolbar" @submit.prevent="search">
+      <form class="cb-toolbar cb-admin-search-toolbar" @submit.prevent="search">
         <input
           v-model="keyword"
           type="search"
@@ -297,7 +321,7 @@ async function upload(event) {
       </nav>
     </template>
     <form v-else-if="form" class="cb-editor" @submit.prevent="save(false)">
-      <fieldset class="cb-editor-fields" :disabled="saving || uploading">
+      <fieldset class="cb-editor-fields" :disabled="saving || deleting || uploading">
         <div class="cb-edit-section">
           <h2>01 / {{ c("资料与备注") }}</h2>
           <label>{{ c("标题") }}<input v-model="form.title" required maxlength="500" /></label>
@@ -396,7 +420,7 @@ async function upload(event) {
           </button>
         </div>
       </fieldset>
-      <fieldset class="cb-editor-assets" :disabled="saving || uploading">
+      <fieldset class="cb-editor-assets" :disabled="saving || deleting || uploading">
         <div class="cb-edit-section">
           <h2>
             04 / {{ c("图片画廊") }} <small>{{ form.images.length }}</small>
@@ -462,9 +486,16 @@ async function upload(event) {
         <span role="status">{{
           uploading ? c("正在上传……") : saving ? c("保存中……") : message || (dirty ? "●" : "")
         }}</span
+        ><button
+          v-if="editing && writable"
+          type="button"
+          class="cb-quiet cb-collabo-delete"
+          :disabled="saving || deleting || uploading"
+          @click="deleteItem"
+        >{{ deleting ? c("删除中……") : c("删除联动") }}</button
         ><button type="button" class="cb-quiet" @click="exportDraft">{{ c("导出草稿 JSON") }}</button
-        ><button type="submit" :disabled="!writable || saving || uploading">{{ c("保存到数据库") }}</button
-        ><button v-if="data.following" type="button" :disabled="!writable || saving || uploading" @click="save(true)">
+        ><button type="submit" :disabled="!writable || saving || deleting || uploading">{{ c("保存到数据库") }}</button
+        ><button v-if="data.following" type="button" :disabled="!writable || saving || deleting || uploading" @click="save(true)">
           {{ c("保存并审核下一条") }} →
         </button>
       </div>

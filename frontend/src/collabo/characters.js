@@ -80,6 +80,30 @@ export const COLLABO_CHARACTER_TAGS = [
 ];
 
 export const COLLABO_CHARACTER_TAG_IDS = COLLABO_CHARACTER_TAGS.map((tag) => tag.id);
+export const COLLABO_IDOL_TAG_IDS = COLLABO_CHARACTER_TAG_IDS.filter((id) => id !== "yu");
+
+export const COLLABO_COMBINATION_GROUPS = [
+  { id: "idol12", label: "偶像12人", members: COLLABO_IDOL_TAG_IDS },
+  { id: "grade1", label: "一年级", members: ["kasumi", "shizuku", "rina", "shioriko"] },
+  { id: "grade2", label: "二年级", members: ["ayumu", "ai", "setsuna", "lanzhu"] },
+  { id: "grade3", label: "三年级", members: ["karin", "kanata", "emma", "mia"] },
+  {
+    id: "movie1",
+    label: "剧场版第一章组",
+    members: ["ayumu", "shizuku", "kanata", "emma", "lanzhu"],
+    optionalMembers: ["kasumi", "yu"],
+  },
+  {
+    id: "movie2",
+    label: "剧场版第二章组",
+    members: ["ai", "rina", "setsuna", "shioriko", "mia"],
+    optionalMembers: ["karin"],
+  },
+  { id: "azuna", label: "AZUNA", members: ["ayumu", "shizuku", "setsuna"] },
+  { id: "diverdiva", label: "DiverDiva", members: ["karin", "ai"] },
+  { id: "r3birth", label: "r3birth", members: ["shioriko", "mia", "lanzhu"] },
+  { id: "qu4rtz", label: "QU4RTZ", members: ["kasumi", "kanata", "emma", "rina"] },
+];
 
 const characterTagMap = new Map(
   COLLABO_CHARACTER_TAGS.flatMap((tag) =>
@@ -106,6 +130,37 @@ export function normalizeCharacterTags(value) {
     if (id) selected.add(id);
   }
   return COLLABO_CHARACTER_TAG_IDS.filter((id) => selected.has(id));
+}
+
+export function combinationGroup(id) {
+  const value = String(id || "").trim().toLocaleLowerCase();
+  return COLLABO_COMBINATION_GROUPS.find((group) => group.id === value) || null;
+}
+
+export function combinationGroupMatches(value, groupOrId) {
+  const group = typeof groupOrId === "string" ? combinationGroup(groupOrId) : groupOrId;
+  if (!group) return false;
+  const selected = new Set(normalizeCharacterTags(value));
+  const required = new Set(group.members);
+  const allowed = new Set([...group.members, ...(group.optionalMembers || [])]);
+  return (
+    selected.size >= required.size &&
+    [...required].every((id) => selected.has(id)) &&
+    [...selected].every((id) => allowed.has(id))
+  );
+}
+
+export function automaticCombinationGroupIds(value) {
+  const selected = new Set(normalizeCharacterTags(value));
+  if (
+    selected.size === COLLABO_CHARACTER_TAG_IDS.length &&
+    COLLABO_CHARACTER_TAG_IDS.every((id) => selected.has(id))
+  ) {
+    return ["all"];
+  }
+  return COLLABO_COMBINATION_GROUPS.filter((group) => combinationGroupMatches([...selected], group)).map(
+    (group) => group.id,
+  );
 }
 
 export function characterTag(id) {

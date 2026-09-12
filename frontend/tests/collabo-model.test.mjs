@@ -10,7 +10,12 @@ import {
   yearValues,
 } from "../src/collabo/model.js";
 import { swipeDirection } from "../src/composables/useDetailNavigation.js";
-import { COLLABO_CHARACTER_TAG_IDS, normalizeCharacterTags } from "../src/collabo/characters.js";
+import {
+  COLLABO_CHARACTER_TAG_IDS,
+  automaticCombinationGroupIds,
+  combinationGroupMatches,
+  normalizeCharacterTags,
+} from "../src/collabo/characters.js";
 
 test("source and image URLs reject active schemes and credentials", () => {
   for (const url of [
@@ -64,6 +69,30 @@ test("periods and character tags survive item normalization and filtering", () =
   assert.equal(item.periods[0].title, "First");
   assert.deepEqual(filterItems([item], { tags: ["ayumu"] }).map((entry) => entry.id), ["tagged"]);
   assert.deepEqual(filterItems([item], { tags: ["kasumi"] }), []);
+});
+
+test("combination groups match full, movie, grade, and unit sets", () => {
+  const all = [...COLLABO_CHARACTER_TAG_IDS];
+  const idols = all.filter((id) => id !== "yu");
+  const movie1 = ["ayumu", "shizuku", "kanata", "emma", "lanzhu"];
+  const movie2 = ["ai", "rina", "setsuna", "shioriko", "mia"];
+  assert.deepEqual(automaticCombinationGroupIds(all), ["all"]);
+  assert.deepEqual(automaticCombinationGroupIds(idols), ["idol12"]);
+  assert.ok(combinationGroupMatches(movie1, "movie1"));
+  assert.ok(combinationGroupMatches([...movie1, "kasumi"], "movie1"));
+  assert.ok(combinationGroupMatches([...movie1, "yu"], "movie1"));
+  assert.ok(combinationGroupMatches([...movie1, "kasumi", "yu"], "movie1"));
+  assert.ok(!combinationGroupMatches([...movie1, "ai"], "movie1"));
+  assert.ok(combinationGroupMatches(movie2, "movie2"));
+  assert.ok(combinationGroupMatches([...movie2, "karin"], "movie2"));
+  assert.ok(!combinationGroupMatches([...movie2, "emma"], "movie2"));
+  assert.ok(combinationGroupMatches(["kasumi", "shizuku", "rina", "shioriko"], "grade1"));
+  assert.ok(combinationGroupMatches(["ayumu", "ai", "setsuna", "lanzhu"], "grade2"));
+  assert.ok(combinationGroupMatches(["karin", "kanata", "emma", "mia"], "grade3"));
+  assert.deepEqual(automaticCombinationGroupIds(["ayumu", "shizuku", "setsuna"]), ["azuna"]);
+  assert.deepEqual(automaticCombinationGroupIds(["karin", "ai"]), ["diverdiva"]);
+  assert.deepEqual(automaticCombinationGroupIds(["shioriko", "mia", "lanzhu"]), ["r3birth"]);
+  assert.deepEqual(automaticCombinationGroupIds(["kasumi", "kanata", "emma", "rina"]), ["qu4rtz"]);
 });
 
 test("legacy rejected flags no longer hide a cover or gallery image", () => {

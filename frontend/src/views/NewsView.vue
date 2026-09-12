@@ -34,6 +34,7 @@ const loading = ref(true);
 const error = ref("");
 let requestId = 0;
 let pendingTagScrollY = null;
+let pendingPageScroll = false;
 const heroRef = ref(null);
 const heroScrollStyle = ref({
   "--news-hero-copy-opacity": "1",
@@ -310,6 +311,7 @@ function makeQuery(next = {}) {
 }
 
 function submitSearch() {
+  pendingPageScroll = false;
   router.push({
     path: "/news",
     query: makeQuery({ q: query.value.trim(), page: 1 }),
@@ -317,6 +319,7 @@ function submitSearch() {
 }
 
 function toggleTag(tag) {
+  pendingPageScroll = false;
   pendingTagScrollY = window.scrollY;
   const token = tagToken(tag);
   const next = activeTags.value.filter(
@@ -330,6 +333,7 @@ function toggleTag(tag) {
 }
 
 function setSource(source) {
+  pendingPageScroll = false;
   router.push({
     path: "/news",
     query: makeQuery({
@@ -341,11 +345,14 @@ function setSource(source) {
 
 function clearFilters() {
   query.value = "";
+  pendingPageScroll = false;
   router.push({ path: "/news" });
 }
 
 function goToPage(nextPage) {
   if (nextPage < 1 || nextPage > pages.value || nextPage === page.value) return;
+  pendingTagScrollY = null;
+  pendingPageScroll = true;
   router.push({ path: "/news", query: makeQuery({ page: nextPage }) });
 }
 
@@ -358,6 +365,7 @@ function detailTo(item) {
 async function loadNews() {
   const id = ++requestId;
   const restoreTagScrollY = pendingTagScrollY;
+  const resetPageScroll = pendingPageScroll;
   // Keep the current result in place while a tag filter is loading, so the viewport does not jump to a skeleton.
   if (restoreTagScrollY === null) loading.value = true;
   error.value = "";
@@ -387,7 +395,15 @@ async function loadNews() {
   } finally {
     if (id === requestId) {
       loading.value = false;
-      if (restoreTagScrollY !== null) {
+      if (resetPageScroll) {
+        await nextTick();
+        const reset = () => {
+          if (id === requestId) window.scrollTo({ left: 0, top: 0, behavior: "auto" });
+        };
+        reset();
+        requestAnimationFrame(reset);
+        pendingPageScroll = false;
+      } else if (restoreTagScrollY !== null) {
         await nextTick();
         const restore = () => {
           if (id === requestId) window.scrollTo({ left: 0, top: restoreTagScrollY, behavior: "auto" });

@@ -1,5 +1,9 @@
 import { api } from "../api";
-import { COLLABO_CHARACTER_TAG_IDS, normalizeCharacterTags } from "./characters.js";
+import {
+  COLLABO_CHARACTER_TAG_IDS,
+  combinationGroup,
+  normalizeCharacterTags,
+} from "./characters.js";
 import { filterItems, normalizeItem, PAGE_SIZE, pageNumber } from "./model";
 
 // The database API is the primary source. A missing endpoint alone falls back to
@@ -37,6 +41,10 @@ function characterTagQuery(tags) {
   return normalized.length === COLLABO_CHARACTER_TAG_IDS.length ? "" : normalized.join(",");
 }
 
+function combinationGroupQuery(group) {
+  return combinationGroup(group)?.id || "";
+}
+
 async function optionalApi(path, options) {
   try {
     const result = await api(path, options);
@@ -50,11 +58,12 @@ async function optionalApi(path, options) {
   }
 }
 
-export async function listCollaborations({ q = "", year = "", tags = [], page = 1, admin = false } = {}) {
+export async function listCollaborations({ q = "", year = "", tags = [], group = "", page = 1, admin = false } = {}) {
   const params = new URLSearchParams({
     q,
     year,
     tags: characterTagQuery(tags),
+    group: combinationGroupQuery(group),
     page: String(pageNumber(page)),
     page_size: String(PAGE_SIZE),
   });
@@ -66,7 +75,7 @@ export async function listCollaborations({ q = "", year = "", tags = [], page = 
     return { ...payload, items, mode: "database" };
   }
   const catalog = await previewCatalog();
-  const items = filterItems(catalog.items, { q, year, tags });
+  const items = filterItems(catalog.items, { q, year, tags, group });
   const offset = (pageNumber(page) - 1) * PAGE_SIZE;
   return {
     items: items.slice(offset, offset + PAGE_SIZE),
@@ -77,9 +86,9 @@ export async function listCollaborations({ q = "", year = "", tags = [], page = 
   };
 }
 
-export async function getCollaboration(slugOrId, { admin = false, q = "", year = "", tags = [] } = {}) {
+export async function getCollaboration(slugOrId, { admin = false, q = "", year = "", tags = [], group = "" } = {}) {
   const prefix = admin ? "/api/admin/collabo" : "/api/collabo";
-  const params = new URLSearchParams({ q, year, tags: characterTagQuery(tags) });
+  const params = new URLSearchParams({ q, year, tags: characterTagQuery(tags), group: combinationGroupQuery(group) });
   const payload = await optionalApi(`${prefix}/${encodeURIComponent(slugOrId)}?${params}`);
   if (payload) {
     if (!payload.item) throw new Error("联动接口缺少 item 字段");
@@ -93,7 +102,7 @@ export async function getCollaboration(slugOrId, { admin = false, q = "", year =
   const catalog = await previewCatalog();
   const item = catalog.items.find((entry) => (admin ? entry.id : entry.slug) === slugOrId);
   if (!item) throw Object.assign(new Error("联动记录不存在"), { status: 404 });
-  const ordered = filterItems(catalog.items, { q, year, tags });
+  const ordered = filterItems(catalog.items, { q, year, tags, group });
   const position = ordered.findIndex((entry) => entry.id === item.id);
   const summary = (entry) => (entry ? { id: entry.id, slug: entry.slug, title: entry.title } : null);
   return {
@@ -112,6 +121,10 @@ export async function saveCollaboration(item) {
   });
   if (!payload?.item?.id) throw new Error("保存接口未返回有效记录，未确认保存成功");
   return normalizeItem(payload.item);
+}
+
+export async function deleteCollaboration(identifier) {
+  return api(`/api/admin/collabo/${encodeURIComponent(identifier)}`, { method: "DELETE" });
 }
 
 export async function uploadCollaborationImages(files) {

@@ -6,10 +6,12 @@ import { listCollaborations } from "../collabo/api";
 import {
   COLLABO_CHARACTER_TAG_IDS,
   COLLABO_CHARACTER_TAGS,
+  COLLABO_COMBINATION_GROUPS,
   characterLabel,
+  combinationGroup,
   normalizeCharacterTags,
 } from "../collabo/characters.js";
-import { coverUrl, dateLabel, PAGE_SIZE, pageNumber, safeUrl, yearValues } from "../collabo/model";
+import { cardCombinationTagIds, coverUrl, dateLabel, PAGE_SIZE, pageNumber, safeUrl, yearValues } from "../collabo/model";
 import { c } from "../collabo/text";
 import { localeTag } from "../i18n";
 import "../collabo/style.css";
@@ -57,7 +59,9 @@ function resetHeroPointer() {
 const q = computed(() => (typeof route.query.q === "string" ? route.query.q : ""));
 const selectedYears = computed(() => yearValues(route.query.year));
 const yearQuery = computed(() => selectedYears.value.join(","));
-const selectedCharacterTags = computed(() => normalizeCharacterTags(route.query.tags));
+const selectedCombinationGroup = computed(() => combinationGroup(route.query.group));
+const groupQuery = computed(() => selectedCombinationGroup.value?.id || "");
+const selectedCharacterTags = computed(() => (groupQuery.value ? [] : normalizeCharacterTags(route.query.tags)));
 const allCharactersSelected = computed(
   () => !selectedCharacterTags.value.length || selectedCharacterTags.value.length === COLLABO_CHARACTER_TAG_IDS.length,
 );
@@ -70,6 +74,7 @@ function queryFor(nextPage = 1) {
     ...(q.value ? { q: q.value } : {}),
     ...(yearQuery.value ? { year: yearQuery.value } : {}),
     ...(characterTagQuery.value ? { tags: characterTagQuery.value } : {}),
+    ...(groupQuery.value ? { group: groupQuery.value } : {}),
     ...(nextPage > 1 ? { page: nextPage } : {}),
   };
 }
@@ -80,6 +85,7 @@ function searchItems() {
       ...(search.value.trim() ? { q: search.value.trim() } : {}),
       ...(yearQuery.value ? { year: yearQuery.value } : {}),
       ...(characterTagQuery.value ? { tags: characterTagQuery.value } : {}),
+      ...(groupQuery.value ? { group: groupQuery.value } : {}),
     },
   });
 }
@@ -123,8 +129,33 @@ function toggleYear(value) {
       ...(q.value ? { q: q.value } : {}),
       ...(years.length ? { year: years.join(",") } : {}),
       ...(characterTagQuery.value ? { tags: characterTagQuery.value } : {}),
+      ...(groupQuery.value ? { group: groupQuery.value } : {}),
     },
   });
+}
+function toggleCombinationGroup(id) {
+  const next = id && groupQuery.value !== id ? id : "";
+  router.push({
+    path: "/collabo",
+    query: {
+      ...(q.value ? { q: q.value } : {}),
+      ...(yearQuery.value ? { year: yearQuery.value } : {}),
+      ...(next ? { group: next } : {}),
+    },
+  });
+}
+function cardTags(item) {
+  const combinationIds = cardCombinationTagIds(item.tags || []);
+  const compact = combinationIds.includes("all") || combinationIds.includes("idol12");
+  const characterTags = compact
+    ? []
+    : (item.tags || []).map((id) => ({ key: `character-${id}`, label: characterLabel(id, localeTag()), kind: "character" }));
+  const combinationTags = combinationIds.map((id) => ({
+    key: `combination-${id}`,
+    label: id === "all" ? c("全员") : c(combinationGroup(id)?.label || id),
+    kind: "combination",
+  }));
+  return [...combinationTags, ...characterTags];
 }
 async function load() {
   const id = ++requestId;
@@ -136,6 +167,7 @@ async function load() {
       q: q.value,
       year: yearQuery.value,
       tags: characterTagQuery.value,
+      group: groupQuery.value,
       page: page.value,
     });
     if (id === requestId) {
@@ -149,7 +181,7 @@ async function load() {
     if (id === requestId) loading.value = false;
   }
 }
-watch(() => [q.value, yearQuery.value, characterTagQuery.value, page.value], load, { immediate: true });
+watch(() => [q.value, yearQuery.value, characterTagQuery.value, groupQuery.value, page.value], load, { immediate: true });
 onBeforeUnmount(() => {
   requestId += 1;
 });
@@ -266,6 +298,34 @@ onBeforeUnmount(() => {
         </button>
       </div>
     </section>
+    <section class="cb-combination-filter" :aria-label="c('组合筛选')">
+      <div class="cb-year-filter-heading">
+        <span>COMBINATION / FILTER</span>
+        <strong>{{ selectedCombinationGroup ? c(selectedCombinationGroup.label) : c("全部组合") }}</strong>
+      </div>
+      <div class="cb-combination-options" role="group" :aria-label="c('组合筛选')">
+        <button
+          type="button"
+          class="cb-character-chip cb-combination-chip"
+          :class="{ selected: !selectedCombinationGroup }"
+          :aria-pressed="!selectedCombinationGroup"
+          @click="toggleCombinationGroup('')"
+        >
+          <b>ALL</b>{{ c("全部组合") }}
+        </button>
+        <button
+          v-for="group in COLLABO_COMBINATION_GROUPS"
+          :key="group.id"
+          type="button"
+          class="cb-character-chip cb-combination-chip"
+          :class="{ selected: selectedCombinationGroup?.id === group.id }"
+          :aria-pressed="selectedCombinationGroup?.id === group.id"
+          @click="toggleCombinationGroup(group.id)"
+        >
+          {{ c(group.label) }}
+        </button>
+      </div>
+    </section>
     <div class="cb-index-heading">
       <span
         >{{ c("联动一览") }} <b>{{ String(data?.total || 0).padStart(3, "0") }}</b></span
@@ -300,8 +360,13 @@ onBeforeUnmount(() => {
           </div>
           <h2>{{ item.title }}</h2>
           <p>{{ item.partners.join(" · ") }}</p>
-          <div v-if="item.tags.length" class="cb-card-tags" :aria-label="c('角色标签')">
-            <span v-for="tag in item.tags" :key="tag">{{ characterLabel(tag, localeTag()) }}</span>
+          <div v-if="cardTags(item).length" class="cb-card-tags" :aria-label="c('角色标签')">
+            <span
+              v-for="tag in cardTags(item)"
+              :key="tag.key"
+              :class="{ 'cb-card-combination-tag': tag.kind === 'combination' }"
+              >{{ tag.label }}</span
+            >
           </div>
         </div>
       </RouterLink>

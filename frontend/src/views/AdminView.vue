@@ -569,7 +569,6 @@ onMounted(loadSettings);
                   <h2>OneBot V11 HTTP</h2>
                 </div>
               </div>
-              <p class="muted">{{ t("Bot 设置独立于音乐与新闻抓取，便于后续接入更多通知。") }}</p>
               <label
                 >{{ t("接口地址")
                 }}<input

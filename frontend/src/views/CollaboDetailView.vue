@@ -22,7 +22,7 @@ const images = computed(() => item.value?.images || []);
 const dateTitle = computed(() => ({ announced: "公布日期", starts: "开启日期" })[item.value?.date_kind] || "首次公开");
 const context = computed(() =>
   Object.fromEntries(
-    ["q", "year", "tags", "page"].filter((key) => typeof route.query[key] === "string").map((key) => [key, route.query[key]]),
+    ["q", "year", "tags", "group", "page"].filter((key) => typeof route.query[key] === "string").map((key) => [key, route.query[key]]),
   ),
 );
 const relatedLinks = computed(() => {

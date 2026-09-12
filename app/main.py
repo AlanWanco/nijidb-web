@@ -3028,6 +3028,45 @@ async def notify(changed: list[dict[str, Any]], config: dict[str, str], category
     await send_onebot("\n".join(lines), config)
 
 
+def news_notification_items(news_ids: list[str]) -> list[dict[str, Any]]:
+    unique_ids = list(dict.fromkeys(str(news_id) for news_id in news_ids if str(news_id).strip()))
+    if not unique_ids:
+        return []
+    placeholders = ", ".join("?" for _ in unique_ids)
+    with db() as conn:
+        rows = conn.execute(
+            f"SELECT id, title, published_at, category, source_url FROM news_articles WHERE id IN ({placeholders})",
+            unique_ids,
+        ).fetchall()
+    by_id = {str(row["id"]): dict(row) for row in rows}
+    return [by_id[news_id] for news_id in unique_ids if news_id in by_id]
+
+
+async def notify_news(changed: list[dict[str, Any]], config: dict[str, str]) -> None:
+    if not changed or not config.get("onebot_url") or not config.get("onebot_target"):
+        return
+    lines = ["[官网新闻更新]", f"官网新闻有 {len(changed)} 项更新："]
+    for item in changed[:10]:
+        title = re.sub(r"\s+", " ", str(item.get("title") or "未命名新闻")).strip()[:160]
+        lines.append(f"• {title or '未命名新闻'}")
+        metadata = [
+            value
+            for value in (
+                str(item.get("published_at") or "").strip(),
+                str(item.get("category") or "").strip(),
+            )
+            if value
+        ]
+        if metadata:
+            lines.append(f"  - {' · '.join(metadata)}")
+        source_url = str(item.get("source_url") or "").strip()
+        if source_url:
+            lines.append(f"  - {source_url[:300]}")
+    if len(changed) > 10:
+        lines.append(f"以及其他 {len(changed) - 10} 项")
+    await send_onebot("\n".join(lines), config)
+
+
 def cover_cache_is_current() -> bool:
     try:
         return COVER_CACHE_VERSION_PATH.read_text(encoding="utf-8").strip() == COVER_CACHE_VERSION
@@ -3712,6 +3751,7 @@ async def news_sync_once() -> dict[str, Any]:
     async with news_run_lock:
         print("[news-sync] started", flush=True)
         discovered_count = changed_count = detail_errors = 0
+        changed_news_ids: list[str] = []
         error_message = None
         try:
             async with httpx.AsyncClient(timeout=30, headers=NEWS_HEADERS) as client:
@@ -3730,9 +3770,10 @@ async def news_sync_once() -> dict[str, Any]:
                         discovered_count += 1
                         record_id = news_id("niji_topics", entry["page_name"], entry["source_url"])
                         try:
-                            changed_count += int(
-                                await refresh_news_record(client, record_id, entry["source_url"], entry)
-                            )
+                            changed = await refresh_news_record(client, record_id, entry["source_url"], entry)
+                            if changed:
+                                changed_count += 1
+                                changed_news_ids.append(record_id)
                         except (httpx.HTTPError, ValueError, RuntimeError) as exc:
                             detail_errors += 1
                             print(f"[news-sync] detail failed {record_id}: {type(exc).__name__}", flush=True)
@@ -3752,6 +3793,11 @@ async def news_sync_once() -> dict[str, Any]:
                 "INSERT INTO news_sync_log(checked_at, discovered_count, changed_count, error) VALUES (?, ?, ?, ?)",
                 (datetime.now(timezone.utc).isoformat(), discovered_count, changed_count, error_message),
             )
+        if changed_news_ids:
+            try:
+                await notify_news(news_notification_items(changed_news_ids), settings())
+            except Exception as exc:
+                print(f"[news-sync] notification failed: {type(exc).__name__}", flush=True)
         print(f"[news-sync] completed: {changed_count} changed, {discovered_count} topics checked", flush=True)
         return {"discovered_count": discovered_count, "changed_count": changed_count, "error": error_message}
 
@@ -3998,8 +4044,9 @@ def collaboration_list_payload(
     page_size: int = 24,
     admin: bool = False,
     tags: Any = "",
+    group: Any = "",
 ) -> dict[str, Any]:
-    rows = collaboration_rows(conn, q, year, tags)
+    rows = collaboration_rows(conn, q, year, tags, group)
     page_size = max(1, min(60, page_size))
     pages = max(1, (len(rows) + page_size - 1) // page_size)
     page = min(max(1, page), pages)
@@ -4023,11 +4070,12 @@ def collaboration_detail_payload(
     year: str = "",
     admin: bool = False,
     tags: Any = "",
+    group: Any = "",
 ) -> dict[str, Any]:
     row = find_collaboration(conn, identifier, admin=admin)
     if not row:
         raise HTTPException(404, "联动记录不存在")
-    rows = collaboration_rows(conn, q, year, tags)
+    rows = collaboration_rows(conn, q, year, tags, group)
     index = next((index for index, candidate in enumerate(rows) if candidate["id"] == row["id"]), -1)
     previous = collaboration_item_payload(conn, rows[index - 1]) if index > 0 else None
     following = collaboration_item_payload(conn, rows[index + 1]) if index >= 0 and index + 1 < len(rows) else None
@@ -4048,9 +4096,11 @@ def serve_collaboration_asset(asset_path: str) -> FileResponse:
 
 
 @app.get("/api/collabo")
-async def api_collabo(q: str = "", year: str = "", tags: str = "", page: int = 1, page_size: int = 24) -> dict[str, Any]:
+async def api_collabo(
+    q: str = "", year: str = "", tags: str = "", group: str = "", page: int = 1, page_size: int = 24
+) -> dict[str, Any]:
     with db() as conn:
-        return collaboration_list_payload(conn, q, year, page, page_size, tags=tags)
+        return collaboration_list_payload(conn, q, year, page, page_size, tags=tags, group=group)
 
 
 @app.get("/api/collabo/assets/{asset_path:path}", include_in_schema=False)
@@ -4059,9 +4109,9 @@ async def collabo_asset(asset_path: str):
 
 
 @app.get("/api/collabo/{identifier}")
-async def api_collabo_detail(identifier: str, q: str = "", year: str = "", tags: str = "") -> dict[str, Any]:
+async def api_collabo_detail(identifier: str, q: str = "", year: str = "", tags: str = "", group: str = "") -> dict[str, Any]:
     with db() as conn:
-        return collaboration_detail_payload(conn, identifier, q, year, tags=tags)
+        return collaboration_detail_payload(conn, identifier, q, year, tags=tags, group=group)
 
 
 @app.get("/api/collaboration-illustrations")
@@ -4826,10 +4876,18 @@ async def api_admin_news_edit(news_id: str, request: Request) -> dict[str, Any]:
 
 
 @app.get("/api/admin/collabo")
-async def api_admin_collabo(request: Request, q: str = "", year: str = "", tags: str = "", page: int = 1, page_size: int = 24) -> dict[str, Any]:
+async def api_admin_collabo(
+    request: Request,
+    q: str = "",
+    year: str = "",
+    tags: str = "",
+    group: str = "",
+    page: int = 1,
+    page_size: int = 24,
+) -> dict[str, Any]:
     require_api_admin(request)
     with db() as conn:
-        return collaboration_list_payload(conn, q, year, page, page_size, admin=True, tags=tags)
+        return collaboration_list_payload(conn, q, year, page, page_size, admin=True, tags=tags, group=group)
 
 
 @app.post("/api/admin/collabo/assets")
@@ -4935,10 +4993,12 @@ async def api_admin_collabo_upload(request: Request) -> dict[str, list[dict[str,
 
 
 @app.get("/api/admin/collabo/{identifier}")
-async def api_admin_collabo_detail(identifier: str, request: Request, q: str = "", year: str = "", tags: str = "") -> dict[str, Any]:
+async def api_admin_collabo_detail(
+    identifier: str, request: Request, q: str = "", year: str = "", tags: str = "", group: str = ""
+) -> dict[str, Any]:
     require_api_admin(request)
     with db() as conn:
-        return collaboration_detail_payload(conn, identifier, q, year, admin=True, tags=tags)
+        return collaboration_detail_payload(conn, identifier, q, year, admin=True, tags=tags, group=group)
 
 
 @app.post("/api/admin/collabo")
@@ -4983,6 +5043,21 @@ async def api_admin_collabo_edit(identifier: str, request: Request) -> dict[str,
         result = collaboration_item_payload(conn, row, detail=True, admin=True)
     log_database_activity("collabo", f"更新联动立绘：{result['title'][:80]}")
     return {"item": result, "mode": "database"}
+
+
+@app.delete("/api/admin/collabo/{identifier}")
+async def api_admin_collabo_delete(identifier: str, request: Request) -> dict[str, str]:
+    require_api_admin(request)
+    with db() as conn:
+        existing = find_collaboration(conn, identifier, admin=True)
+        if not existing:
+            raise HTTPException(404, "联动记录不存在")
+        item_id = existing["id"]
+        title = str(existing["title"] or "")
+        conn.execute("DELETE FROM collaboration_images WHERE item_id = ?", (item_id,))
+        conn.execute("DELETE FROM collaboration_items WHERE id = ?", (item_id,))
+    log_database_activity("collabo", f"删除联动立绘：{title[:80]}")
+    return {"message": "联动已删除"}
 
 
 @app.get("/api/admin/backups")

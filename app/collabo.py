@@ -29,6 +29,20 @@ COLLABO_CHARACTER_TAGS = (
     ("yu", ("高咲侑", "侑", "Yuu Takasaki", "Yuu")),
 )
 COLLABO_CHARACTER_TAG_IDS = tuple(tag_id for tag_id, _ in COLLABO_CHARACTER_TAGS)
+COLLABO_IDOL_TAG_IDS = tuple(tag_id for tag_id in COLLABO_CHARACTER_TAG_IDS if tag_id != "yu")
+COLLABO_COMBINATION_GROUPS = (
+    ("idol12", COLLABO_IDOL_TAG_IDS, ()),
+    ("grade1", ("kasumi", "shizuku", "rina", "shioriko"), ()),
+    ("grade2", ("ayumu", "ai", "setsuna", "lanzhu"), ()),
+    ("grade3", ("karin", "kanata", "emma", "mia"), ()),
+    ("movie1", ("ayumu", "shizuku", "kanata", "emma", "lanzhu"), ("kasumi", "yu")),
+    ("movie2", ("ai", "rina", "setsuna", "shioriko", "mia"), ("karin",)),
+    ("azuna", ("ayumu", "shizuku", "setsuna"), ()),
+    ("diverdiva", ("karin", "ai"), ()),
+    ("r3birth", ("shioriko", "mia", "lanzhu"), ()),
+    ("qu4rtz", ("kasumi", "kanata", "emma", "rina"), ()),
+)
+COLLABO_COMBINATION_GROUP_MAP = {group_id: (required, optional) for group_id, required, optional in COLLABO_COMBINATION_GROUPS}
 COLLABO_CHARACTER_TAG_ALIASES = {
     alias.casefold(): tag_id
     for tag_id, aliases in COLLABO_CHARACTER_TAGS
@@ -158,6 +172,22 @@ def collaboration_tags(value: Any) -> list[str]:
         if tag_id:
             selected.add(tag_id)
     return [tag_id for tag_id in COLLABO_CHARACTER_TAG_IDS if tag_id in selected]
+
+
+def collaboration_combination_group(value: Any) -> str:
+    group_id = str(value or "").strip().casefold()
+    return group_id if group_id in COLLABO_COMBINATION_GROUP_MAP else ""
+
+
+def collaboration_combination_matches(value: Any, group: Any) -> bool:
+    group_id = collaboration_combination_group(group)
+    if not group_id:
+        return False
+    required_values, optional_values = COLLABO_COMBINATION_GROUP_MAP[group_id]
+    selected = set(collaboration_tags(value))
+    required = set(required_values)
+    allowed = required | set(optional_values)
+    return bool(selected) and required <= selected <= allowed
 
 
 def collaboration_tag_search_text(value: Any) -> str:
@@ -561,9 +591,10 @@ def collaboration_year_values(value: Any) -> list[str]:
     return result
 
 
-def collaboration_rows(conn, q: str = "", year: Any = "", tags: Any = "") -> list[Any]:
+def collaboration_rows(conn, q: str = "", year: Any = "", tags: Any = "", group: Any = "") -> list[Any]:
     rows = conn.execute("SELECT * FROM collaboration_items ORDER BY CASE WHEN date = '' THEN 1 ELSE 0 END, date DESC, id DESC").fetchall()
     years = set(collaboration_year_values(year))
+    group_id = collaboration_combination_group(group)
     normalized_tags = collaboration_tags(tags)
     selected_tags = set(normalized_tags) if len(normalized_tags) < len(COLLABO_CHARACTER_TAG_IDS) else set()
     keyword = str(q or "").strip().casefold()
@@ -590,6 +621,8 @@ def collaboration_rows(conn, q: str = "", year: Any = "", tags: Any = "") -> lis
         if years and row["date"][:4] not in years:
             continue
         if selected_tags and not selected_tags.intersection(collaboration_tags(row["tags_json"])):
+            continue
+        if group_id and not collaboration_combination_matches(row["tags_json"], group_id):
             continue
         if keyword:
             searchable = " ".join(
@@ -836,9 +869,13 @@ def upsert_collaboration_item(conn, payload: dict[str, Any]) -> str:
 __all__ = [
     "COLLABO_CHARACTER_TAG_IDS",
     "COLLABO_CHARACTER_TAGS",
+    "COLLABO_COMBINATION_GROUPS",
+    "COLLABO_IDOL_TAG_IDS",
     "COLLABO_COLLECTION_STATUSES",
     "COLLABO_REVIEW_STATUSES",
     "COLLABO_SCHEMA_SQL",
+    "collaboration_combination_group",
+    "collaboration_combination_matches",
     "collaboration_rows",
     "collaboration_source",
     "collaboration_tag_search_text",

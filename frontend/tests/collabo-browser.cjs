@@ -18,11 +18,26 @@ const sample = rawItems.find((i) => images(i.id).length > 1);
 const slug = (i) => `${i.first_seen.replaceAll("-", "")}-${i.id.slice(0, 6)}`;
 let dbMode = false;
 let saves = 0;
+let collaboDeleted = false;
 const dbItem = {
   ...sample,
   slug: slug(sample),
   images: images(sample.id),
-  tags: ["ayumu"],
+  tags: [
+    "ayumu",
+    "kasumi",
+    "shizuku",
+    "karin",
+    "ai",
+    "kanata",
+    "setsuna",
+    "emma",
+    "rina",
+    "shioriko",
+    "mia",
+    "lanzhu",
+    "yu",
+  ],
   periods: [
     {
       start_date: "2026-01-01",
@@ -68,8 +83,17 @@ async function configure(context) {
       });
     }
     if (dbMode && (p === "/api/admin/collabo" || p === "/api/collabo"))
-      return json({ items: [dbItem], total: 1, years: ["2026"], source: catalog.source });
+      return json({
+        items: collaboDeleted ? [] : [dbItem],
+        total: collaboDeleted ? 0 : 1,
+        years: ["2026"],
+        source: catalog.source,
+      });
     if (dbMode && (p === `/api/admin/collabo/${sample.id}` || p === `/api/collabo/${slug(sample)}`)) {
+      if (route.request().method() === "DELETE") {
+        collaboDeleted = true;
+        return json({ message: "联动已删除" });
+      }
       if (route.request().method() === "PATCH") {
         saves++;
         Object.assign(dbItem, route.request().postDataJSON());
@@ -167,12 +191,19 @@ async function swipe(page, selector, dx, dy = 2) {
     await page.getByRole("button", { name: /全部年份/ }).click();
     await page.waitForURL((url) => !url.searchParams.has("year"));
     assert.equal(await page.locator(".cb-year-chip.selected").count(), 1);
+    assert.equal(await page.locator(".cb-combination-filter").count(), 1);
+    assert.equal(await page.getByRole("button", { name: "偶像12人", exact: true }).count(), 1);
+    await page.getByRole("button", { name: "偶像12人", exact: true }).click();
+    await page.waitForURL(/group=idol12/);
+    assert.equal(await page.locator(".cb-combination-chip.selected").count(), 1);
+    await page.getByRole("button", { name: "偶像12人", exact: true }).click();
+    await page.waitForURL((url) => !url.searchParams.has("group"));
     await page.getByRole("button", { name: "上原步梦", exact: true }).click();
     await page.waitForURL(/tags=ayumu/);
-    assert.equal(await page.locator(".cb-character-chip.selected").count(), 1);
+    assert.equal(await page.locator(".cb-character-filter .cb-character-chip.selected").count(), 1);
     await page.locator(".cb-character-filter").getByRole("button", { name: /全员/ }).click();
     await page.waitForURL((url) => !url.searchParams.has("tags"));
-    assert.equal(await page.locator(".cb-character-chip.selected").count(), 1);
+    assert.equal(await page.locator(".cb-character-filter .cb-character-chip.selected").count(), 1);
     await page.screenshot({ path: "/tmp/nijidb-collabo-desktop.png", fullPage: false });
     await page.getByRole("button", { name: "夜间", exact: true }).click();
     await page.screenshot({ path: "/tmp/nijidb-collabo-dark.png", fullPage: false });
@@ -246,6 +277,28 @@ async function swipe(page, selector, dx, dy = 2) {
     await page.getByRole("link", { name: "管理联动", exact: false }).first().click();
     await page.waitForSelector(".cb-review-list");
     assert.equal(leaveDialogs, 0);
+    const adminSearchStyle = await page.locator(".cb-admin-search-toolbar").evaluate((form) => {
+      const input = form.querySelector("input");
+      const button = form.querySelector("button");
+      return {
+        inputPadding: getComputedStyle(input).padding,
+        inputWidth: input.getBoundingClientRect().width,
+        buttonWidth: button.getBoundingClientRect().width,
+      };
+    });
+    assert.equal(adminSearchStyle.inputPadding, "7px 10px");
+    assert.ok(adminSearchStyle.inputWidth > adminSearchStyle.buttonWidth * 3, "admin search input is longer than button");
+    await page.goto("http://127.0.0.1:15173/collabo");
+    await page.waitForSelector(".cb-card");
+    assert.equal(await page.locator(".cb-card-tags").innerText(), "全员");
+    await page.goto(`http://127.0.0.1:15173/admin/collabo/${sample.id}`);
+    await page.waitForSelector(".cb-editor");
+    assert.equal(await page.getByRole("button", { name: "删除联动", exact: true }).count(), 1);
+    await page.getByRole("button", { name: "删除联动", exact: true }).click();
+    assert.equal(leaveDialogs, 2);
+    await page.waitForURL("**/admin/collabo");
+    await page.waitForSelector(".cb-review-list");
+    assert.equal(await page.locator(".cb-review-list > a").count(), 0);
     const deleted = rawItems.find((item) => item.id !== sample.id);
 
     await page.goto(`http://127.0.0.1:15173/collabo/${slug(deleted)}`);

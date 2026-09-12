@@ -333,6 +333,16 @@ async function swipe(page, dx) {
         ),
         `news overflow ${width}`,
       );
+      if (width <= 390) {
+        const mobileOrder = await page.evaluate(() => ({
+          galleryTop: document.querySelector(".news-detail-gallery")?.getBoundingClientRect().top,
+          copyTop: document.querySelector(".news-detail-copy")?.getBoundingClientRect().top,
+        }));
+        assert.ok(
+          mobileOrder.galleryTop < mobileOrder.copyTop,
+          `news images should precede article text on mobile (${width})`,
+        );
+      }
     }
     await swipe(page, -100);
     await page.waitForURL("**/news/two");

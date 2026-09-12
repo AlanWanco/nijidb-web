@@ -1346,8 +1346,16 @@
   .news-grid { grid-template-columns: 1fr; gap: 14px; }
   .news-card-body { min-height: 0; }
   .news-detail-topline { align-items: flex-start; flex-direction: column-reverse; gap: 12px; }
-  .news-detail-content { display: block; padding-top: 24px; }
-  .news-detail-gallery { margin-top: 29px; }
+  .news-detail-content {
+    display: flex;
+    flex-direction: column;
+    padding-top: 24px;
+  }
+  .news-detail-gallery {
+    order: -1;
+    margin-top: 0;
+    margin-bottom: 29px;
+  }
   .news-detail-nav { align-items: stretch; flex-direction: column; }
   .news-nav-card.following { text-align: left; }
   .news-edit-form { margin-right: 17px; margin-left: 17px; padding: 16px; }

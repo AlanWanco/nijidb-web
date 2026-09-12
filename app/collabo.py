@@ -29,18 +29,21 @@ COLLABO_CHARACTER_TAGS = (
     ("yu", ("高咲侑", "侑", "Yuu Takasaki", "Yuu")),
 )
 COLLABO_CHARACTER_TAG_IDS = tuple(tag_id for tag_id, _ in COLLABO_CHARACTER_TAGS)
-COLLABO_IDOL_TAG_IDS = tuple(tag_id for tag_id in COLLABO_CHARACTER_TAG_IDS if tag_id != "yu")
+COLLABO_INITIAL_NINE_TAG_IDS = (
+    "ayumu",
+    "kasumi",
+    "shizuku",
+    "karin",
+    "ai",
+    "kanata",
+    "setsuna",
+    "emma",
+    "rina",
+)
 COLLABO_COMBINATION_GROUPS = (
-    ("idol12", COLLABO_IDOL_TAG_IDS, ()),
-    ("grade1", ("kasumi", "shizuku", "rina", "shioriko"), ()),
-    ("grade2", ("ayumu", "ai", "setsuna", "lanzhu"), ()),
-    ("grade3", ("karin", "kanata", "emma", "mia"), ()),
-    ("movie1", ("ayumu", "shizuku", "kanata", "emma", "lanzhu"), ("kasumi", "yu")),
-    ("movie2", ("ai", "rina", "setsuna", "shioriko", "mia"), ("karin",)),
-    ("azuna", ("ayumu", "shizuku", "setsuna"), ()),
-    ("diverdiva", ("karin", "ai"), ()),
-    ("r3birth", ("shioriko", "mia", "lanzhu"), ()),
-    ("qu4rtz", ("kasumi", "kanata", "emma", "rina"), ()),
+    ("initial9", COLLABO_INITIAL_NINE_TAG_IDS, ()),
+    ("anime10", COLLABO_INITIAL_NINE_TAG_IDS + ("yu",), ()),
+    ("shioriko10", COLLABO_INITIAL_NINE_TAG_IDS + ("shioriko",), ()),
 )
 COLLABO_COMBINATION_GROUP_MAP = {group_id: (required, optional) for group_id, required, optional in COLLABO_COMBINATION_GROUPS}
 COLLABO_CHARACTER_TAG_ALIASES = {
@@ -870,7 +873,7 @@ __all__ = [
     "COLLABO_CHARACTER_TAG_IDS",
     "COLLABO_CHARACTER_TAGS",
     "COLLABO_COMBINATION_GROUPS",
-    "COLLABO_IDOL_TAG_IDS",
+    "COLLABO_INITIAL_NINE_TAG_IDS",
     "COLLABO_COLLECTION_STATUSES",
     "COLLABO_REVIEW_STATUSES",
     "COLLABO_SCHEMA_SQL",

@@ -33,10 +33,6 @@ const dbItem = {
     "setsuna",
     "emma",
     "rina",
-    "shioriko",
-    "mia",
-    "lanzhu",
-    "yu",
   ],
   periods: [
     {
@@ -197,12 +193,13 @@ async function swipe(page, selector, dx, dy = 2) {
     await page.waitForURL((url) => !url.searchParams.has("year"));
     assert.equal(await page.locator(".cb-year-chip.selected").count(), 1);
     assert.equal(await page.locator(".cb-combination-filter").count(), 1);
-    assert.equal(await page.getByRole("button", { name: "R3BIRTH", exact: true }).count(), 1);
-    assert.equal(await page.getByRole("button", { name: "偶像12人", exact: true }).count(), 1);
-    await page.getByRole("button", { name: "偶像12人", exact: true }).click();
-    await page.waitForURL(/group=idol12/);
+    for (const label of ["初始9人", "动画一期10人", "栞子加入后10人"]) {
+      assert.equal(await page.getByRole("button", { name: label, exact: true }).count(), 1);
+    }
+    await page.getByRole("button", { name: "初始9人", exact: true }).click();
+    await page.waitForURL(/group=initial9/);
     assert.equal(await page.locator(".cb-combination-chip.selected").count(), 1);
-    await page.getByRole("button", { name: "偶像12人", exact: true }).click();
+    await page.getByRole("button", { name: "初始9人", exact: true }).click();
     await page.waitForURL((url) => !url.searchParams.has("group"));
     await page.getByRole("button", { name: "上原步梦", exact: true }).click();
     await page.waitForURL(/tags=ayumu/);
@@ -303,7 +300,7 @@ async function swipe(page, selector, dx, dy = 2) {
     assert.equal(new URL(page.url()).searchParams.get("page"), "2");
     await page.goto("http://127.0.0.1:15173/collabo");
     await page.waitForSelector(".cb-card");
-    assert.equal(await page.locator(".cb-card-tags").innerText(), "全员");
+    assert.equal(await page.locator(".cb-card-tags").innerText(), "初始9人");
     await page.goto(`http://127.0.0.1:15173/admin/collabo/${sample.id}`);
     await page.waitForSelector(".cb-editor");
     assert.equal(await page.getByRole("button", { name: "删除联动", exact: true }).count(), 1);

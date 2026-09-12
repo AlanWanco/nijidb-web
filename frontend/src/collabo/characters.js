@@ -80,29 +80,22 @@ export const COLLABO_CHARACTER_TAGS = [
 ];
 
 export const COLLABO_CHARACTER_TAG_IDS = COLLABO_CHARACTER_TAGS.map((tag) => tag.id);
-export const COLLABO_IDOL_TAG_IDS = COLLABO_CHARACTER_TAG_IDS.filter((id) => id !== "yu");
+export const COLLABO_INITIAL_NINE_TAG_IDS = [
+  "ayumu",
+  "kasumi",
+  "shizuku",
+  "karin",
+  "ai",
+  "kanata",
+  "setsuna",
+  "emma",
+  "rina",
+];
 
 export const COLLABO_COMBINATION_GROUPS = [
-  { id: "idol12", label: "偶像12人", members: COLLABO_IDOL_TAG_IDS },
-  { id: "grade1", label: "一年级", members: ["kasumi", "shizuku", "rina", "shioriko"] },
-  { id: "grade2", label: "二年级", members: ["ayumu", "ai", "setsuna", "lanzhu"] },
-  { id: "grade3", label: "三年级", members: ["karin", "kanata", "emma", "mia"] },
-  {
-    id: "movie1",
-    label: "剧场版第一章组",
-    members: ["ayumu", "shizuku", "kanata", "emma", "lanzhu"],
-    optionalMembers: ["kasumi", "yu"],
-  },
-  {
-    id: "movie2",
-    label: "剧场版第二章组",
-    members: ["ai", "rina", "setsuna", "shioriko", "mia"],
-    optionalMembers: ["karin"],
-  },
-  { id: "azuna", label: "AZUNA", members: ["ayumu", "shizuku", "setsuna"] },
-  { id: "diverdiva", label: "DiverDiva", members: ["karin", "ai"] },
-  { id: "r3birth", label: "R3BIRTH", members: ["shioriko", "mia", "lanzhu"] },
-  { id: "qu4rtz", label: "QU4RTZ", members: ["kasumi", "kanata", "emma", "rina"] },
+  { id: "initial9", label: "初始9人", members: COLLABO_INITIAL_NINE_TAG_IDS },
+  { id: "anime10", label: "动画一期10人", members: [...COLLABO_INITIAL_NINE_TAG_IDS, "yu"] },
+  { id: "shioriko10", label: "栞子加入后10人", members: [...COLLABO_INITIAL_NINE_TAG_IDS, "shioriko"] },
 ];
 
 const characterTagMap = new Map(
@@ -152,12 +145,6 @@ export function combinationGroupMatches(value, groupOrId) {
 
 export function automaticCombinationGroupIds(value) {
   const selected = new Set(normalizeCharacterTags(value));
-  if (
-    selected.size === COLLABO_CHARACTER_TAG_IDS.length &&
-    COLLABO_CHARACTER_TAG_IDS.every((id) => selected.has(id))
-  ) {
-    return ["all"];
-  }
   return COLLABO_COMBINATION_GROUPS.filter((group) => combinationGroupMatches([...selected], group)).map(
     (group) => group.id,
   );

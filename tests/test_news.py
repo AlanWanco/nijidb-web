@@ -328,22 +328,32 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
         with main.db() as conn:
             self.assertIsNone(conn.execute("SELECT 1 FROM collaboration_items WHERE id = ?", (item["id"],)).fetchone())
 
-    async def test_collabo_combination_filter_uses_defined_sets(self):
+    async def test_collabo_combination_filter_uses_exact_member_sets(self):
         self.login()
-        movie1 = ["ayumu", "shizuku", "kanata", "emma", "lanzhu", "kasumi"]
-        movie2 = ["ai", "rina", "setsuna", "shioriko", "mia", "karin"]
-        for title, tags in (("第一章", movie1), ("第二章", movie2), ("其他", ["ayumu", "ai"])):
+        initial9 = ["ayumu", "kasumi", "shizuku", "karin", "ai", "kanata", "setsuna", "emma", "rina"]
+        anime10 = initial9 + ["yu"]
+        shioriko10 = initial9 + ["shioriko"]
+        cases = (
+            ("初始9人", initial9),
+            ("动画一期10人", anime10),
+            ("栞子加入后10人", shioriko10),
+            ("其他", initial9 + ["mia"]),
+        )
+        for title, tags in cases:
             response = await self.client.post(
                 "/api/admin/collabo",
                 json={"title": title, "date": "2026-09-11", "tags": tags, "images": []},
             )
             self.assertEqual(response.status_code, 200)
-        first = (await self.client.get("/api/collabo?group=movie1")).json()
-        second = (await self.client.get("/api/collabo?group=movie2")).json()
-        self.assertEqual(first["total"], 1)
-        self.assertEqual(first["items"][0]["title"], "第一章")
-        self.assertEqual(second["total"], 1)
-        self.assertEqual(second["items"][0]["title"], "第二章")
+        for group, title in (
+            ("initial9", "初始9人"),
+            ("anime10", "动画一期10人"),
+            ("shioriko10", "栞子加入后10人"),
+        ):
+            data = (await self.client.get(f"/api/collabo?group={group}")).json()
+            self.assertEqual(data["total"], 1)
+            self.assertEqual(data["items"][0]["title"], title)
+        self.assertEqual((await self.client.get("/api/collabo?group=initial9&tags=mia")).json()["total"], 0)
 
     async def test_refresh_auth_failure_and_manual_edit(self):
         endpoint = f"/api/admin/news/{record()['id']}"

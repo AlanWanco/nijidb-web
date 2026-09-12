@@ -81,40 +81,18 @@ class CollaborationStorageTests(unittest.TestCase):
         self.assertEqual([entry["id"] for entry in collaboration_rows(self.conn, tags="ayumu")], [item_id])
         self.assertEqual(collaboration_rows(self.conn, tags="kasumi"), [])
 
-    def test_combination_filters_match_defined_member_sets(self) -> None:
-        all_tags = [
-            "ayumu",
-            "kasumi",
-            "shizuku",
-            "karin",
-            "ai",
-            "kanata",
-            "setsuna",
-            "emma",
-            "rina",
-            "shioriko",
-            "mia",
-            "lanzhu",
-            "yu",
-        ]
-        idol_tags = [tag for tag in all_tags if tag != "yu"]
-        movie1 = ["ayumu", "shizuku", "kanata", "emma", "lanzhu"]
-        movie2 = ["ai", "rina", "setsuna", "shioriko", "mia"]
-        self.assertFalse(collaboration_combination_matches(all_tags, "idol12"))
-        self.assertTrue(collaboration_combination_matches(idol_tags, "idol12"))
-        self.assertTrue(collaboration_combination_matches(movie1, "movie1"))
-        self.assertTrue(collaboration_combination_matches(movie1 + ["kasumi"], "movie1"))
-        self.assertTrue(collaboration_combination_matches(movie1 + ["yu"], "movie1"))
-        self.assertTrue(collaboration_combination_matches(movie1 + ["kasumi", "yu"], "movie1"))
-        self.assertFalse(collaboration_combination_matches(movie1 + ["ai"], "movie1"))
-        self.assertTrue(collaboration_combination_matches(movie2, "movie2"))
-        self.assertTrue(collaboration_combination_matches(movie2 + ["karin"], "movie2"))
-        self.assertFalse(collaboration_combination_matches(movie2 + ["emma"], "movie2"))
-        self.assertTrue(collaboration_combination_matches(["kasumi", "shizuku", "rina", "shioriko"], "grade1"))
-        self.assertTrue(collaboration_combination_matches(["ayumu", "ai", "setsuna", "lanzhu"], "grade2"))
-        self.assertTrue(collaboration_combination_matches(["karin", "kanata", "emma", "mia"], "grade3"))
-        self.assertTrue(collaboration_combination_matches(["ayumu", "shizuku", "setsuna"], "azuna"))
-        self.assertFalse(collaboration_combination_matches(["ayumu", "shizuku", "setsuna", "yu"], "azuna"))
+    def test_combination_filters_match_exact_member_sets(self) -> None:
+        initial9 = ["ayumu", "kasumi", "shizuku", "karin", "ai", "kanata", "setsuna", "emma", "rina"]
+        anime10 = initial9 + ["yu"]
+        shioriko10 = initial9 + ["shioriko"]
+        self.assertTrue(collaboration_combination_matches(initial9, "initial9"))
+        self.assertTrue(collaboration_combination_matches(anime10, "anime10"))
+        self.assertTrue(collaboration_combination_matches(shioriko10, "shioriko10"))
+        self.assertFalse(collaboration_combination_matches(initial9 + ["mia"], "initial9"))
+        self.assertFalse(collaboration_combination_matches(anime10 + ["shioriko"], "anime10"))
+        self.assertFalse(collaboration_combination_matches(shioriko10 + ["yu"], "shioriko10"))
+        self.assertFalse(collaboration_combination_matches(initial9[:-1], "initial9"))
+        self.assertFalse(collaboration_combination_matches(initial9 + ["mia", "lanzhu"], "initial9"))
 
     def test_period_requires_title_or_description(self) -> None:
         with self.assertRaisesRegex(ValueError, "标题或描述"):

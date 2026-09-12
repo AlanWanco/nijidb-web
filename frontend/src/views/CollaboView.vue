@@ -233,7 +233,7 @@ onBeforeUnmount(() => {
             type="search"
             :aria-label="c('标题、合作方、备注或关键词')"
             :placeholder="c('标题、合作方、备注或关键词')"
-          /><button type="submit">{{ c("搜索") }} ↗</button>
+          /><kbd class="search-shortcut-hint" aria-hidden="true">Ctrl+K</kbd><button type="submit">{{ c("搜索") }} ↗</button>
         </form>
       </div>
       <div class="cb-hero-art" aria-hidden="true">

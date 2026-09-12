@@ -222,7 +222,8 @@ onBeforeUnmount(() => {
       <component v-else :is="Component" />
     </RouterView>
     <Teleport to="body">
-      <div v-if="globalSearchOpen && globalSearchContext" class="global-search-layer" @click.self="closeGlobalSearch">
+      <Transition name="global-search">
+        <div v-if="globalSearchOpen && globalSearchContext" class="global-search-layer" @click.self="closeGlobalSearch">
         <section class="global-search-dialog" role="dialog" aria-modal="true" :aria-label="globalSearchContext.label" @keydown.esc.prevent="closeGlobalSearch">
           <div class="global-search-heading">
             <div>
@@ -241,6 +242,7 @@ onBeforeUnmount(() => {
               :placeholder="globalSearchContext.placeholder"
               :aria-label="globalSearchContext.placeholder"
             >
+            <kbd class="global-search-shortcut" aria-hidden="true">Ctrl+K</kbd>
             <kbd class="global-search-enter" aria-hidden="true">↵</kbd>
             <button class="global-search-submit" type="submit">{{ t("搜索") }} <span aria-hidden="true">↗</span></button>
           </form>
@@ -249,7 +251,8 @@ onBeforeUnmount(() => {
             <span><kbd>ESC</kbd> {{ t("关闭") }}</span>
           </div>
         </section>
-      </div>
+        </div>
+      </Transition>
     </Teleport>
     <footer>
        <span v-if="route.path === '/music'" class="footer-source"><strong class="footer-title">{{ t("数据源：") }}</strong><a href="https://www.lovelive-anime.jp/nijigasaki/cd.php" target="_blank" rel="noopener noreferrer">lovelive-anime.jp</a></span>

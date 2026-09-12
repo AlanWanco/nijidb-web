@@ -478,6 +478,7 @@ onBeforeUnmount(() => {
             :placeholder="t('搜索新闻标题、摘要、正文或标签')"
             :aria-label="t('搜索新闻标题、摘要、正文或标签')"
           />
+          <kbd class="search-shortcut-hint" aria-hidden="true">Ctrl+K</kbd>
           <button>
             <span>{{ t("搜索新闻") }}</span
             ><span aria-hidden="true">↗</span>

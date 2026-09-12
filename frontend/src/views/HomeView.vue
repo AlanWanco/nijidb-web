@@ -194,6 +194,7 @@ onBeforeUnmount(() => {
         <form class="search" @submit.prevent="search">
           <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.5"></circle><path d="m16 16 4.5 4.5"></path></svg>
           <input v-model="query" name="q" :placeholder="t('搜索标题或艺术家')" :aria-label="t('搜索标题或艺术家')">
+          <kbd class="search-shortcut-hint" aria-hidden="true">Ctrl+K</kbd>
           <button><span>{{ t("搜索档案") }}</span><span aria-hidden="true">↗</span></button>
         </form>
       </div>

@@ -56,6 +56,7 @@ async function setup(context) {
 async function openAndSearch(page, path, anchor, value, expectedPlaceholder) {
   await page.goto(base + path);
   await page.locator(anchor).waitFor();
+  assert.equal(await page.locator(`${anchor} .search-shortcut-hint`).innerText(), "Ctrl+K");
   await page.keyboard.press("Control+K");
 
   const dialog = page.locator(".global-search-dialog");
@@ -72,6 +73,7 @@ async function openAndSearch(page, path, anchor, value, expectedPlaceholder) {
   await input.fill(value);
   await input.press("Enter");
   await page.waitForURL((url) => url.searchParams.get("q") === value);
+  await dialog.waitFor({ state: "detached" });
   assert.equal(await page.locator(".global-search-dialog").count(), 0);
 }
 
@@ -121,6 +123,7 @@ async function openAndSearch(page, path, anchor, value, expectedPlaceholder) {
     await page.keyboard.press("Control+K");
     await page.locator(".global-search-dialog").waitFor();
     await page.keyboard.press("Escape");
+    await page.locator(".global-search-dialog").waitFor({ state: "detached" });
     assert.equal(await page.locator(".global-search-dialog").count(), 0);
     console.log("PASS: Ctrl+K search window, focus, positioning, submission, and Escape close.");
   } finally {

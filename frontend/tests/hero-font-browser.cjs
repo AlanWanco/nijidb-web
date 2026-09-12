@@ -1,4 +1,4 @@
-// Verifies the language-specific font stacks used by the three archive hero titles.
+// Verifies the language-specific font stacks used by the archive page titles.
 // All APIs are mocked; this test does not touch any local or remote database.
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || "playwright");
 const { spawn } = require("node:child_process");
@@ -36,6 +36,7 @@ async function setup(context) {
         body: JSON.stringify(data),
       });
     if (pathname === "/api/releases") return json({ releases: [], last: null });
+    if (pathname === "/api/programs/calendar") return json({ programs: [], events: [] });
     if (pathname === "/api/auth/session") return json({ authenticated: false });
     if (pathname === "/api/collaboration-illustrations") return json({ items: {} });
     if (pathname.startsWith("/api/collabo")) {
@@ -98,10 +99,15 @@ async function assertHeroFont(page, path, selector, expectedFamily) {
     });
     await setup(context);
     const page = await context.newPage();
+    const fontRequests = [];
+    page.on("request", request => {
+      if (request.url().includes("/assets/fonts/")) fontRequests.push(request.url());
+    });
     const heroes = [
       ["/music", ".music-hero h1"],
       ["/collabo", ".cb-hero h1"],
       ["/news", ".news-hero h1"],
+      ["/programs", ".programs-topline h1"],
     ];
 
     for (const [path, selector] of heroes) {
@@ -114,7 +120,10 @@ async function assertHeroFont(page, path, selector, expectedFamily) {
       const details = await assertHeroFont(page, path, selector, "Dela Gothic One");
       assert.equal(details.lang, "ja-JP");
     }
-    console.log("PASS: Chinese and Japanese hero-title font stacks and bundled font loading.");
+    assert.equal(fontRequests.some(url => url.endsWith("LogoSCUnboundedSans-hero.woff2")), true);
+    assert.equal(fontRequests.some(url => url.endsWith("DelaGothicOne-hero.woff2")), true);
+    assert.equal(fontRequests.some(url => /\.(?:otf|ttf)(?:$|\?)/i.test(url)), false);
+    console.log("PASS: Chinese and Japanese archive-title font stacks, subset WOFF2 loading, and programs title.");
   } finally {
     await browser?.close();
     server.kill("SIGTERM");

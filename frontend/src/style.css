@@ -108,7 +108,8 @@ button:disabled {
 button:focus-visible,
 a:focus-visible,
 summary:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
 }
@@ -287,6 +288,29 @@ input:focus-visible {
 
 .site-nav a.router-link-active {
   color: var(--accent);
+}
+
+.section-nav a {
+  transition: color 180ms ease, border-color 180ms ease, background 180ms ease,
+    transform 180ms ease, box-shadow 180ms ease;
+}
+
+.section-nav a:hover {
+  box-shadow: 0 5px 14px var(--accent-soft);
+  transform: translateY(-2px);
+}
+
+.section-nav a:active {
+  transform: translateY(0) scale(.96);
+}
+
+.section-nav a.router-link-active {
+  animation: section-nav-active 240ms ease-out both;
+}
+
+@keyframes section-nav-active {
+  from { opacity: .65; transform: translateY(2px) scale(.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 .icon-button {
@@ -1984,7 +2008,33 @@ button.secondary,
 }
 
 .backup-file input {
-  padding: 10px;
+  width: 100%;
+  padding: 7px 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.backup-file input::file-selector-button,
+.news-image-picker input[type="file"]::file-selector-button {
+  margin-right: 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--line));
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  cursor: pointer;
+  font: 600 11px var(--display-font);
+  transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+.backup-file input:hover::file-selector-button,
+.news-image-picker input[type="file"]:hover::file-selector-button {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  transform: translateY(-1px);
 }
 
 .backup > small {
@@ -2157,7 +2207,8 @@ footer {
   transition: color 160ms ease, opacity 160ms ease;
 }
 
-.footer-repo-link {
+.footer-repo-link,
+.footer-main-link {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -2174,7 +2225,8 @@ footer {
 }
 
 .footer-links a:hover,
-.footer-repo-link:hover {
+.footer-repo-link:hover,
+.footer-main-link:hover {
   opacity: .72;
 }
 
@@ -7601,6 +7653,11 @@ html[data-theme="mocha"] .dp__theme_dark {
   *::after {
     scroll-behavior: auto !important;
     transition-duration: .01ms !important;
+  }
+
+  .section-nav a.router-link-active {
+    animation: none;
+    transition: none;
   }
 
   .program-drawer-backdrop-enter-active,

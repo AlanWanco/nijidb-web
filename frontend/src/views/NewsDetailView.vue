@@ -550,7 +550,11 @@ onMounted(() => {
             </div>
             <label
               >{{ t("摘要")
-              }}<textarea v-model="editForm.summary" rows="5"></textarea>
+              }}<textarea
+                v-model="editForm.summary"
+                rows="5"
+                maxlength="200"
+              ></textarea>
             </label>
             <label
               >{{ t("来源网址")

@@ -23,7 +23,7 @@ docker run -d --name nijidb-web -p 8000:8000 \
 
 ## R2 图片
 
-运行时封面保存在 `/data/images`。`scripts/upload_images_to_r2.py` 使用 S3 API 将该目录全量上传到 Cloudflare R2，凭证只从环境变量读取，不要写入仓库。S3 Endpoint 仅用于上传；要让浏览器读取图片，还需要在 `R2_PUBLIC_BASE_URL` 填写 R2 自定义域名或 `r2.dev` 公共地址。
+运行时封面、新闻图片和联动立绘保存在 `/data/images`。`scripts/upload_images_to_r2.py` 使用 S3 API 将该目录增量上传到 Cloudflare R2，凭证只从环境变量读取，不要写入仓库。管理员新上传的新闻图片和联动立绘也会在运行时直接上传到 R2；本地文件只作为备份。S3 Endpoint 仅用于上传；要让浏览器读取图片，还需要在 `R2_PUBLIC_BASE_URL` 填写 R2 自定义域名或 `r2.dev` 公共地址。
 
 ```bash
 R2_ENDPOINT='https://你的账户.r2.cloudflarestorage.com' \
@@ -37,7 +37,7 @@ docker run --rm --mount source=nijidb-data,target=/data \
   --entrypoint python nijidb-web /scripts/upload_images_to_r2.py --rewrite-db
 ```
 
-`--rewrite-db` 会先在数据目录创建 SQLite 备份，再把数据库和详情 HTML 中的 `/media/...` 引用改为公开 R2 URL。没有公开访问地址时可以省略该参数，仅执行图片上传。上传前会列出目标 prefix 的已有对象，按稳定 key 和文件大小跳过已存在文件，因此 SSH 断线或容器重启后可安全续传，不会从头重复上传；日志最后会报告新上传和跳过数量。长任务应使用 detached 容器并通过 `docker logs -f <container>` 查看。后续同步只配置 Endpoint、Bucket 和 S3 凭证时，会自动把新封面上传到 R2 但继续使用本地 `/media` 引用；补充 `R2_PUBLIC_BASE_URL` 后，才会同时生成 R2 引用。新闻运行时图片位于 `/data/images/news` 时也会按同一公开前缀读取，不需要改写新闻表。
+`--rewrite-db` 会先在数据目录创建 SQLite 备份，再为发行、新闻和联动图片写入公开 R2 URL，同时改写发行详情 HTML。没有公开访问地址时可以省略该参数，仅执行图片上传。上传前会列出目标 prefix 的已有对象，按稳定 key 和文件大小跳过已存在文件，因此 SSH 断线或容器重启后可安全续传，不会从头重复上传；日志最后会报告新上传和跳过数量。确认数据库引用已同步后，可显式追加 `--delete-unused-news` 清理 R2 中未被数据库引用的 `news/` 与 `news-archive/` 对象（默认不会删除任何对象）。长任务应使用 detached 容器并通过 `docker logs -f <container>` 查看。后续同步只配置 Endpoint、Bucket 和 S3 凭证时，会自动把新封面上传到 R2；补充 `R2_PUBLIC_BASE_URL` 后，页面会优先读取 R2。正式迁移前可先运行 `uv run --locked python scripts/prepare_production_database.py --database /data/nijidb.sqlite3` 检查本地路径；确认新闻/联动 R2 URL 和发行 R2 改写都已就绪后，再追加 `--apply`。该脚本只清除 SQLite 本地路径、不删除本地备份文件，并会保留在线数据库备份。
 
 ## 开发调试
 
@@ -98,6 +98,8 @@ uv run --locked python scripts/import_official_news.py \
 - `POST /api/admin/news/{id}/refresh` 手动刷新对应官网页面，支持历史来源。服务端检查管理员权限、官网 HTTPS 白名单、重定向与响应大小；失败保留旧内容，并返回 HTTP 状态、超时、网络或解析原因。
 - 编辑模式可以删除手动、归档和官网图片；来源图片删除会写入抑制记录，后续自动刷新不会悄悄恢复。图片按来源标识更新而非删除重建，保留图片 ID；正文或图片无变化不刷新 `updated_at`。保存新闻可传 `updated_at` 检测并发冲突，返回 409 时重新加载。
 - `/admin?section=music|news|database|account` 分区设置；桌面左侧目录、手机顶部页签。数据库页显示音乐/节目/新闻/联动最近 200 条变化记录，支持分类筛选和每页 15 条分页。
+- 新闻设置提供可选的慢速官方图床刷新队列：开启后按 5–60 秒间隔逐篇重新读取历史新闻，成功解析到官网图片后移除该篇归档图片引用但不删除本地备份文件；403、429、验证页等风控失败会记录页面并使用退避重试，也可以手动重新排队失败页面。默认关闭，避免新部署未经确认就请求官网。
+- 新闻摘要统一限制为 200 字；应用启动和后续导入/编辑时会自动截断超出的旧值。
 
 离线验证（临时数据库、模拟网络，不修改现有资料）：
 

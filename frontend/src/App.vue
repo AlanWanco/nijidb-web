@@ -125,6 +125,8 @@ onBeforeUnmount(() => {
           <a href="https://anilive.nekoss.cn/" target="_blank" rel="noopener noreferrer">AniLive</a>
           <a href="https://anilive-library.nekoss.cn/" target="_blank" rel="noopener noreferrer">AniLive Library</a>
         </span>
+        <span class="footer-divider" aria-hidden="true"></span>
+        <a class="footer-main-link" href="https://alanwanco.xyz/" target="_blank" rel="noopener noreferrer">alanwanco.xyz</a>
         <span class="footer-divider footer-project-divider" aria-hidden="true"></span>
          <span class="footer-title">{{ t("项目地址：") }}</span>
         <a class="footer-repo-link" href="https://github.com/AlanWanco/nijidb-web" target="_blank" rel="noopener noreferrer">

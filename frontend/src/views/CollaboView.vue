@@ -130,6 +130,18 @@ onBeforeUnmount(() => {
         <h1>{{ c("联动立绘档案") }}<span class="cb-title-mark" aria-hidden="true"></span></h1>
         <p class="cb-hero-lead">{{ c("每一次相遇，都有新的模样。") }}</p>
         <p class="cb-hero-description">{{ c("从联动企划到限定立绘，收藏虹咲的每一种色彩。") }}</p>
+        <form class="search cb-search" @submit.prevent="searchItems">
+          <svg class="cb-search-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="10.8" cy="10.8" r="6.5"></circle>
+            <path d="m16 16 4.5 4.5"></path>
+          </svg>
+          <input
+            v-model="search"
+            type="search"
+            :aria-label="c('标题、合作方或关键词')"
+            :placeholder="c('标题、合作方或关键词')"
+          /><button type="submit">{{ c("搜索") }} ↗</button>
+        </form>
       </div>
       <div class="cb-hero-art" aria-hidden="true">
         <span class="cb-hero-ring cb-hero-ring-outer"></span>
@@ -152,21 +164,9 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <form class="cb-toolbar" @submit.prevent="searchItems">
-      <div class="cb-search">
-        <svg class="cb-search-icon" viewBox="0 0 24 24" aria-hidden="true">
-          <circle cx="10.8" cy="10.8" r="6.5"></circle>
-          <path d="m16 16 4.5 4.5"></path>
-        </svg>
-        <input
-          v-model="search"
-          type="search"
-          :aria-label="c('标题、合作方或关键词')"
-          :placeholder="c('标题、合作方或关键词')"
-        /><button type="submit">{{ c("搜索") }} ↗</button>
-      </div>
+    <div class="cb-toolbar">
       <RouterLink class="cb-link cb-manage-link" to="/admin/collabo">{{ c("管理联动") }} ↗</RouterLink>
-    </form>
+    </div>
     <section class="cb-year-filter" :aria-label="c('年份')">
       <div class="cb-year-filter-heading">
         <span>YEAR / FILTER</span>

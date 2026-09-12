@@ -66,6 +66,7 @@ NEWS_IMAGE_MIN_WIDTH = 240
 NEWS_IMAGE_MIN_HEIGHT = 120
 NEWS_IMAGE_MAX_WIDTH = 10000
 NEWS_IMAGE_MAX_HEIGHT = 10000
+NEWS_SUMMARY_MAX_LENGTH = 200
 NEWS_FILENAME_RE = re.compile(r"^\[(\d{8})\](niji_topics|niji_news|as_news)_(?:\d+)_([^/]+)\.md$")
 NEWS_PAGE_ID_RE = re.compile(r"^\d+_[^/]+$")
 NEWS_CHROME_LINES = NEWS_CATEGORIES | {
@@ -239,6 +240,7 @@ CREATE TABLE IF NOT EXISTS news_images (
   position INTEGER NOT NULL DEFAULT 0,
   kind TEXT NOT NULL DEFAULT 'remote',
   local_path TEXT NOT NULL DEFAULT '',
+  public_url TEXT NOT NULL DEFAULT '',
   source_url TEXT NOT NULL DEFAULT '',
   alt_text TEXT NOT NULL DEFAULT '',
   width INTEGER NOT NULL DEFAULT 0,
@@ -273,6 +275,22 @@ CREATE TABLE IF NOT EXISTS news_sync_log (
   changed_count INTEGER NOT NULL DEFAULT 0,
   error TEXT
 );
+CREATE TABLE IF NOT EXISTS news_refresh_queue (
+  news_id TEXT PRIMARY KEY,
+  source_url TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  risk INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at TEXT NOT NULL DEFAULT '',
+  last_success_at TEXT NOT NULL DEFAULT '',
+  next_attempt_at TEXT NOT NULL DEFAULT '',
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(news_id) REFERENCES news_articles(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_news_refresh_queue_status
+  ON news_refresh_queue(status, next_attempt_at, updated_at);
 """
 
 
@@ -301,14 +319,20 @@ def clean_news_markdown(value: Any) -> str:
     return strip_news_image_markup("\n".join(lines).strip())
 
 
+def truncate_news_summary(value: Any) -> str:
+    return clean_news_markdown(value)[:NEWS_SUMMARY_MAX_LENGTH].rstrip()
+
+
 def ensure_news_schema(conn) -> None:
     conn.executescript(NEWS_SCHEMA_SQL)
+    image_columns = {row["name"] for row in conn.execute("PRAGMA table_info(news_images)")}
+    if "public_url" not in image_columns:
+        conn.execute("ALTER TABLE news_images ADD COLUMN public_url TEXT NOT NULL DEFAULT ''")
     for row in conn.execute("SELECT id, body_markdown, summary, manual_fields_json FROM news_articles").fetchall():
         manual_fields = decode_json(row["manual_fields_json"], [])
-        if "body_markdown" in manual_fields and "summary" in manual_fields:
-            continue
         body = row["body_markdown"] if "body_markdown" in manual_fields else clean_news_markdown(row["body_markdown"])
-        summary = row["summary"] if "summary" in manual_fields else clean_news_markdown(row["summary"])
+        # Summaries have a hard storage limit, including administrator-edited values.
+        summary = truncate_news_summary(row["summary"])
         if body != row["body_markdown"] or summary != row["summary"]:
             conn.execute(
                 "UPDATE news_articles SET body_markdown = ?, summary = ? WHERE id = ?", (body, summary, row["id"])
@@ -659,7 +683,7 @@ def parse_local_markdown(path: Path) -> dict[str, Any]:
     page_name = metadata_field(text, "页面名称")
     source_url = metadata_field(text, "来源")
     category = metadata_field(text, "分类")
-    summary = markdown_section(text, "摘要")
+    summary = truncate_news_summary(markdown_section(text, "摘要"))
     body_heading = re.search(r"^##\s+页面内容\s*$", text, re.MULTILINE)
     body = text[body_heading.end() :].strip() if body_heading else ""
     if re.search(r"^# ニュース\s*$", body, re.MULTILINE):
@@ -973,7 +997,7 @@ def parse_topic_detail(
         and line not in NEWS_CHROME_LINES
         and not NEWS_DATE_RE.fullmatch(line)
     )
-    summary = " ".join(body.split())[:500]
+    summary = truncate_news_summary(" ".join(body.split()))
     images: list[dict[str, Any]] = []
     seen: set[str] = set()
     for image in root.find_all("img"):
@@ -1009,7 +1033,7 @@ def parse_topic_detail(
         "published_at": normalize_news_date(published_at),
         "category": category,
         "tags": inferred_topic_tags(title, category, body),
-        "summary": clean_news_markdown(summary),
+        "summary": truncate_news_summary(summary),
         "body_markdown": clean_news_markdown(_html_markdown(root, source_url)) or body.strip() or summary,
         "source_url": _canonical_page_url(source_url),
         "source_file": "",
@@ -1044,7 +1068,7 @@ def upsert_news_record(conn, record: dict[str, Any], now: str | None = None) -> 
         "published_at": normalize_news_date(record.get("published_at")),
         "category": str(record.get("category") or "").strip(),
         "tags_json": json.dumps(tags, ensure_ascii=False),
-        "summary": clean_news_markdown(record.get("summary")),
+        "summary": truncate_news_summary(record.get("summary")),
         "body_markdown": clean_news_markdown(record.get("body_markdown")),
         "source_url": str(record.get("source_url") or "").strip(),
         "source_file": str(record.get("source_file") or "").strip(),
@@ -1070,6 +1094,7 @@ def upsert_news_record(conn, record: dict[str, Any], now: str | None = None) -> 
             values["tags_json"] = old["tags_json"]
         if not values["source_file"]:
             values["source_file"] = old["source_file"]
+    values["summary"] = truncate_news_summary(values["summary"])
     changed = not old or any(
         str(old[field] or "") != str(values[field] or "")
         for field in values
@@ -1198,6 +1223,8 @@ __all__ = [
     "news_image_tag_source",
     "parse_local_markdown",
     "parse_topic_detail",
+    "NEWS_SUMMARY_MAX_LENGTH",
+    "truncate_news_summary",
     "parse_topic_listing",
     "topic_next_offset",
     "upsert_news_record",

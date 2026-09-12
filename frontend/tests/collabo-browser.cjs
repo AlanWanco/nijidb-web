@@ -101,6 +101,8 @@ async function swipe(page, selector, dx, dy = 2) {
     page.on("pageerror", (e) => browserErrors.push(e.message));
     await page.goto("http://127.0.0.1:15173/collabo");
     await page.waitForSelector(".cb-card");
+    assert.equal(await page.locator(".cb-hero .cb-search").count(), 1);
+    assert.equal(await page.locator(".cb-toolbar .cb-search").count(), 0);
     assert.equal(await page.locator(".cb-card").count(), 24);
     assert.equal((await page.locator(".cb-card img").count()) <= 24, true);
     const heroBounds = await page.locator(".cb-hero").boundingBox();

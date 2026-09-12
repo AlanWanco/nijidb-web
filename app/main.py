@@ -61,6 +61,7 @@ from app.news import (
     parse_topic_detail,
     parse_topic_listing,
     topic_next_offset,
+    truncate_news_summary,
     upsert_news_record,
 )
 from app.news_fetch import (
@@ -460,6 +461,7 @@ def init_db() -> None:
          CREATE INDEX IF NOT EXISTS idx_program_occurrences_program ON program_occurrences(program_id, original_date, original_time);
          """)
         ensure_news_schema(conn)
+        ensure_news_refresh_queue(conn, recover_processing=True)
         ensure_collaboration_schema(conn)
         collaboration_index_path = next((path for path in COLLABORATION_INDEX_PATHS if path.is_file()), None)
         migrate_collaboration_sources(conn, collaboration_index_path, ILLUSTRATION_MANIFEST_PATH)
@@ -522,6 +524,8 @@ def init_db() -> None:
             "detail_interval_minutes": os.getenv("DETAIL_CHECK_INTERVAL_MINUTES", "5"),
             "news_interval_minutes": os.getenv("NEWS_CHECK_INTERVAL_MINUTES", "30"),
             "news_auto_sync": os.getenv("NEWS_AUTO_SYNC", "1"),
+            "news_slow_refresh_enabled": os.getenv("NEWS_SLOW_REFRESH", "0"),
+            "news_slow_refresh_delay_seconds": os.getenv("NEWS_SLOW_REFRESH_DELAY_SECONDS", "10"),
             "onebot_url": os.getenv("ONEBOT_URL", ""),
             "onebot_token": os.getenv("ONEBOT_TOKEN", ""),
             "onebot_target": os.getenv("ONEBOT_TARGET", ""),
@@ -2719,12 +2723,21 @@ def normalized_settings(values: dict[str, Any]) -> dict[str, str]:
         news_interval = max(10, min(1440, int(str(values.get("news_interval_minutes", "30")))))
     except ValueError:
         news_interval = 30
+    try:
+        news_slow_refresh_delay = max(
+            5, min(60, int(str(values.get("news_slow_refresh_delay_seconds", "10"))))
+        )
+    except ValueError:
+        news_slow_refresh_delay = 10
     news_auto_sync = "1" if boolean_value(values.get("news_auto_sync"), True) else "0"
+    news_slow_refresh_enabled = "1" if boolean_value(values.get("news_slow_refresh_enabled"), False) else "0"
     return {
         "interval_minutes": str(interval),
         "detail_interval_minutes": str(detail_interval),
         "news_interval_minutes": str(news_interval),
         "news_auto_sync": news_auto_sync,
+        "news_slow_refresh_enabled": news_slow_refresh_enabled,
+        "news_slow_refresh_delay_seconds": str(news_slow_refresh_delay),
         "onebot_url": str(values.get("onebot_url", "") or "").strip(),
         "onebot_token": str(values.get("onebot_token", "") or "").strip(),
         "onebot_target": str(values.get("onebot_target", "") or "").strip(),
@@ -3045,17 +3058,22 @@ def r2_is_configured() -> bool:
     return bool(r2_upload_is_configured() and R2_PUBLIC_BASE_URL)
 
 
-def r2_object_key(filename: str) -> str:
-    return f"{R2_IMAGE_PREFIX}/{filename}" if R2_IMAGE_PREFIX else filename
+def r2_object_key(relative_path: str) -> str:
+    clean_path = str(relative_path or "").replace("\\", "/").lstrip("/")
+    return f"{R2_IMAGE_PREFIX}/{clean_path}" if R2_IMAGE_PREFIX else clean_path
+
+
+def r2_public_image_url(relative_path: str) -> str:
+    return f"{R2_PUBLIC_BASE_URL}/{quote(r2_object_key(relative_path), safe='/')}"
 
 
 def public_image_url(filename: str) -> str:
     if not r2_is_configured():
         return f"/media/{filename}"
-    return f"{R2_PUBLIC_BASE_URL}/{quote(r2_object_key(filename), safe='/')}"
+    return r2_public_image_url(filename)
 
 
-def upload_cover_to_r2(path: Path) -> None:
+def upload_image_to_r2(path: Path, relative_path: str | None = None) -> None:
     global _r2_client
     if _r2_client is None:
         _r2_client = boto3.client(
@@ -3069,9 +3087,13 @@ def upload_cover_to_r2(path: Path) -> None:
     _r2_client.upload_file(
         str(path),
         R2_BUCKET,
-        r2_object_key(path.name),
+        r2_object_key(relative_path or path.name),
         ExtraArgs={"ContentType": content_type, "CacheControl": "no-cache"},
     )
+
+
+def upload_cover_to_r2(path: Path) -> None:
+    upload_image_to_r2(path)
 
 
 async def cache_cover(item: dict[str, str], client: httpx.AsyncClient, force_refresh: bool = False) -> bool:
@@ -3225,15 +3247,17 @@ def news_image_target(row: sqlite3.Row | dict[str, Any]) -> Path | None:
 
 
 def news_image_url(row: sqlite3.Row | dict[str, Any]) -> str:
+    stored_public_url = str(row.get("public_url", "") if isinstance(row, dict) else row["public_url"] or "").strip()
+    if stored_public_url and valid_external_url(stored_public_url):
+        return stored_public_url
     target = news_image_target(row)
-    local_path = str(row["local_path"] if isinstance(row, dict) else row["local_path"] or "").strip()
     if target:
         try:
             relative = target.relative_to(MEDIA_DIR.resolve()).as_posix()
         except ValueError:
             relative = ""
-        if relative and local_path.startswith("runtime:") and r2_is_configured():
-            return f"{R2_PUBLIC_BASE_URL}/{quote(r2_object_key(relative), safe='/')}"
+        if relative and r2_is_configured():
+            return r2_public_image_url(relative)
         image_id = row["id"]
         return f"/api/news/images/{image_id}"
     source_url = str(row["source_url"] if isinstance(row, dict) else row["source_url"] or "").strip()
@@ -3249,6 +3273,7 @@ def news_image_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "url": news_image_url(row),
         "source_url": str(row["source_url"] or ""),
         "local_path": str(row["local_path"] or ""),
+        "public_url": str(row["public_url"] or ""),
         "alt_text": str(row["alt_text"] or ""),
         "width": row["width"],
         "height": row["height"],
@@ -3275,7 +3300,7 @@ def news_summary_payload(
         "published_at": row["published_at"],
         "category": row["category"],
         "tags": clean_tag_values(decode_json(row["tags_json"], row["tags_json"])),
-        "summary": clean_news_markdown(row["summary"]),
+        "summary": truncate_news_summary(row["summary"]),
         "source_url": row["source_url"],
         "image_count": count,
         "edited": bool(decode_json(row["manual_fields_json"], [])),
@@ -3349,6 +3374,226 @@ def news_sync_status(conn: sqlite3.Connection) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def ensure_news_refresh_queue(conn: sqlite3.Connection, recover_processing: bool = False) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    if recover_processing:
+        conn.execute(
+            "UPDATE news_refresh_queue SET status = 'pending', updated_at = ? WHERE status = 'processing'",
+            (now,),
+        )
+    articles = conn.execute("SELECT id, source_url FROM news_articles").fetchall()
+    queued_by_id = {
+        row["news_id"]: row["source_url"]
+        for row in conn.execute("SELECT news_id, source_url FROM news_refresh_queue").fetchall()
+    }
+    for article in articles:
+        source_url = str(article["source_url"] or "").strip()
+        queued_source_url = queued_by_id.get(article["id"])
+        if queued_source_url is None:
+            conn.execute(
+                """INSERT INTO news_refresh_queue
+                (news_id, source_url, status, created_at, updated_at)
+                VALUES (?, ?, 'pending', ?, ?)""",
+                (article["id"], source_url, now, now),
+            )
+        elif str(queued_source_url or "") != source_url:
+            conn.execute(
+                """UPDATE news_refresh_queue
+                   SET source_url = ?, status = 'pending', attempts = 0, risk = 0,
+                       last_attempt_at = '', last_success_at = '', next_attempt_at = '', last_error = ?, updated_at = ?
+                 WHERE news_id = ?""",
+                (source_url, "来源地址已变化，等待重新刷新", now, article["id"]),
+            )
+    conn.execute(
+        "DELETE FROM news_refresh_queue WHERE news_id NOT IN (SELECT id FROM news_articles)"
+    )
+
+
+def news_slow_refresh_status(conn: sqlite3.Connection) -> dict[str, Any]:
+    ensure_news_refresh_queue(conn)
+    rows = conn.execute("SELECT status, risk FROM news_refresh_queue").fetchall()
+    counts = {status: 0 for status in ("pending", "processing", "completed", "failed", "skipped")}
+    risk_failed = 0
+    for row in rows:
+        status = str(row["status"] or "pending")
+        counts[status] = counts.get(status, 0) + 1
+        if status == "failed" and row["risk"]:
+            risk_failed += 1
+    failed_rows = conn.execute(
+        """SELECT q.news_id, q.source_url, q.status, q.attempts, q.risk, q.last_error,
+                  q.last_attempt_at, q.next_attempt_at, q.updated_at, a.title
+             FROM news_refresh_queue q
+             JOIN news_articles a ON a.id = q.news_id
+            WHERE q.status IN ('failed', 'skipped')
+            ORDER BY q.risk DESC, q.updated_at DESC, q.news_id
+            LIMIT 30"""
+    ).fetchall()
+    failed_pages = [
+        {
+            "id": str(row["news_id"]),
+            "title": str(row["title"] or ""),
+            "source_url": str(row["source_url"] or ""),
+            "status": str(row["status"] or "failed"),
+            "attempts": int(row["attempts"] or 0),
+            "risk": bool(row["risk"]),
+            "error": str(row["last_error"] or ""),
+            "last_attempt_at": str(row["last_attempt_at"] or ""),
+            "next_attempt_at": str(row["next_attempt_at"] or ""),
+            "updated_at": str(row["updated_at"] or ""),
+        }
+        for row in failed_rows
+    ]
+    latest = conn.execute(
+        """SELECT q.news_id, q.last_attempt_at, q.last_success_at, q.status, a.title
+             FROM news_refresh_queue q
+             JOIN news_articles a ON a.id = q.news_id
+            WHERE q.last_attempt_at != ''
+            ORDER BY q.last_attempt_at DESC
+            LIMIT 1"""
+    ).fetchone()
+    return {
+        "total": len(rows),
+        "pending": counts["pending"],
+        "processing": counts["processing"],
+        "completed": counts["completed"],
+        "failed": counts["failed"],
+        "skipped": counts["skipped"],
+        "remaining": counts["pending"] + counts["processing"] + counts["failed"],
+        "risk_failed": risk_failed,
+        "failed_pages": failed_pages,
+        "last_page": (
+            {
+                "id": str(latest["news_id"]),
+                "title": str(latest["title"] or ""),
+                "status": str(latest["status"] or ""),
+                "attempted_at": str(latest["last_attempt_at"] or ""),
+                "succeeded_at": str(latest["last_success_at"] or ""),
+            }
+            if latest
+            else None
+        ),
+        "running": news_run_lock.locked(),
+    }
+
+
+def news_refresh_error_is_risk(error: Exception, reason: str) -> bool:
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if status_code in {401, 403, 429}:
+        return True
+    text = f"{reason} {error}".lower()
+    return any(marker in text for marker in ("access denied", "just a moment", "verify you are human", "风控", "访问被拒绝"))
+
+
+def news_refresh_error_is_permanent(error: Exception) -> bool:
+    response = getattr(error, "response", None)
+    return getattr(response, "status_code", None) in {404, 410}
+
+
+def news_refresh_retry_at(attempts: int, risk: bool) -> str:
+    base = 30 * 60 if risk else 5 * 60
+    seconds = min(24 * 60 * 60, base * (2 ** min(max(attempts - 1, 0), 4)))
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+
+
+async def news_slow_refresh_once() -> dict[str, Any]:
+    """Refresh one archived article using official image URLs, then pause in the scheduler."""
+    if news_run_lock.locked():
+        return {"processed": False, "busy": True}
+    async with news_run_lock:
+        now = datetime.now(timezone.utc).isoformat()
+        with db() as conn:
+            ensure_news_refresh_queue(conn)
+            row = conn.execute(
+                """SELECT q.*, a.title
+                     FROM news_refresh_queue q
+                     JOIN news_articles a ON a.id = q.news_id
+                    WHERE q.status = 'pending'
+                       OR (q.status = 'failed' AND q.next_attempt_at != '' AND q.next_attempt_at <= ?)
+                    ORDER BY CASE WHEN q.status = 'pending' THEN 0 ELSE 1 END,
+                             CASE WHEN a.published_at = '' THEN 1 ELSE 0 END,
+                             a.published_at ASC, q.news_id
+                    LIMIT 1""",
+                (now,),
+            ).fetchone()
+            if row is None:
+                return {"processed": False, "idle": True}
+            attempts = int(row["attempts"] or 0) + 1
+            conn.execute(
+                """UPDATE news_refresh_queue
+                   SET status = 'processing', attempts = ?, last_attempt_at = ?, updated_at = ?
+                 WHERE news_id = ?""",
+                (attempts, now, now, row["news_id"]),
+            )
+
+        record_id = str(row["news_id"])
+        source_url = str(row["source_url"] or "").strip()
+        try:
+            source_url = validate_news_url(source_url)
+        except ValueError as exc:
+            reason = describe_news_fetch_error(exc)
+            with db() as conn:
+                conn.execute(
+                    """UPDATE news_refresh_queue
+                       SET status = 'skipped', risk = 0, last_error = ?, next_attempt_at = '', updated_at = ?
+                     WHERE news_id = ?""",
+                    (reason, datetime.now(timezone.utc).isoformat(), record_id),
+                )
+            return {"processed": True, "status": "skipped", "news_id": record_id, "error": reason}
+
+        try:
+            async with httpx.AsyncClient(timeout=30, headers=NEWS_HEADERS) as client:
+                changed = await refresh_news_record(
+                    client,
+                    record_id,
+                    source_url,
+                    force=True,
+                    remote_only=True,
+                )
+        except Exception as exc:
+            reason = describe_news_fetch_error(exc)
+            risk = news_refresh_error_is_risk(exc, reason)
+            permanent = news_refresh_error_is_permanent(exc)
+            next_attempt_at = "" if permanent else news_refresh_retry_at(attempts, risk)
+            with db() as conn:
+                conn.execute(
+                    """UPDATE news_refresh_queue
+                       SET status = ?, risk = ?, last_error = ?, next_attempt_at = ?, updated_at = ?
+                     WHERE news_id = ?""",
+                    (
+                        "skipped" if permanent else "failed",
+                        int(risk),
+                        reason,
+                        next_attempt_at,
+                        datetime.now(timezone.utc).isoformat(),
+                        record_id,
+                    ),
+                )
+            print(f"[news-slow-refresh] failed {record_id}: {reason}", flush=True)
+            return {
+                "processed": True,
+                "status": "skipped" if permanent else "failed",
+                "news_id": record_id,
+                "error": reason,
+                "risk": risk,
+                "next_attempt_at": next_attempt_at,
+            }
+
+        completed_at = datetime.now(timezone.utc).isoformat()
+        with db() as conn:
+            conn.execute(
+                """UPDATE news_refresh_queue
+                   SET status = 'completed', risk = 0, last_success_at = ?, next_attempt_at = '',
+                       last_error = '', updated_at = ?
+                 WHERE news_id = ?""",
+                (completed_at, completed_at, record_id),
+            )
+        if changed:
+            log_database_activity("news", f"慢速刷新官网新闻：{str(row['title'] or '')[:80]}")
+        print(f"[news-slow-refresh] completed {record_id}", flush=True)
+        return {"processed": True, "status": "completed", "news_id": record_id, "changed": changed}
+
+
 def normalized_news_edit_value(field: str, value: Any) -> str:
     if field == "tags_json":
         return json.dumps(clean_tag_values(value), ensure_ascii=False)
@@ -3362,7 +3607,9 @@ def normalized_news_edit_value(field: str, value: Any) -> str:
                 raise ValueError("发布日期格式无效") from exc
         return raw
     result = str(value or "").strip()
-    limits = {"title": 500, "category": 100, "summary": 10000, "body_markdown": 500000, "source_url": 2000}
+    limits = {"title": 500, "category": 100, "summary": 200, "body_markdown": 500000, "source_url": 2000}
+    if field == "summary":
+        return truncate_news_summary(result)
     if len(result) > limits.get(field, 500000):
         raise ValueError(f"{field}内容过长")
     if field == "source_url" and result:
@@ -3406,6 +3653,7 @@ async def refresh_news_record(
     source_url: str,
     listing: dict[str, str] | None = None,
     force: bool = False,
+    remote_only: bool = False,
 ) -> bool:
     with db() as conn:
         old = conn.execute("SELECT * FROM news_articles WHERE id = ?", (record_id,)).fetchone()
@@ -3434,6 +3682,12 @@ async def refresh_news_record(
             changed = upsert_news_record(conn, record, timestamp)[0] if record else False
             if response.status_code == 304:
                 conn.execute("UPDATE news_articles SET last_seen_at = ? WHERE id = ?", (timestamp, record_id))
+            if remote_only and record and record.get("images"):
+                removed = conn.execute(
+                    "DELETE FROM news_images WHERE news_id = ? AND kind = 'archive' AND local_path != ''",
+                    (record_id,),
+                ).rowcount
+                changed = changed or bool(removed)
             conn.execute(
                 """INSERT INTO news_fetch_state (news_id, source_url, etag, last_modified, checked_at)
                 VALUES (?, ?, ?, ?, ?) ON CONFLICT(news_id) DO UPDATE SET source_url=excluded.source_url,
@@ -3559,6 +3813,27 @@ async def news_scheduler() -> None:
             pass
 
 
+async def news_slow_refresh_scheduler() -> None:
+    """Run the opt-in migration queue at a polite, administrator-controlled pace."""
+    await wait_or_stop(45)
+    while not stop_event.is_set():
+        config = normalized_settings(settings())
+        delay = int(config["news_slow_refresh_delay_seconds"])
+        if boolean_value(config.get("news_slow_refresh_enabled"), False):
+            try:
+                result = await news_slow_refresh_once()
+                if result.get("busy"):
+                    delay = min(delay, 5)
+                elif not result.get("processed"):
+                    delay = 30
+            except Exception as exc:
+                print(f"[news-slow-refresh] scheduler error: {type(exc).__name__}", flush=True)
+                delay = max(delay, 30)
+        else:
+            delay = 15
+        await wait_or_stop(delay)
+
+
 def next_daily_backup_at(current: datetime) -> datetime:
     return (current + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -3585,10 +3860,11 @@ async def lifespan(_: FastAPI):
     source_task = asyncio.create_task(source_scheduler())
     detail_task = asyncio.create_task(detail_scheduler())
     news_task = asyncio.create_task(news_scheduler())
+    news_slow_task = asyncio.create_task(news_slow_refresh_scheduler())
     backup_task = asyncio.create_task(database_backup_scheduler())
     yield
     stop_event.set()
-    await asyncio.gather(source_task, detail_task, news_task, backup_task)
+    await asyncio.gather(source_task, detail_task, news_task, news_slow_task, backup_task)
 
 
 app = FastAPI(title="Nijigasaki DB", lifespan=lifespan)
@@ -3799,7 +4075,7 @@ async def collaboration_illustration_asset(asset_path: str):
 
 def news_article_payload(conn: sqlite3.Connection, row: sqlite3.Row, detail: bool = False) -> dict[str, Any]:
     image_rows = conn.execute(
-        "SELECT id, position, kind, local_path, source_url, alt_text, width, height, bytes, sha256 FROM news_images WHERE news_id = ? ORDER BY position, id",
+        "SELECT id, position, kind, local_path, public_url, source_url, alt_text, width, height, bytes, sha256 FROM news_images WHERE news_id = ? ORDER BY position, id",
         (row["id"],),
     ).fetchall()
     payload = news_summary_payload(row, {str(row["id"]): len(image_rows)}, news_article_tag_ids(conn, str(row["id"])))
@@ -4056,11 +4332,18 @@ async def api_get_settings(request: Request) -> dict[str, Any]:
     require_api_admin(request)
     with db() as conn:
         news_last = news_sync_status(conn)
+        slow_refresh = news_slow_refresh_status(conn)
+        config = {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM settings")}
+    slow_refresh["enabled"] = boolean_value(config.get("news_slow_refresh_enabled"), False)
+    slow_refresh["delay_seconds"] = int(
+        normalized_settings(config)["news_slow_refresh_delay_seconds"]
+    )
     return {
         "settings": public_settings(),
         "activity_logs": recent_database_logs(200),
         "news_last_sync": news_last,
         "news_syncing": news_run_lock.locked(),
+        "news_slow_refresh": slow_refresh,
     }
 
 
@@ -4077,6 +4360,34 @@ async def api_save_settings(request: Request) -> dict[str, dict[str, str]]:
     save_settings(values)
     news_settings_event.set()
     return {"settings": values}
+
+
+@app.post("/api/admin/news/slow-refresh/run")
+async def api_admin_news_slow_refresh_run(request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    if news_run_lock.locked():
+        raise HTTPException(409, "新闻检查正在进行，请稍后再试")
+    result = await news_slow_refresh_once()
+    with db() as conn:
+        result["news_slow_refresh"] = news_slow_refresh_status(conn)
+    return result
+
+
+@app.post("/api/admin/news/slow-refresh/retry")
+async def api_admin_news_slow_refresh_retry(request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        ensure_news_refresh_queue(conn)
+        result = conn.execute(
+            """UPDATE news_refresh_queue
+               SET status = 'pending', attempts = 0, risk = 0, last_attempt_at = '',
+                   next_attempt_at = '', last_error = '', updated_at = ?
+             WHERE status IN ('failed', 'skipped')""",
+            (now,),
+        )
+        status = news_slow_refresh_status(conn)
+    return {"reset_count": result.rowcount, "news_slow_refresh": status}
 
 
 async def restore_validated_database(source_path: Path) -> dict[str, str]:
@@ -4171,19 +4482,31 @@ async def api_admin_news_upload_image(news_id: str, request: Request) -> dict[st
             temporary.replace(target)
         finally:
             temporary.unlink(missing_ok=True)
+    r2_relative = (Path("news") / relative).as_posix()
+    r2_url = ""
+    if r2_upload_is_configured():
+        try:
+            await asyncio.to_thread(upload_image_to_r2, target, r2_relative)
+        except Exception as exc:
+            raise HTTPException(502, "新闻图片上传到 R2 失败，请稍后重试") from exc
+        if r2_is_configured():
+            r2_url = r2_public_image_url(r2_relative)
     alt_text = unquote(str(request.headers.get("x-alt-text", ""))).strip()[:500]
     with db() as conn:
         existing = conn.execute(
-            "SELECT id FROM news_images WHERE news_id = ? AND kind = 'manual' AND local_path = ? LIMIT 1",
+            "SELECT id, public_url FROM news_images WHERE news_id = ? AND kind = 'manual' AND local_path = ? LIMIT 1",
             (news_id, f"runtime:{relative.as_posix()}"),
         ).fetchone()
-        if not existing:
+        if existing:
+            if r2_url and str(existing["public_url"] or "") != r2_url:
+                conn.execute("UPDATE news_images SET public_url = ? WHERE id = ?", (r2_url, existing["id"]))
+        else:
             position = conn.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM news_images WHERE news_id = ?", (news_id,)).fetchone()[0]
             conn.execute(
                 """INSERT INTO news_images
-                (news_id, position, kind, local_path, source_url, alt_text, bytes, sha256, created_at)
-                VALUES (?, ?, 'manual', ?, '', ?, ?, ?, ?)""",
-                (news_id, position, f"runtime:{relative.as_posix()}", alt_text, total, digest, datetime.now(timezone.utc).isoformat()),
+                (news_id, position, kind, local_path, public_url, source_url, alt_text, bytes, sha256, created_at)
+                VALUES (?, ?, 'manual', ?, ?, '', ?, ?, ?, ?)""",
+                (news_id, position, f"runtime:{relative.as_posix()}", r2_url, alt_text, total, digest, datetime.now(timezone.utc).isoformat()),
             )
         updated = conn.execute("SELECT * FROM news_articles WHERE id = ?", (news_id,)).fetchone()
         result = news_article_payload(conn, updated, detail=True)
@@ -4555,12 +4878,23 @@ async def api_admin_collabo_upload(request: Request) -> dict[str, list[dict[str,
                 temporary.replace(target)
             finally:
                 temporary.unlink(missing_ok=True)
-        url = f"/api/collabo/assets/{quote(relative_text, safe='/')}"
+        local_url = f"/api/collabo/assets/{quote(relative_text, safe='/')}"
+        r2_relative = (Path("illustrations") / relative).as_posix()
+        r2_url = ""
+        if r2_upload_is_configured():
+            try:
+                await asyncio.to_thread(upload_image_to_r2, target, r2_relative)
+            except Exception as exc:
+                raise HTTPException(502, "联动图片上传到 R2 失败，请稍后重试") from exc
+            if r2_is_configured():
+                r2_url = r2_public_image_url(r2_relative)
+        url = r2_url or local_url
         images.append({
             "id": digest,
             "position": len(images),
-            "path": url,
+            "path": local_url,
             "asset_path": relative_text,
+            "public_url": r2_url,
             "thumbnail_path": "",
             "url": url,
             "thumbnail_url": "",

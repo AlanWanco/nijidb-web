@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from app.news import (
+    NEWS_SUMMARY_MAX_LENGTH,
     clean_news_markdown,
     ensure_news_schema,
     image_references,
@@ -20,6 +21,7 @@ from app.news import (
     normalized_tags,
     parse_local_markdown,
     parse_topic_detail,
+    truncate_news_summary,
     upsert_news_record,
 )
 from app.news_fetch import fetch_news_page, filter_news_images
@@ -130,6 +132,22 @@ class NewsStorageTests(unittest.TestCase):
             [{"kind": "remote", "local_path": "", "source_url": "https://example.com/hero.jpg"}],
         )
 
+    def test_summary_is_limited_for_new_and_existing_records(self):
+        long_summary = "摘要" * NEWS_SUMMARY_MAX_LENGTH
+        self.assertEqual(len(truncate_news_summary(long_summary)), NEWS_SUMMARY_MAX_LENGTH)
+        upsert_news_record(self.conn, record(summary=long_summary))
+        self.assertEqual(
+            len(self.conn.execute("SELECT summary FROM news_articles").fetchone()[0]), NEWS_SUMMARY_MAX_LENGTH
+        )
+        self.conn.execute(
+            "UPDATE news_articles SET summary = ?, manual_fields_json = '[\"summary\"]'",
+            (long_summary,),
+        )
+        ensure_news_schema(self.conn)
+        self.assertEqual(
+            len(self.conn.execute("SELECT summary FROM news_articles").fetchone()[0]), NEWS_SUMMARY_MAX_LENGTH
+        )
+
     def test_html_preserves_markdown(self):
         parsed = parse_topic_detail(HTML, URL)
         self.assertIn("**更新本文**", parsed["body_markdown"])
@@ -200,6 +218,88 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({item["source_label"] for item in data["items"]}, {"Official Site News"})
         self.assertEqual([item["count"] for item in data["source_options"]], [2, 1])
         self.assertEqual((await self.client.get("/api/news?source=niji_topics")).json()["total"], 1)
+
+    async def test_slow_refresh_settings_and_queue_status(self):
+        self.login()
+        response = await self.client.patch(
+            "/api/admin/settings",
+            json={"news_slow_refresh_enabled": "1", "news_slow_refresh_delay_seconds": "2"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["settings"]["news_slow_refresh_enabled"], "1")
+        self.assertEqual(response.json()["settings"]["news_slow_refresh_delay_seconds"], "5")
+        data = (await self.client.get("/api/admin/settings")).json()
+        self.assertEqual(data["news_slow_refresh"]["total"], 3)
+        self.assertEqual(data["news_slow_refresh"]["pending"], 3)
+        self.assertTrue(data["news_slow_refresh"]["enabled"])
+        self.assertEqual(data["news_slow_refresh"]["delay_seconds"], 5)
+
+    async def test_database_backup_contains_program_news_and_collabo_tables(self):
+        self.login()
+        response = await self.client.get("/api/admin/backup")
+        self.assertEqual(response.status_code, 200)
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as backup:
+            backup.write(response.content)
+            backup.flush()
+            connection = sqlite3.connect(backup.name)
+            tables = {
+                row[0]
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            connection.close()
+        self.assertTrue({"programs", "releases", "news_articles", "collaboration_items"}.issubset(tables))
+
+    async def test_news_upload_writes_r2_reference(self):
+        self.login()
+        image_dir = Path(self.directory.name) / "images" / "news"
+        with (
+            patch.object(main, "NEWS_RUNTIME_DIR", image_dir),
+            patch.object(main, "r2_upload_is_configured", return_value=True),
+            patch.object(main, "r2_is_configured", return_value=True),
+            patch.object(main, "R2_PUBLIC_BASE_URL", "https://images.example.test"),
+            patch.object(main, "upload_image_to_r2") as upload,
+        ):
+            response = await self.client.post(
+                f"/api/admin/news/{record()['id']}/images",
+                content=b"\xff\xd8\xffnews-image",
+                headers={"content-type": "image/jpeg", "x-filename": "cover.jpg"},
+            )
+        self.assertEqual(response.status_code, 200)
+        image = response.json()["article"]["images"][-1]
+        self.assertTrue(image["public_url"].startswith("https://images.example.test/images/news/"))
+        upload.assert_called_once()
+        with main.db() as connection:
+            stored = connection.execute("SELECT public_url FROM news_images WHERE id = ?", (image["id"],)).fetchone()
+        self.assertEqual(stored[0], image["public_url"])
+
+    async def test_collabo_upload_writes_r2_reference_when_saved(self):
+        self.login()
+        image_dir = Path(self.directory.name) / "images" / "illustrations"
+        with (
+            patch.object(main, "ILLUSTRATION_RUNTIME_DIR", image_dir),
+            patch.object(main, "r2_upload_is_configured", return_value=True),
+            patch.object(main, "r2_is_configured", return_value=True),
+            patch.object(main, "R2_PUBLIC_BASE_URL", "https://images.example.test"),
+            patch.object(main, "upload_image_to_r2") as upload,
+        ):
+            uploaded = await self.client.post(
+                "/api/admin/collabo/assets",
+                content=b"\xff\xd8\xffcollabo-image",
+                headers={"content-type": "image/jpeg", "x-filename": "illustration.jpg"},
+            )
+            self.assertEqual(uploaded.status_code, 200)
+            saved = await self.client.post(
+                "/api/admin/collabo",
+                json={
+                    "title": "测试联动",
+                    "date": "2026-09-11",
+                    "images": uploaded.json()["images"],
+                },
+            )
+        self.assertEqual(saved.status_code, 200)
+        image = saved.json()["item"]["images"][0]
+        self.assertTrue(image["public_url"].startswith("https://images.example.test/images/illustrations/"))
+        upload.assert_called_once()
 
     async def test_refresh_auth_failure_and_manual_edit(self):
         endpoint = f"/api/admin/news/{record()['id']}"
@@ -291,6 +391,46 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["changed_count"], 0)
         self.assertTrue(any(headers and headers.get("If-None-Match") == "v1" for _, headers in requests))
         self.assertTrue(all("news.php" not in url for url, _ in requests))
+
+    async def test_slow_refresh_uses_official_images_and_removes_archive_refs(self):
+        article_id = news_id("niji_topics", "01_123")
+        with main.db() as conn:
+            conn.execute(
+                "INSERT INTO news_images(news_id, kind, local_path, source_url, created_at) VALUES (?, 'archive', ?, '', '')",
+                (article_id, "archive:pic/old.jpg"),
+            )
+        slow_html = HTML.replace("</main>", '<img src="/valid.jpg" width="640" height="360"></main>')
+        with patch.object(main, "fetch_news_page", AsyncMock(return_value=httpx.Response(200, text=slow_html))):
+            result = await main.news_slow_refresh_once()
+        self.assertEqual(result["status"], "completed")
+        with main.db() as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM news_images WHERE news_id = ? AND kind = 'archive'", (article_id,)
+                ).fetchone()[0],
+                0,
+            )
+            status = main.news_slow_refresh_status(conn)
+        self.assertEqual(status["completed"], 1)
+        self.assertEqual(status["total"], 3)
+
+    async def test_slow_refresh_records_risk_failures_for_later_retry(self):
+        request = httpx.Request("GET", URL)
+        response = httpx.Response(403, request=request)
+        error = httpx.HTTPStatusError("blocked", request=request, response=response)
+        with patch.object(main, "fetch_news_page", AsyncMock(side_effect=error)):
+            result = await main.news_slow_refresh_once()
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["risk"])
+        with main.db() as conn:
+            failed = conn.execute(
+                "SELECT status, risk, last_error, next_attempt_at FROM news_refresh_queue WHERE news_id = ?",
+                (result["news_id"],),
+            ).fetchone()
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["risk"], 1)
+        self.assertIn("403", failed["last_error"])
+        self.assertTrue(failed["next_attempt_at"])
 
     async def test_refresh_busy_and_conflict(self):
         self.login()

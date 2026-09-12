@@ -10,8 +10,8 @@ const router = useRouter();
 const route = useRoute();
 const sections = [
   { id: "music", label: "音乐抓取设置" },
-  { id: "bot", label: "Bot 设置" },
   { id: "news", label: "新闻抓取设置" },
+  { id: "bot", label: "Bot 设置" },
   { id: "database", label: "数据库" },
   { id: "account", label: "账号安全" },
 ];
@@ -23,12 +23,15 @@ const section = computed(() =>
 const logCategory = ref("");
 const logPage = ref(1);
 const newsLastSync = ref(null);
+const newsSlowRefresh = ref(null);
 const refreshingLogs = ref(false);
 const settings = reactive({
   interval_minutes: "10",
   detail_interval_minutes: "5",
   news_interval_minutes: "30",
   news_auto_sync: "1",
+  news_slow_refresh_enabled: "0",
+  news_slow_refresh_delay_seconds: "10",
   onebot_url: "",
   onebot_token: "",
   onebot_target: "",
@@ -44,6 +47,8 @@ const saving = ref(false);
 const testing = ref(false);
 const syncing = ref(false);
 const newsSyncing = ref(false);
+const newsSlowRefreshing = ref(false);
+const newsSlowRetrying = ref(false);
 const activityLogs = ref([]);
 const changingPassword = ref(false);
 const message = ref("");
@@ -122,6 +127,7 @@ async function loadSettings() {
     setSettings(data.settings);
     activityLogs.value = data.activity_logs || [];
     newsLastSync.value = data.news_last_sync;
+    newsSlowRefresh.value = data.news_slow_refresh || null;
     if (section.value === "database") await loadBackups();
   } catch (requestError) {
     showError(requestError);
@@ -136,6 +142,7 @@ async function refreshActivity() {
     const data = await api("/api/admin/settings");
     activityLogs.value = data.activity_logs || [];
     newsLastSync.value = data.news_last_sync;
+    newsSlowRefresh.value = data.news_slow_refresh || newsSlowRefresh.value;
   } catch (requestError) {
     showError(requestError);
   } finally {
@@ -179,7 +186,12 @@ async function saveSettings() {
   try {
     const keys =
       section.value === "news"
-        ? ["news_auto_sync", "news_interval_minutes"]
+        ? [
+            "news_auto_sync",
+            "news_interval_minutes",
+            "news_slow_refresh_enabled",
+            "news_slow_refresh_delay_seconds",
+          ]
         : section.value === "bot"
           ? ["onebot_url", "onebot_token", "onebot_target", "onebot_profile"]
           : ["interval_minutes", "detail_interval_minutes"];
@@ -253,6 +265,50 @@ async function syncNewsNow() {
     showError(requestError);
   } finally {
     newsSyncing.value = false;
+  }
+}
+
+async function runNewsSlowRefresh() {
+  if (newsSlowRefreshing.value) return;
+  newsSlowRefreshing.value = true;
+  message.value = "";
+  error.value = "";
+  try {
+    const data = await api("/api/admin/news/slow-refresh/run", { method: "POST" });
+    newsSlowRefresh.value = data.news_slow_refresh || newsSlowRefresh.value;
+    if (data.status === "failed") error.value = `${t("慢速刷新失败")}: ${data.error}`;
+    else if (data.status === "skipped") error.value = `${t("慢速刷新跳过")}: ${data.error}`;
+    else if (data.processed) message.value = t("慢速刷新已处理一篇新闻");
+    else message.value = t("慢速刷新队列暂时没有待处理新闻");
+  } catch (requestError) {
+    showError(requestError);
+  } finally {
+    newsSlowRefreshing.value = false;
+  }
+}
+
+async function refreshNewsSlowStatus() {
+  try {
+    const data = await api("/api/admin/settings");
+    newsSlowRefresh.value = data.news_slow_refresh || newsSlowRefresh.value;
+  } catch (requestError) {
+    showError(requestError);
+  }
+}
+
+async function retryNewsSlowRefresh() {
+  if (newsSlowRetrying.value) return;
+  newsSlowRetrying.value = true;
+  message.value = "";
+  error.value = "";
+  try {
+    const data = await api("/api/admin/news/slow-refresh/retry", { method: "POST" });
+    newsSlowRefresh.value = data.news_slow_refresh || newsSlowRefresh.value;
+    message.value = t("已重新排队 {count} 个失败页面", { count: data.reset_count || 0 });
+  } catch (requestError) {
+    showError(requestError);
+  } finally {
+    newsSlowRetrying.value = false;
   }
 }
 
@@ -507,7 +563,7 @@ onMounted(loadSettings);
               @submit.prevent="saveSettings"
             >
               <div class="form-heading">
-                <span class="form-number">02</span>
+                <span class="form-number">03</span>
                 <div>
                   <p class="form-kicker">NOTIFICATION BRIDGE</p>
                   <h2>OneBot V11 HTTP</h2>
@@ -555,7 +611,7 @@ onMounted(loadSettings);
               class="settings-card news-monitor-card"
             >
               <div class="form-heading">
-                <span class="form-number">03</span>
+                <span class="form-number">02</span>
                 <div>
                   <p class="form-kicker">OFFICIAL SITE NEWS</p>
                   <h2>{{ t("新闻抓取设置") }}</h2>
@@ -605,6 +661,55 @@ onMounted(loadSettings);
                   t("范围 10–1440 分钟；图片可在页面内后续补录。")
                 }}</small></label
               >
+              <label class="settings-checkbox"
+                ><input
+                  type="checkbox"
+                  :checked="settings.news_slow_refresh_enabled === '1'"
+                  @change="
+                    settings.news_slow_refresh_enabled = $event.target.checked
+                      ? '1'
+                      : '0'
+                  "
+                /><span>{{ t("启用慢速官方图床刷新") }}</span></label
+              >
+              <label
+                >{{ t("单篇刷新间隔（秒）")
+                }}<input
+                  v-model="settings.news_slow_refresh_delay_seconds"
+                  type="number"
+                  min="5"
+                  max="60"
+                /><small>{{
+                  t("每篇新闻之间至少等待 5–60 秒；失败页面会记录并延迟重试。")
+                }}</small></label
+              >
+              <div v-if="newsSlowRefresh" class="news-slow-refresh-status">
+                <div class="news-slow-refresh-heading">
+                  <strong>{{ t("慢速官方图床刷新") }}</strong>
+                  <span>
+                    {{ newsSlowRefresh.enabled ? t("已开启") : t("已关闭") }} ·
+                    {{ newsSlowRefresh.completed }} / {{ newsSlowRefresh.total }}
+                  </span>
+                </div>
+                <p>
+                  {{ t("待处理") }} {{ newsSlowRefresh.remaining }} ·
+                  {{ t("间隔") }} {{ newsSlowRefresh.delay_seconds }}s ·
+                  {{ t("已跳过") }} {{ newsSlowRefresh.skipped }} ·
+                  {{ t("失败") }} {{ newsSlowRefresh.failed }}
+                  <span v-if="newsSlowRefresh.risk_failed"
+                    >· {{ t("风控失败") }} {{ newsSlowRefresh.risk_failed }}</span
+                  >
+                </p>
+                <p v-if="newsSlowRefresh.last_page" class="muted">
+                  {{ t("最近处理") }}：{{ newsSlowRefresh.last_page.title || newsSlowRefresh.last_page.id }}
+                </p>
+                <ol v-if="newsSlowRefresh.failed_pages?.length" class="news-slow-failure-list">
+                  <li v-for="failedPage in newsSlowRefresh.failed_pages.slice(0, 8)" :key="failedPage.id">
+                    <RouterLink :to="`/news/${failedPage.id}`">{{ failedPage.title || failedPage.id }}</RouterLink>
+                    <small>{{ failedPage.error }}</small>
+                  </li>
+                </ol>
+              </div>
               <div class="actions">
                 <button
                   type="button"
@@ -620,8 +725,32 @@ onMounted(loadSettings);
                   :disabled="saving"
                   @click="saveSettings"
                 >
-                  {{ saving ? t("保存中……") : t("保存新闻设置") }}</button
-                ><button
+                  {{ saving ? t("保存中……") : t("保存新闻设置") }}</button>
+                <button
+                  type="button"
+                  class="secondary"
+                  :disabled="newsSlowRefreshing"
+                  @click="runNewsSlowRefresh"
+                >
+                  {{ newsSlowRefreshing ? t("刷新中……") : t("处理下一篇") }}
+                </button>
+                <button
+                  type="button"
+                  class="secondary"
+                  @click="refreshNewsSlowStatus"
+                >
+                  {{ t("刷新状态") }}
+                </button>
+                <button
+                  v-if="newsSlowRefresh?.failed"
+                  type="button"
+                  class="secondary"
+                  :disabled="newsSlowRetrying"
+                  @click="retryNewsSlowRefresh"
+                >
+                  {{ newsSlowRetrying ? t("排队中……") : t("重试失败页面") }}
+                </button>
+                <button
                   type="button"
                   class="secondary"
                   @click="router.push('/news')"
@@ -702,15 +831,15 @@ onMounted(loadSettings);
                 }}
               </p>
               <div class="settings-log-toolbar">
-                <label
-                  >{{ t("筛选记录")
-                  }}<select v-model="logCategory">
-                    <option value="">{{ t("全部") }}</option>
-                    <option value="music">{{ t("歌曲监控") }}</option>
-                    <option value="program">{{ t("节目档案") }}</option>
-                    <option value="news">{{ t("官网新闻") }}</option>
-                    <option value="collabo">{{ t("联动立绘档案") }}</option>
-                  </select></label
+                <label class="settings-log-filter"
+                  >{{ t("筛选记录") }}<span class="settings-select-control"
+                    ><select v-model="logCategory">
+                      <option value="">{{ t("全部") }}</option>
+                      <option value="music">{{ t("歌曲监控") }}</option>
+                      <option value="program">{{ t("节目档案") }}</option>
+                      <option value="news">{{ t("官网新闻") }}</option>
+                      <option value="collabo">{{ t("联动立绘档案") }}</option>
+                    </select></span></label
                 ><button
                   type="button"
                   class="secondary"

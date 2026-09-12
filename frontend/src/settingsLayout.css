@@ -49,9 +49,12 @@
   margin-top: 20px;
 }
 .settings-log-toolbar > label {
-  position: relative;
   flex: 1 1 220px;
   min-width: min(100%, 190px);
+}
+.settings-select-control {
+  position: relative;
+  display: block;
 }
 .settings-log-toolbar select {
   display: block;
@@ -68,17 +71,17 @@
   font-size: 13px;
   outline: 0;
 }
-.settings-log-toolbar > label::after {
+.settings-select-control::after {
   position: absolute;
+  top: 50%;
   right: 15px;
-  bottom: 14px;
   width: 7px;
   height: 7px;
   border-right: 1px solid var(--muted);
   border-bottom: 1px solid var(--muted);
   content: "";
   pointer-events: none;
-  transform: rotate(45deg);
+  transform: translateY(-50%) rotate(45deg);
 }
 .settings-log-toolbar select:focus {
   border-color: var(--accent);

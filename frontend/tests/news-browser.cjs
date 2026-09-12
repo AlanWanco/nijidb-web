@@ -123,6 +123,21 @@ async function setup(context) {
           detail_interval_minutes: "5",
           news_interval_minutes: "30",
           news_auto_sync: "1",
+          news_slow_refresh_enabled: "0",
+          news_slow_refresh_delay_seconds: "10",
+        },
+        news_slow_refresh: {
+          total: 1,
+          pending: 1,
+          processing: 0,
+          completed: 0,
+          failed: 0,
+          skipped: 0,
+          remaining: 1,
+          risk_failed: 0,
+          failed_pages: [],
+          last_page: null,
+          running: false,
         },
         activity_logs: Array.from({ length: 40 }, (_, i) => ({
           id: i,
@@ -181,6 +196,7 @@ async function swipe(page, dx) {
       ["音乐档案", "节目档案", "联动立绘", "官网新闻"],
     );
     assert.ok(await page.getByRole("button", { name: "#周边 1" }).isVisible());
+    assert.equal(await page.getByRole("button", { name: "清除筛选", exact: true }).count(), 1);
     await page.getByRole("button", { name: "编辑", exact: true }).click();
     await page.getByText("管理新闻标签").waitFor();
     await page.getByRole("button", { name: "关闭", exact: true }).first().click();
@@ -253,6 +269,13 @@ async function swipe(page, dx) {
     await page.getByRole("button", { name: "取消", exact: true }).click();
     await page.goto(base + "/admin?section=news");
     await page.locator(".news-monitor-card").waitFor();
+    assert.deepEqual(
+      await page.locator(".settings-directory a").evaluateAll((links) =>
+        links.map((link) => link.textContent.trim()),
+      ),
+      ["音乐抓取设置", "新闻抓取设置", "Bot 设置", "数据库", "账号安全"],
+    );
+    assert.equal(await page.locator(".news-slow-refresh-status").count(), 1);
     assert.equal(await page.locator(".password-form").isVisible(), false);
     assert.equal(
       await page.getByRole("button", { name: "打开官网新闻" }).count(),

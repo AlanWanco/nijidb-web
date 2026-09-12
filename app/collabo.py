@@ -552,12 +552,17 @@ def upsert_collaboration_item(conn, payload: dict[str, Any]) -> str:
         path = image_asset_path(raw_url)
         stored_source_url = existing_image["source_url"] if existing_image else ""
         stored_public_url = existing_image["public_url"] if existing_image else ""
-        if not path and asset_path and existing_image and raw_url in {stored_source_url, stored_public_url}:
-            path = asset_path
         source_url = str(raw_image.get("source_url") or "").strip()
         public_url_value = str(
             raw_image["public_url"] if "public_url" in raw_image else stored_public_url or ""
         ).strip()
+        if not path and asset_path and (
+            raw_url.startswith("/api/collabo/assets/")
+            or raw_url.startswith("/api/collaboration-illustrations/assets/")
+            or (public_url_value and raw_url == public_url_value)
+            or (existing_image and raw_url in {stored_public_url, stored_source_url})
+        ):
+            path = asset_path
         if existing_image and stored_public_url and raw_url not in {stored_public_url, stored_source_url}:
             public_url_value = ""
         if public_url_value and not valid_external_url(public_url_value):

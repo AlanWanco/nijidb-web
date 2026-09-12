@@ -507,12 +507,7 @@ onBeforeUnmount(() => {
       <div class="news-filter-heading">
         <span class="eyebrow">FILTERS / TAGS</span
         ><div class="news-filter-actions">
-          <button
-            v-if="activeTags.length || activeSource || route.query.q"
-            class="text-button"
-            type="button"
-            @click="clearFilters"
-          >
+          <button class="text-button" type="button" @click="clearFilters">
             {{ t("清除筛选") }}
           </button>
           <button
@@ -602,8 +597,18 @@ onBeforeUnmount(() => {
               <span>{{ t("English name") }}</span>
               <input v-model="tag.labels.en" maxlength="100" />
             </label>
-            <button class="text-button danger" type="button" :disabled="tagSaving" @click="deleteTag(tag)">
-              {{ t("删除") }}
+            <button
+              class="text-button danger news-tag-delete"
+              type="button"
+              :disabled="tagSaving"
+              :aria-label="t('删除')"
+              :title="t('删除')"
+              @click="deleteTag(tag)"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 7h16m-10 4v6m4-6v6M9 7V4h6v3m-9 0 1 13h10l1-13" />
+              </svg>
+              <span class="sr-only">{{ t("删除") }}</span>
             </button>
           </div>
         </div>

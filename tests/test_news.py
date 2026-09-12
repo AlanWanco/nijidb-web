@@ -328,15 +328,19 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
         with main.db() as conn:
             self.assertIsNone(conn.execute("SELECT 1 FROM collaboration_items WHERE id = ?", (item["id"],)).fetchone())
 
-    async def test_collabo_combination_filter_uses_exact_member_sets(self):
+    async def test_collabo_combination_filter_keeps_core_groups_and_uses_exact_member_sets(self):
         self.login()
         initial9 = ["ayumu", "kasumi", "shizuku", "karin", "ai", "kanata", "setsuna", "emma", "rina"]
         anime10 = initial9 + ["yu"]
         shioriko10 = initial9 + ["shioriko"]
+        movie1 = ["ayumu", "shizuku", "kanata", "emma", "lanzhu", "kasumi"]
+        movie2 = ["ai", "rina", "setsuna", "shioriko", "mia", "karin"]
         cases = (
             ("初始9人", initial9),
             ("动画一期10人", anime10),
             ("栞子加入后10人", shioriko10),
+            ("剧场版第一章", movie1),
+            ("剧场版第二章", movie2),
             ("其他", initial9 + ["mia"]),
         )
         for title, tags in cases:
@@ -349,6 +353,8 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
             ("initial9", "初始9人"),
             ("anime10", "动画一期10人"),
             ("shioriko10", "栞子加入后10人"),
+            ("movie1", "剧场版第一章"),
+            ("movie2", "剧场版第二章"),
         ):
             data = (await self.client.get(f"/api/collabo?group={group}")).json()
             self.assertEqual(data["total"], 1)

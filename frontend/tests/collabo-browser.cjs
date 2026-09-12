@@ -193,8 +193,21 @@ async function swipe(page, selector, dx, dy = 2) {
     await page.waitForURL((url) => !url.searchParams.has("year"));
     assert.equal(await page.locator(".cb-year-chip.selected").count(), 1);
     assert.equal(await page.locator(".cb-combination-filter").count(), 1);
-    for (const label of ["初始9人", "动画一期10人", "栞子加入后10人"]) {
+    for (const label of [
+      "偶像12人",
+      "一年级",
+      "二年级",
+      "三年级",
+      "剧场版第一章组",
+      "剧场版第二章组",
+      "初始9人",
+      "动画一期10人",
+      "栞子加入后10人",
+    ]) {
       assert.equal(await page.getByRole("button", { name: label, exact: true }).count(), 1);
+    }
+    for (const label of ["AZUNA", "DiverDiva", "R3BIRTH", "QU4RTZ"]) {
+      assert.equal(await page.getByRole("button", { name: label, exact: true }).count(), 0);
     }
     await page.getByRole("button", { name: "初始9人", exact: true }).click();
     await page.waitForURL(/group=initial9/);

@@ -146,7 +146,10 @@ function toggleCombinationGroup(id) {
 }
 function cardTags(item) {
   const combinationIds = cardCombinationTagIds(item.tags || []);
-  const compact = combinationIds.length > 0;
+  const compact =
+    combinationIds.includes("all") ||
+    combinationIds.includes("idol12") ||
+    combinationIds.some((id) => ["initial9", "anime10", "shioriko10"].includes(id));
   const characterTags = compact
     ? []
     : (item.tags || []).map((id) => ({ key: `character-${id}`, label: characterLabel(id, localeTag()), kind: "character" }));

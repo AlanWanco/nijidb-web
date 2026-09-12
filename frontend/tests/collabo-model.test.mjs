@@ -72,10 +72,20 @@ test("periods and character tags survive item normalization and filtering", () =
   assert.deepEqual(filterItems([item], { tags: ["kasumi"] }), []);
 });
 
-test("member set categories match exact defined groups", () => {
+test("combination filters keep core groups and use exact member sets", () => {
+  const all = [...COLLABO_CHARACTER_TAG_IDS];
+  const idols = all.filter((id) => id !== "yu");
   const initial9 = ["ayumu", "kasumi", "shizuku", "karin", "ai", "kanata", "setsuna", "emma", "rina"];
   const anime10 = [...initial9, "yu"];
   const shioriko10 = [...initial9, "shioriko"];
+  const movie1 = ["ayumu", "shizuku", "kanata", "emma", "lanzhu"];
+  const movie2 = ["ai", "rina", "setsuna", "shioriko", "mia"];
+  assert.deepEqual(automaticCombinationGroupIds(all), ["all"]);
+  assert.deepEqual(automaticCombinationGroupIds(idols), ["idol12"]);
+  assert.ok(combinationGroupMatches(movie1, "movie1"));
+  assert.ok(combinationGroupMatches([...movie1, "kasumi", "yu"], "movie1"));
+  assert.ok(combinationGroupMatches(movie2, "movie2"));
+  assert.ok(combinationGroupMatches([...movie2, "karin"], "movie2"));
   assert.deepEqual(automaticCombinationGroupIds(initial9), ["initial9"]);
   assert.deepEqual(automaticCombinationGroupIds(anime10), ["anime10"]);
   assert.deepEqual(automaticCombinationGroupIds(shioriko10), ["shioriko10"]);
@@ -86,10 +96,20 @@ test("member set categories match exact defined groups", () => {
   assert.ok(!combinationGroupMatches([...anime10, "shioriko"], "anime10"));
   assert.ok(!combinationGroupMatches([...shioriko10, "yu"], "shioriko10"));
   assert.ok(!combinationGroupMatches(initial9.slice(0, -1), "initial9"));
-  assert.deepEqual(automaticCombinationGroupIds([...initial9, "mia", "lanzhu"]), []);
+  assert.deepEqual(automaticCombinationGroupIds(["ayumu", "shizuku", "setsuna"]), []);
   assert.deepEqual(
     COLLABO_COMBINATION_GROUPS.map((group) => group.label),
-    ["初始9人", "动画一期10人", "栞子加入后10人"],
+    [
+      "偶像12人",
+      "一年级",
+      "二年级",
+      "三年级",
+      "剧场版第一章组",
+      "剧场版第二章组",
+      "初始9人",
+      "动画一期10人",
+      "栞子加入后10人",
+    ],
   );
 });
 

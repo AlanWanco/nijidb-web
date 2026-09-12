@@ -42,6 +42,7 @@ COLLABO_INITIAL_NINE_TAG_IDS = (
     "rina",
 )
 COLLABO_COMBINATION_GROUPS = (
+    ("all", COLLABO_CHARACTER_TAG_IDS, ()),
     ("idol12", COLLABO_IDOL_TAG_IDS, ()),
     ("grade1", ("kasumi", "shizuku", "rina", "shioriko"), ()),
     ("grade2", ("ayumu", "ai", "setsuna", "lanzhu"), ()),

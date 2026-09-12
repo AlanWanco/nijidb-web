@@ -478,7 +478,7 @@ async function upload(event) {
                   @click="moveImage(index, 1)"
                 >
                   ↓</button
-                ><button type="button" class="cb-quiet" @click="removeImage(index)">{{ c("移除") }}</button>
+                ><button type="button" class="cb-quiet cb-image-remove" @click="removeImage(index)">{{ c("移除") }}</button>
               </div>
             </div>
           </article>

@@ -81,6 +81,7 @@ test("combination filters keep core groups and use exact member sets", () => {
   const movie1 = ["ayumu", "shizuku", "kanata", "emma", "lanzhu"];
   const movie2 = ["ai", "rina", "setsuna", "shioriko", "mia"];
   assert.deepEqual(automaticCombinationGroupIds(all), ["all"]);
+  assert.ok(combinationGroupMatches(all, "all"));
   assert.deepEqual(automaticCombinationGroupIds(idols), ["idol12"]);
   assert.ok(combinationGroupMatches(movie1, "movie1"));
   assert.ok(combinationGroupMatches([...movie1, "kasumi", "yu"], "movie1"));
@@ -100,6 +101,7 @@ test("combination filters keep core groups and use exact member sets", () => {
   assert.deepEqual(
     COLLABO_COMBINATION_GROUPS.map((group) => group.label),
     [
+      "全员",
       "偶像12人",
       "一年级",
       "二年级",

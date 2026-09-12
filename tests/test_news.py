@@ -335,7 +335,9 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
         shioriko10 = initial9 + ["shioriko"]
         movie1 = ["ayumu", "shizuku", "kanata", "emma", "lanzhu", "kasumi"]
         movie2 = ["ai", "rina", "setsuna", "shioriko", "mia", "karin"]
+        all_tags = initial9 + ["shioriko", "mia", "lanzhu", "yu"]
         cases = (
+            ("全员", all_tags),
             ("初始9人", initial9),
             ("动画一期10人", anime10),
             ("栞子加入后10人", shioriko10),
@@ -350,6 +352,7 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(response.status_code, 200)
         for group, title in (
+            ("all", "全员"),
             ("initial9", "初始9人"),
             ("anime10", "动画一期10人"),
             ("shioriko10", "栞子加入后10人"),

@@ -133,6 +133,21 @@ function toggleYear(value) {
     },
   });
 }
+function selectSingleYear(value) {
+  const year = value && (data.value?.years || []).includes(value) ? value : "";
+  router.push({
+    path: "/collabo",
+    query: {
+      ...(q.value ? { q: q.value } : {}),
+      ...(year ? { year } : {}),
+      ...(characterTagQuery.value ? { tags: characterTagQuery.value } : {}),
+      ...(groupQuery.value ? { group: groupQuery.value } : {}),
+    },
+  });
+}
+function selectSingleCharacterTag(id) {
+  pushCharacterQuery(id ? [id] : []);
+}
 function toggleCombinationGroup(id) {
   const next = id && groupQuery.value !== id ? id : "";
   router.push({
@@ -257,6 +272,7 @@ onBeforeUnmount(() => {
           :class="{ selected: !selectedYears.length }"
           :aria-pressed="!selectedYears.length"
           @click="toggleYear('')"
+          @contextmenu.prevent="selectSingleYear('')"
         >
           <b>ALL</b>{{ c("全部年份") }}
         </button>
@@ -268,6 +284,7 @@ onBeforeUnmount(() => {
           :class="{ selected: selectedYears.includes(value) }"
           :aria-pressed="selectedYears.includes(value)"
           @click="toggleYear(value)"
+          @contextmenu.prevent="selectSingleYear(value)"
         >
           {{ value }}
         </button>
@@ -285,6 +302,7 @@ onBeforeUnmount(() => {
           :class="{ selected: allCharactersSelected }"
           :aria-pressed="allCharactersSelected"
           @click="selectAllCharacterTags"
+          @contextmenu.prevent="selectSingleCharacterTag('')"
         >
           <b>ALL</b>{{ c("全员") }}
         </button>
@@ -296,6 +314,7 @@ onBeforeUnmount(() => {
           :class="{ selected: selectedCharacterTags.includes(tag.id) }"
           :aria-pressed="selectedCharacterTags.includes(tag.id)"
           @click="toggleCharacterTag(tag.id)"
+          @contextmenu.prevent="selectSingleCharacterTag(tag.id)"
         >
           <i class="cb-character-dot" :style="{ backgroundColor: tag.color }"></i>{{ characterLabel(tag.id, localeTag()) }}
         </button>

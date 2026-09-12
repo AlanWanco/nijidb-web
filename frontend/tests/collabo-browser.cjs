@@ -189,10 +189,15 @@ async function swipe(page, selector, dx, dy = 2) {
     await page.getByRole("button", { name: "2025", exact: true }).evaluate((element) => element.click());
     await page.waitForURL(/year=2026%2C2025|year=2025%2C2026|year=2026,2025|year=2025,2026/);
     assert.equal(await page.locator(".cb-year-chip.selected").count(), 2);
+    await page.getByRole("button", { name: "2026", exact: true }).click({ button: "right" });
+    await page.waitForURL((url) => url.searchParams.get("year") === "2026");
+    assert.equal(await page.locator(".cb-year-chip.selected").count(), 1);
     await page.getByRole("button", { name: /全部年份/ }).click();
     await page.waitForURL((url) => !url.searchParams.has("year"));
     assert.equal(await page.locator(".cb-year-chip.selected").count(), 1);
-    assert.equal(await page.locator(".cb-combination-filter").count(), 1);
+    const combinationFilter = page.locator(".cb-combination-filter");
+    assert.equal(await combinationFilter.count(), 1);
+    assert.equal(await combinationFilter.getByRole("button", { name: "全员", exact: true }).count(), 1);
     for (const label of [
       "偶像12人",
       "一年级",
@@ -209,12 +214,23 @@ async function swipe(page, selector, dx, dy = 2) {
     for (const label of ["AZUNA", "DiverDiva", "R3BIRTH", "QU4RTZ"]) {
       assert.equal(await page.getByRole("button", { name: label, exact: true }).count(), 0);
     }
+    await combinationFilter.getByRole("button", { name: "全员", exact: true }).click();
+    await page.waitForURL(/group=all/);
+    assert.equal(await combinationFilter.locator(".cb-combination-chip.selected").count(), 1);
+    await combinationFilter.getByRole("button", { name: "全员", exact: true }).click();
+    await page.waitForURL((url) => !url.searchParams.has("group"));
     await page.getByRole("button", { name: "初始9人", exact: true }).click();
     await page.waitForURL(/group=initial9/);
     assert.equal(await page.locator(".cb-combination-chip.selected").count(), 1);
     await page.getByRole("button", { name: "初始9人", exact: true }).click();
     await page.waitForURL((url) => !url.searchParams.has("group"));
-    await page.getByRole("button", { name: "上原步梦", exact: true }).click();
+    await page.getByRole("button", { name: "上原步梦", exact: true }).click({ button: "right" });
+    await page.waitForURL(/tags=ayumu/);
+    assert.equal(await page.locator(".cb-character-filter .cb-character-chip.selected").count(), 1);
+    await page.getByRole("button", { name: "中须霞", exact: true }).click();
+    await page.waitForURL(/tags=ayumu%2Ckasumi|tags=ayumu,kasumi/);
+    assert.equal(await page.locator(".cb-character-filter .cb-character-chip.selected").count(), 2);
+    await page.getByRole("button", { name: "上原步梦", exact: true }).click({ button: "right" });
     await page.waitForURL(/tags=ayumu/);
     assert.equal(await page.locator(".cb-character-filter .cb-character-chip.selected").count(), 1);
     await page.locator(".cb-character-filter").getByRole("button", { name: /全员/ }).click();
@@ -291,6 +307,10 @@ async function swipe(page, selector, dx, dy = 2) {
     assert.equal(await page.getByText("时间段 1", { exact: true }).count(), 1);
     await page.getByRole("radio", { name: "已审核", exact: true }).click();
     assert.equal(await page.locator(".cb-image-controls select").count(), 0);
+    assert.equal(
+      await page.locator(".cb-image-controls .cb-image-remove").first().evaluate((button) => getComputedStyle(button).color),
+      "rgb(231, 130, 132)",
+    );
     await page.getByRole("button", { name: "保存到数据库", exact: true }).click();
     await page.getByRole("status").filter({ hasText: "保存成功" }).waitFor();
     assert.equal(saves, 1);

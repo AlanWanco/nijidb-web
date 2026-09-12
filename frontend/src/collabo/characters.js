@@ -94,6 +94,7 @@ export const COLLABO_INITIAL_NINE_TAG_IDS = [
 ];
 
 export const COLLABO_COMBINATION_GROUPS = [
+  { id: "all", label: "全员", members: COLLABO_CHARACTER_TAG_IDS },
   { id: "idol12", label: "偶像12人", members: COLLABO_IDOL_TAG_IDS },
   { id: "grade1", label: "一年级", members: ["kasumi", "shizuku", "rina", "shioriko"] },
   { id: "grade2", label: "二年级", members: ["ayumu", "ai", "setsuna", "lanzhu"] },
@@ -162,12 +163,6 @@ export function combinationGroupMatches(value, groupOrId) {
 
 export function automaticCombinationGroupIds(value) {
   const selected = new Set(normalizeCharacterTags(value));
-  if (
-    selected.size === COLLABO_CHARACTER_TAG_IDS.length &&
-    COLLABO_CHARACTER_TAG_IDS.every((id) => selected.has(id))
-  ) {
-    return ["all"];
-  }
   return COLLABO_COMBINATION_GROUPS.filter((group) => combinationGroupMatches([...selected], group)).map(
     (group) => group.id,
   );

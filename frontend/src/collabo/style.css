@@ -1421,6 +1421,10 @@
   gap: 7px;
   flex-wrap: wrap;
 }
+.cb-image-controls .cb-image-remove {
+  border-color: color-mix(in srgb, #e78284 58%, var(--line));
+  color: #e78284;
+}
 .cb-editor-actions {
   position: sticky;
   bottom: 16px;

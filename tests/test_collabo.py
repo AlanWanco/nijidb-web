@@ -103,6 +103,7 @@ class CollaborationStorageTests(unittest.TestCase):
         shioriko10 = initial9 + ["shioriko"]
         movie1 = ["ayumu", "shizuku", "kanata", "emma", "lanzhu"]
         movie2 = ["ai", "rina", "setsuna", "shioriko", "mia"]
+        self.assertTrue(collaboration_combination_matches(all_tags, "all"))
         self.assertFalse(collaboration_combination_matches(all_tags, "idol12"))
         self.assertTrue(collaboration_combination_matches(idol_tags, "idol12"))
         self.assertTrue(collaboration_combination_matches(movie1, "movie1"))

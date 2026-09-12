@@ -116,6 +116,20 @@ async function swipe(page, selector, dx, dy = 2) {
     await page.goto("http://127.0.0.1:15173/collabo");
     await page.waitForSelector(".cb-card");
     assert.equal(await page.title(), "联动立绘 · Nijigasaki DB");
+    const filterAlignment = await page.evaluate(() => {
+      const year = document.querySelector(".cb-year-filter").getBoundingClientRect();
+      const characters = document.querySelector(".cb-character-filter").getBoundingClientRect();
+      return { left: Math.abs(year.left - characters.left), width: Math.abs(year.width - characters.width) };
+    });
+    assert.ok(filterAlignment.left < 1, "character filter left edge is centered with year filter");
+    assert.ok(filterAlignment.width < 1, "character filter width matches year filter");
+    assert.equal(
+      await page
+        .getByRole("button", { name: "高咲侑", exact: true })
+        .locator(".cb-character-dot")
+        .evaluate((element) => getComputedStyle(element).backgroundColor),
+      "rgb(47, 47, 47)",
+    );
     assert.equal(await page.locator(".cb-hero .cb-search").count(), 1);
     assert.equal(await page.locator(".cb-toolbar .cb-search").count(), 0);
     assert.equal(await page.locator(".cb-card").count(), 24);

@@ -74,7 +74,7 @@ export const COLLABO_CHARACTER_TAGS = [
   {
     id: "yu",
     labels: { "zh-CN": "高咲侑", en: "Yuu Takasaki", ja: "高咲侑" },
-    color: "#e9a8c2",
+    color: "#2f2f2f",
     aliases: ["侑", "Yuu"],
   },
 ];

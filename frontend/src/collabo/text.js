@@ -26,7 +26,7 @@ const labels = {
   剧场版第二章组: ["Movie Chapter 2", "劇場版第2章組"],
   AZUNA: ["AZUNA", "A・ZU・NA"],
   DiverDiva: ["DiverDiva", "DiverDiva"],
-  r3birth: ["r3birth", "R3BIRTH"],
+  R3BIRTH: ["R3BIRTH", "R3BIRTH"],
   QU4RTZ: ["QU4RTZ", "QU4RTZ"],
   联动时间段: ["Collaboration periods", "コラボ期間"],
   "每个时间段都需要开始、结束日期，以及标题或描述；可以添加多个时间段。": [

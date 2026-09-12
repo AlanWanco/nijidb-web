@@ -82,13 +82,18 @@ async function configure(context) {
         following: id === "one" ? { id: "two", title: "CD two" } : null,
       });
     }
-    if (dbMode && (p === "/api/admin/collabo" || p === "/api/collabo"))
+    if (dbMode && (p === "/api/admin/collabo" || p === "/api/collabo")) {
+      const isAdminList = p === "/api/admin/collabo";
+      const requestedPage = Number(u.searchParams.get("page") || 1);
       return json({
         items: collaboDeleted ? [] : [dbItem],
-        total: collaboDeleted ? 0 : 1,
+        total: collaboDeleted ? 0 : isAdminList ? 49 : 1,
+        page: collaboDeleted ? 1 : Math.min(Math.max(1, requestedPage), isAdminList ? 3 : 1),
+        pages: collaboDeleted ? 1 : isAdminList ? 3 : 1,
         years: ["2026"],
         source: catalog.source,
       });
+    }
     if (dbMode && (p === `/api/admin/collabo/${sample.id}` || p === `/api/collabo/${slug(sample)}`)) {
       if (route.request().method() === "DELETE") {
         collaboDeleted = true;
@@ -98,7 +103,7 @@ async function configure(context) {
         saves++;
         Object.assign(dbItem, route.request().postDataJSON());
       }
-      return json({ item: dbItem, source: catalog.source, previous: null, following: null });
+      return json({ item: dbItem, source: catalog.source, previous: null, following: { id: "next", title: "Next item" } });
     }
     return route.fulfill({ status: 404, contentType: "application/json", body: '{"detail":"Not Found"}' });
   });
@@ -192,6 +197,7 @@ async function swipe(page, selector, dx, dy = 2) {
     await page.waitForURL((url) => !url.searchParams.has("year"));
     assert.equal(await page.locator(".cb-year-chip.selected").count(), 1);
     assert.equal(await page.locator(".cb-combination-filter").count(), 1);
+    assert.equal(await page.getByRole("button", { name: "R3BIRTH", exact: true }).count(), 1);
     assert.equal(await page.getByRole("button", { name: "偶像12人", exact: true }).count(), 1);
     await page.getByRole("button", { name: "偶像12人", exact: true }).click();
     await page.waitForURL(/group=idol12/);
@@ -266,6 +272,10 @@ async function swipe(page, selector, dx, dy = 2) {
     await page.waitForSelector(".cb-editor");
     leaveDialogs = 0;
     assert.equal(await page.getByRole("button", { name: "保存到数据库", exact: true }).isEnabled(), true);
+    const editorActionPaddings = await page.locator(".cb-editor-action-button").evaluateAll((buttons) =>
+      buttons.map((button) => getComputedStyle(button).padding),
+    );
+    assert.deepEqual([...new Set(editorActionPaddings)], ["8px 12px"]);
     await page.getByLabel("标题", { exact: true }).fill("Database save test");
     assert.equal(await page.getByRole("button", { name: "上原步梦", exact: true }).count(), 1);
     assert.equal(await page.getByText("时间段 1", { exact: true }).count(), 1);
@@ -288,6 +298,9 @@ async function swipe(page, selector, dx, dy = 2) {
     });
     assert.equal(adminSearchStyle.inputPadding, "7px 10px");
     assert.ok(adminSearchStyle.inputWidth > adminSearchStyle.buttonWidth * 3, "admin search input is longer than button");
+    await page.locator(".cb-pagination button").last().click();
+    await page.waitForURL((url) => url.pathname === "/admin/collabo" && url.searchParams.get("page") === "2");
+    assert.equal(new URL(page.url()).searchParams.get("page"), "2");
     await page.goto("http://127.0.0.1:15173/collabo");
     await page.waitForSelector(".cb-card");
     assert.equal(await page.locator(".cb-card-tags").innerText(), "全员");

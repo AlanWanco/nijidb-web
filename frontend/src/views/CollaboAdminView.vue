@@ -14,7 +14,7 @@ import {
   COLLABO_CHARACTER_TAGS,
   characterLabel,
 } from "../collabo/characters.js";
-import { coverUrl, dateLabel, normalizeImage, PAGE_SIZE, safeUrl } from "../collabo/model";
+import { coverUrl, dateLabel, normalizeImage, PAGE_SIZE, pageNumber, safeUrl } from "../collabo/model";
 import { c } from "../collabo/text";
 import { localeTag } from "../i18n";
 import "../collabo/style.css";
@@ -31,7 +31,8 @@ const uploading = ref(false);
 const error = ref("");
 const message = ref("");
 const keyword = ref("");
-const page = ref(1);
+const routeKeyword = computed(() => (typeof route.query.q === "string" ? route.query.q : ""));
+const page = computed(() => pageNumber(route.query.page));
 const fileInput = ref(null);
 let requestId = 0;
 const editing = computed(() => Boolean(route.params.id));
@@ -77,6 +78,12 @@ function setForm(item) {
   );
   baseline.value = JSON.stringify(form.value);
 }
+function adminListQuery(nextPage = 1) {
+  return {
+    ...(routeKeyword.value ? { q: routeKeyword.value } : {}),
+    ...(nextPage > 1 ? { page: String(nextPage) } : {}),
+  };
+}
 async function load() {
   const id = ++requestId;
   loading.value = true;
@@ -85,12 +92,16 @@ async function load() {
   form.value = null;
   try {
     let result;
-    if (!editing.value || route.params.id === "new")
-      result = await listCollaborations({ admin: true, q: keyword.value, page: page.value });
-    else result = await getCollaboration(route.params.id, { admin: true });
+    if (!editing.value || route.params.id === "new") {
+      keyword.value = routeKeyword.value;
+      result = await listCollaborations({ admin: true, q: routeKeyword.value, page: page.value });
+    } else result = await getCollaboration(route.params.id, { admin: true });
     if (id !== requestId) return;
     data.value = result;
     if (editing.value) setForm(route.params.id === "new" ? emptyForm() : result.item);
+    else if (result.page && result.page !== page.value) {
+      await router.replace({ path: "/admin/collabo", query: adminListQuery(result.page) });
+    }
   } catch (err) {
     if (id !== requestId) return;
     error.value = err.message;
@@ -115,14 +126,14 @@ onBeforeUnmount(() => {
   requestId += 1;
   window.removeEventListener("beforeunload", beforeUnload);
 });
-watch(() => route.params.id, load, { immediate: true });
+watch(() => [route.params.id, route.query.q, route.query.page], load, { immediate: true });
 function search() {
-  page.value = 1;
-  load();
+  router.push({ path: "/admin/collabo", query: keyword.value.trim() ? { q: keyword.value.trim() } : {} });
 }
 function turnPage(delta) {
-  page.value += delta;
-  load();
+  const nextPage = Math.min(Math.max(1, page.value + delta), pages.value);
+  if (nextPage === page.value) return;
+  router.push({ path: "/admin/collabo", query: adminListQuery(nextPage) });
 }
 function moveImage(index, direction) {
   const target = index + direction;
@@ -275,7 +286,7 @@ async function upload(event) {
 <template>
   <main class="page cb-page cb-admin-page">
     <div class="cb-detail-top">
-      <RouterLink class="back" :to="editing ? '/admin/collabo' : '/collabo'"
+      <RouterLink class="back" :to="editing ? { path: '/admin/collabo', query: adminListQuery(page) } : '/collabo'"
         >← {{ c(editing ? "管理联动" : "返回联动一览") }}</RouterLink
       ><RouterLink v-if="!editing" class="cb-button" to="/admin/collabo/new">＋ {{ c("新增联动") }}</RouterLink
       ><RouterLink v-else-if="form?.slug" class="cb-link" :to="`/collabo/${form.slug}`"
@@ -303,7 +314,10 @@ async function upload(event) {
         /><button>{{ c("搜索") }}</button><span>{{ c("{count} 次联动", { count: data?.total || 0 }) }}</span>
       </form>
       <div class="cb-review-list">
-        <RouterLink v-for="item in data?.items || []" :key="item.id" :to="`/admin/collabo/${item.id}`"
+        <RouterLink
+          v-for="item in data?.items || []"
+          :key="item.id"
+          :to="{ path: `/admin/collabo/${item.id}`, query: adminListQuery(page) }"
           ><CollaboImage :src="coverUrl(item)" alt="" /><span
             ><strong>{{ item.title }}</strong
             ><small>{{ dateLabel(item.date, localeTag()) }} · {{ item.image_count }} IMG</small></span
@@ -493,9 +507,9 @@ async function upload(event) {
           :disabled="saving || deleting || uploading"
           @click="deleteItem"
         >{{ deleting ? c("删除中……") : c("删除联动") }}</button
-        ><button type="button" class="cb-quiet" @click="exportDraft">{{ c("导出草稿 JSON") }}</button
-        ><button type="submit" :disabled="!writable || saving || deleting || uploading">{{ c("保存到数据库") }}</button
-        ><button v-if="data.following" type="button" :disabled="!writable || saving || deleting || uploading" @click="save(true)">
+        ><button type="button" class="cb-quiet cb-editor-action-button" @click="exportDraft">{{ c("导出草稿 JSON") }}</button
+        ><button class="cb-editor-action-button" type="submit" :disabled="!writable || saving || deleting || uploading">{{ c("保存到数据库") }}</button
+        ><button v-if="data.following" class="cb-editor-action-button" type="button" :disabled="!writable || saving || deleting || uploading" @click="save(true)">
           {{ c("保存并审核下一条") }} →
         </button>
       </div>

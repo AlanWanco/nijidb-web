@@ -1446,6 +1446,9 @@
   font-size: 11px;
   box-shadow: none;
 }
+.cb-editor-actions .cb-editor-action-button {
+  padding: 8px 12px;
+}
 .cb-editor-actions .cb-collabo-delete {
   border-color: color-mix(in srgb, #e78284 58%, var(--line));
   color: #e78284;
@@ -1780,8 +1783,10 @@
     gap: 7px;
   }
   .cb-editor-actions button {
-    padding: 9px 10px;
     font-size: 10px;
+  }
+  .cb-editor-actions .cb-editor-action-button {
+    padding: 9px 10px;
   }
 }
 /* The collaboration hero uses portrait frames and gallery labels rather than the music hero's record geometry. */

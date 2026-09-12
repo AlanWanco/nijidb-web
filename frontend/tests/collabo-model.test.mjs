@@ -12,6 +12,7 @@ import {
 import { swipeDirection } from "../src/composables/useDetailNavigation.js";
 import {
   COLLABO_CHARACTER_TAG_IDS,
+  COLLABO_COMBINATION_GROUPS,
   automaticCombinationGroupIds,
   combinationGroupMatches,
   normalizeCharacterTags,
@@ -92,6 +93,7 @@ test("combination groups match full, movie, grade, and unit sets", () => {
   assert.deepEqual(automaticCombinationGroupIds(["ayumu", "shizuku", "setsuna"]), ["azuna"]);
   assert.deepEqual(automaticCombinationGroupIds(["karin", "ai"]), ["diverdiva"]);
   assert.deepEqual(automaticCombinationGroupIds(["shioriko", "mia", "lanzhu"]), ["r3birth"]);
+  assert.equal(COLLABO_COMBINATION_GROUPS.find((group) => group.id === "r3birth").label, "R3BIRTH");
   assert.deepEqual(automaticCombinationGroupIds(["kasumi", "kanata", "emma", "rina"]), ["qu4rtz"]);
 });
 

@@ -101,7 +101,7 @@ export const COLLABO_COMBINATION_GROUPS = [
   },
   { id: "azuna", label: "AZUNA", members: ["ayumu", "shizuku", "setsuna"] },
   { id: "diverdiva", label: "DiverDiva", members: ["karin", "ai"] },
-  { id: "r3birth", label: "r3birth", members: ["shioriko", "mia", "lanzhu"] },
+  { id: "r3birth", label: "R3BIRTH", members: ["shioriko", "mia", "lanzhu"] },
   { id: "qu4rtz", label: "QU4RTZ", members: ["kasumi", "kanata", "emma", "rina"] },
 ];
 

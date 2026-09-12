@@ -1,11 +1,12 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { RouterLink, RouterView, useRoute } from "vue-router";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
 import PalettePicker from "./components/PalettePicker.vue";
 import { currentLanguage, languageOptions, locale, setLocale, t } from "./i18n";
 import { effectiveFlavor, normalizeTheme, paletteFor } from "./theme";
 
 const route = useRoute();
+const router = useRouter();
 const savedTheme = normalizeTheme(localStorage.getItem("theme"));
 const theme = ref(savedTheme);
 const colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
@@ -19,8 +20,37 @@ const themeOptions = computed(() => [
 ]);
 const languageMenuOpen = ref(false);
 const archiveTransition = ref(false);
+const globalSearchOpen = ref(false);
+const globalSearchQuery = ref("");
+const globalSearchInput = ref(null);
 let archiveTransitionTimer = 0;
 document.documentElement.dataset.theme = theme.value;
+
+const globalSearchContext = computed(() => {
+  const path = route.path;
+  if (path === "/music" || path.startsWith("/release/")) {
+    return {
+      path: "/music",
+      label: t("音乐档案"),
+      placeholder: t("搜索标题或艺术家"),
+    };
+  }
+  if (path === "/collabo" || path.startsWith("/collabo/")) {
+    return {
+      path: "/collabo",
+      label: t("联动立绘档案"),
+      placeholder: t("搜索联动、成员或合作方"),
+    };
+  }
+  if (path === "/news" || path.startsWith("/news/")) {
+    return {
+      path: "/news",
+      label: t("官网新闻"),
+      placeholder: t("搜索新闻标题、摘要、正文或标签"),
+    };
+  }
+  return null;
+});
 
 function accentInk(hex) {
   const channels = [1, 3, 5].map(index => Number.parseInt(hex.slice(index, index + 2), 16) / 255);
@@ -55,6 +85,50 @@ function chooseLanguage(nextLocale) {
   languageMenuOpen.value = false;
 }
 
+function openGlobalSearch() {
+  if (!globalSearchContext.value) return;
+  globalSearchQuery.value = typeof route.query.q === "string" ? route.query.q : "";
+  globalSearchOpen.value = true;
+  document.body.classList.add("global-search-open");
+  nextTick(() => {
+    globalSearchInput.value?.focus();
+    globalSearchInput.value?.select();
+  });
+}
+
+function closeGlobalSearch() {
+  globalSearchOpen.value = false;
+  document.body.classList.remove("global-search-open");
+}
+
+function submitGlobalSearch() {
+  const context = globalSearchContext.value;
+  if (!context) return;
+  const query = globalSearchQuery.value.trim();
+  const nextRouteQuery = { ...route.query };
+  delete nextRouteQuery.page;
+  if (query) nextRouteQuery.q = query;
+  else delete nextRouteQuery.q;
+  closeGlobalSearch();
+  router.push({
+    path: context.path,
+    query: nextRouteQuery,
+  });
+}
+
+function handleGlobalSearchKeydown(event) {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+    if (!globalSearchContext.value) return;
+    event.preventDefault();
+    openGlobalSearch();
+    return;
+  }
+  if (globalSearchOpen.value && event.key === "Escape") {
+    event.preventDefault();
+    closeGlobalSearch();
+  }
+}
+
 function prepareArchiveTransition(targetPath, event) {
   if (
     route.path === targetPath ||
@@ -82,13 +156,20 @@ watch(flavor, () => {
   applyTheme();
 });
 
+watch(() => route.path, (nextPath, previousPath) => {
+  if (nextPath !== previousPath && globalSearchOpen.value) closeGlobalSearch();
+});
+
 onMounted(() => {
   applyTheme();
   colorScheme.addEventListener("change", handleSchemeChange);
+  window.addEventListener("keydown", handleGlobalSearchKeydown);
 });
 
 onBeforeUnmount(() => {
   colorScheme.removeEventListener("change", handleSchemeChange);
+  window.removeEventListener("keydown", handleGlobalSearchKeydown);
+  document.body.classList.remove("global-search-open");
   window.clearTimeout(archiveTransitionTimer);
 });
 </script>
@@ -140,6 +221,36 @@ onBeforeUnmount(() => {
       </Transition>
       <component v-else :is="Component" />
     </RouterView>
+    <Teleport to="body">
+      <div v-if="globalSearchOpen && globalSearchContext" class="global-search-layer" @click.self="closeGlobalSearch">
+        <section class="global-search-dialog" role="dialog" aria-modal="true" :aria-label="globalSearchContext.label" @keydown.esc.prevent="closeGlobalSearch">
+          <div class="global-search-heading">
+            <div>
+              <p class="global-search-eyebrow">SEARCH / INDEX</p>
+              <h2>{{ globalSearchContext.label }}</h2>
+            </div>
+            <button class="global-search-close" type="button" :aria-label="t('关闭')" @click="closeGlobalSearch">×</button>
+          </div>
+          <form class="global-search-form" @submit.prevent="submitGlobalSearch">
+            <svg class="global-search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.5"></circle><path d="m16 16 4.5 4.5"></path></svg>
+            <input
+              ref="globalSearchInput"
+              v-model="globalSearchQuery"
+              type="search"
+              autocomplete="off"
+              :placeholder="globalSearchContext.placeholder"
+              :aria-label="globalSearchContext.placeholder"
+            >
+            <kbd class="global-search-enter" aria-hidden="true">↵</kbd>
+            <button class="global-search-submit" type="submit">{{ t("搜索") }} <span aria-hidden="true">↗</span></button>
+          </form>
+          <div class="global-search-footer">
+            <span>{{ t("搜索档案") }}</span>
+            <span><kbd>ESC</kbd> {{ t("关闭") }}</span>
+          </div>
+        </section>
+      </div>
+    </Teleport>
     <footer>
        <span v-if="route.path === '/music'" class="footer-source"><strong class="footer-title">{{ t("数据源：") }}</strong><a href="https://www.lovelive-anime.jp/nijigasaki/cd.php" target="_blank" rel="noopener noreferrer">lovelive-anime.jp</a></span>
        <span v-if="route.path.startsWith('/news')" class="footer-source"><strong class="footer-title">{{ t("数据源：") }}</strong><a href="https://www.lovelive-anime.jp/nijigasaki/topics.php" target="_blank" rel="noopener noreferrer">lovelive-anime.jp/topics.php</a></span>

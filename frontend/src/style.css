@@ -120,6 +120,178 @@ select:focus-visible {
   flex-direction: column;
 }
 
+body.global-search-open {
+  overflow: hidden;
+}
+
+.global-search-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: color-mix(in srgb, var(--ink) 28%, transparent);
+  backdrop-filter: blur(5px);
+}
+
+.global-search-dialog {
+  position: absolute;
+  top: clamp(82px, 14vh, 150px);
+  left: 50%;
+  width: min(650px, calc(100vw - 32px));
+  padding: 20px;
+  transform: translateX(-50%);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: 0 24px 72px var(--shadow), 0 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent);
+  animation: global-search-dialog-in 180ms ease-out both;
+}
+
+@keyframes global-search-dialog-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -10px) scale(.98);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+}
+
+.global-search-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 16px;
+}
+
+.global-search-eyebrow {
+  margin: 0 0 5px;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .12em;
+}
+
+.global-search-heading h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: clamp(19px, 3vw, 25px);
+  line-height: 1.15;
+}
+
+.global-search-close {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 23px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.global-search-close:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.global-search-form {
+  display: flex;
+  min-height: 58px;
+  align-items: center;
+  gap: 11px;
+  padding: 8px 8px 8px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-alt);
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.global-search-form:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.global-search-icon {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: var(--accent);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.global-search-form input {
+  min-width: 0;
+  flex: 1;
+  padding: 5px 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 16px;
+}
+
+.global-search-form input::placeholder {
+  color: var(--muted);
+  opacity: .82;
+}
+
+.global-search-enter,
+.global-search-footer kbd {
+  display: inline-flex;
+  min-width: 25px;
+  height: 25px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.global-search-submit {
+  flex: 0 0 auto;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.global-search-submit span {
+  margin-left: 4px;
+}
+
+.global-search-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 3px 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .04em;
+}
+
+.global-search-footer span:last-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .site-header {
   height: 76px;
   padding: 0 max(17px, calc((100% - 1260px) / 2));
@@ -895,6 +1067,30 @@ footer a {
 }
 
 @media (max-width: 700px) {
+  .global-search-dialog {
+    top: 72px;
+    width: calc(100vw - 24px);
+    padding: 16px;
+  }
+
+  .global-search-form {
+    min-height: 52px;
+    gap: 8px;
+    padding-left: 12px;
+  }
+
+  .global-search-enter {
+    display: none;
+  }
+
+  .global-search-submit {
+    padding: 9px 10px;
+  }
+
+  .global-search-footer {
+    font-size: 9px;
+  }
+
   .site-header {
     height: auto;
     min-height: 68px;

@@ -19,6 +19,13 @@ with patch.dict(os.environ, {"DATA_DIR": _import_dir.name, "ADMIN_SECRET": "test
 
 
 class ProgramPeriodSchedulingTests(unittest.TestCase):
+    def test_sync_exception_label_identifies_type_and_http_status(self):
+        request = httpx.Request("POST", "https://example.com/cd_detail.php")
+        response = httpx.Response(403, request=request)
+        error = httpx.HTTPStatusError("blocked", request=request, response=response)
+        self.assertEqual(main.sync_exception_label(error), "HTTPStatusError HTTP 403")
+        self.assertEqual(main.sync_exception_label(httpx.ReadTimeout("")), "ReadTimeout")
+
     def test_individual_period_defaults_to_disabled(self):
         start = date(2026, 1, 1)
         individual = main.normalized_period(
@@ -191,6 +198,76 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row["auto_generate"], 0)
         conn.close()
+
+
+class MusicSyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_deferred_detail_preserves_existing_record(self):
+        class FakeResponse:
+            text = """
+                <ul class="list">
+                  <li><a href="#cd01_5601">列表标题</a></li>
+                </ul>
+                <div class="box" id="cd01_5601"><p>不完整列表资料</p></div>
+            """
+
+            def raise_for_status(self):
+                return None
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def get(self, *args, **kwargs):
+                return FakeResponse()
+
+            async def post(self, *args, **kwargs):
+                raise httpx.ReadTimeout("")
+
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "nijidb.sqlite3"
+            connection = sqlite3.connect(database_path)
+            connection.execute(
+                """CREATE TABLE releases (
+                    id TEXT PRIMARY KEY, title TEXT, subtitle TEXT, artist TEXT, release_date TEXT, price TEXT,
+                    cover_url TEXT, detail_html TEXT, source_url TEXT, fingerprint TEXT, updated_at TEXT,
+                    position INTEGER, tracks_json TEXT, spec_json TEXT, extras_json TEXT
+                )"""
+            )
+            connection.execute(
+                """INSERT INTO releases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "cd01_5601",
+                    "完整资料标题",
+                    "完整副标题",
+                    "虹ヶ咲学園スクールアイドル同好会",
+                    "2026年2月4日(水)",
+                    "￥3,850",
+                    "https://cdn.example.com/cover.jpg",
+                    "<article>完整详情</article>",
+                    "https://example.com#cd01_5601",
+                    "fingerprint",
+                    "2026-09-13T00:00:00+00:00",
+                    1,
+                    '[{"title":"完整曲目"}]',
+                    '{"品番":"LACA-19159"}',
+                    "[]",
+                ),
+            )
+            connection.commit()
+            connection.close()
+            with patch.object(main, "DB_PATH", database_path), patch.object(main, "SOURCE_URL", "https://example.com/cd.php"), patch.object(main.httpx, "AsyncClient", FakeClient):
+                records = await main.scrape()
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["title"], "完整资料标题")
+        self.assertEqual(records[0]["detail_html"], "<article>完整详情</article>")
+        self.assertEqual(records[0]["tracks_json"], '[{"title":"完整曲目"}]')
 
 
 class ProgramImageApiTests(unittest.IsolatedAsyncioTestCase):

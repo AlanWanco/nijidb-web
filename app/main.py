@@ -3051,6 +3051,13 @@ def parse_release(release_id: str, content, entry_image=None) -> dict[str, str]:
     return record
 
 
+def sync_exception_label(exc: BaseException) -> str:
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    suffix = f" HTTP {status_code}" if status_code is not None else ""
+    return f"{type(exc).__name__}{suffix}"
+
+
 async def scrape() -> list[dict[str, str]]:
     print(f"[sync] fetching {SOURCE_URL}", flush=True)
     headers = {
@@ -3074,6 +3081,7 @@ async def scrape() -> list[dict[str, str]]:
         if not box or not box.select_one(".title"):
             missing_detail_ids.append(release_id)
     dynamic_details: dict[str, BeautifulSoup] = {}
+    failed_detail_ids: set[str] = set()
     if missing_detail_ids:
         detail_headers = {**headers, "Content-Type": "application/json"}
         async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=detail_headers) as detail_client:
@@ -3086,13 +3094,33 @@ async def scrape() -> list[dict[str, str]]:
                     detail_response.raise_for_status()
                     dynamic_details[release_id] = BeautifulSoup(detail_response.json(), "html.parser")
                 except Exception as exc:
-                    print(f"[sync] detail unavailable {release_id}: {exc}", flush=True)
+                    failed_detail_ids.add(release_id)
+                    print(f"[sync] detail unavailable {release_id}: {sync_exception_label(exc)}", flush=True)
         print(f"[sync] loaded {len(dynamic_details)}/{len(missing_detail_ids)} deferred details", flush=True)
+
+    preserved_records: dict[str, dict[str, Any]] = {}
+    if failed_detail_ids:
+        placeholders = ", ".join("?" for _ in failed_detail_ids)
+        with db() as conn:
+            preserved_records = {
+                row["id"]: dict(row)
+                for row in conn.execute(
+                    f"SELECT * FROM releases WHERE id IN ({placeholders})",
+                    sorted(failed_detail_ids),
+                ).fetchall()
+            }
     for entry in source_list.find_all("li", recursive=False):
         link = entry.find("a", href=True)
         if not link or not link["href"].startswith("#"):
             continue
         release_id = link["href"][1:]
+        if release_id in failed_detail_ids:
+            if release_id in preserved_records:
+                result.append(preserved_records[release_id])
+                print(f"[sync] preserved previous detail {release_id}", flush=True)
+            else:
+                print(f"[sync] skipped incomplete new release {release_id}", flush=True)
+            continue
         box = boxes.get(release_id)
         content = dynamic_details.get(release_id) or box
         entry_image = entry.find("img", src=True)
@@ -3662,7 +3690,7 @@ async def sync_once() -> tuple[int, str | None]:
                             refreshed_cover_ids.add(item["id"])
                     except Exception as exc:
                         image_errors += 1
-                        print(f"[sync] cover failed {item['id']}: {exc}", flush=True)
+                        print(f"[sync] cover failed {item['id']}: {sync_exception_label(exc)}", flush=True)
             changed = await store_records(records, assign_positions=True, refreshed_cover_ids=refreshed_cover_ids)
             if records and not image_errors:
                 mark_cover_cache_current()
@@ -3672,10 +3700,11 @@ async def sync_once() -> tuple[int, str | None]:
             print(f"[sync] completed: {len(changed)} changed, {len(records) - image_errors} covers cached", flush=True)
             return len(changed), None
         except Exception as exc:
-            print(f"[sync] failed: {exc}", flush=True)
+            error_label = sync_exception_label(exc)
+            print(f"[sync] failed: {error_label}", flush=True)
             with db() as conn:
-                conn.execute("INSERT INTO sync_log(checked_at, changed_count, error) VALUES (?, 0, ?)", (datetime.now(timezone.utc).isoformat(), str(exc)))
-            return 0, str(exc)
+                conn.execute("INSERT INTO sync_log(checked_at, changed_count, error) VALUES (?, 0, ?)", (datetime.now(timezone.utc).isoformat(), error_label))
+            return 0, error_label
 
 
 async def refresh_deferred_once() -> tuple[int, str | None]:
@@ -3693,13 +3722,21 @@ async def refresh_deferred_once() -> tuple[int, str | None]:
                 "Content-Type": "application/json",
             }
             records = []
+            detail_errors = 0
             async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
                 for row in rows:
-                    response = await client.post(urljoin(SOURCE_URL, "cd_detail.php"), json=row["id"].removeprefix("cd"))
-                    response.raise_for_status()
-                    item = parse_release(row["id"], BeautifulSoup(response.json(), "html.parser"))
-                    item["position"] = row["position"]
-                    records.append(item)
+                    try:
+                        response = await client.post(urljoin(SOURCE_URL, "cd_detail.php"), json=row["id"].removeprefix("cd"))
+                        response.raise_for_status()
+                        item = parse_release(row["id"], BeautifulSoup(response.json(), "html.parser"))
+                        item["position"] = row["position"]
+                        records.append(item)
+                    except Exception as exc:
+                        detail_errors += 1
+                        print(f"[detail-sync] detail unavailable {row['id']}: {sync_exception_label(exc)}", flush=True)
+            if not records:
+                print(f"[detail-sync] no details fetched; failed={detail_errors}", flush=True)
+                return 0, None
             image_errors = 0
             refreshed_cover_ids: set[str] = set()
             refresh_ids = cover_refresh_ids(records)
@@ -3712,14 +3749,15 @@ async def refresh_deferred_once() -> tuple[int, str | None]:
                             refreshed_cover_ids.add(item["id"])
                     except Exception as exc:
                         image_errors += 1
-                        print(f"[detail-sync] cover failed {item['id']}: {exc}", flush=True)
+                        print(f"[detail-sync] cover failed {item['id']}: {sync_exception_label(exc)}", flush=True)
             changed = await store_records(records, refreshed_cover_ids=refreshed_cover_ids)
             await notify(changed, settings(), "异步详情更新")
-            print(f"[detail-sync] completed: {len(changed)} changed, {len(records) - image_errors} checked", flush=True)
+            print(f"[detail-sync] completed: {len(changed)} changed, {len(records) - image_errors} checked, {detail_errors} detail failures", flush=True)
             return len(changed), None
         except Exception as exc:
-            print(f"[detail-sync] failed: {exc}", flush=True)
-            return 0, str(exc)
+            error_label = sync_exception_label(exc)
+            print(f"[detail-sync] failed: {error_label}", flush=True)
+            return 0, error_label
 
 
 def news_image_target(row: sqlite3.Row | dict[str, Any]) -> Path | None:
@@ -4246,7 +4284,7 @@ async def news_sync_once() -> dict[str, Any]:
                                 changed_news_ids.append(record_id)
                         except (httpx.HTTPError, ValueError, RuntimeError) as exc:
                             detail_errors += 1
-                            print(f"[news-sync] detail failed {record_id}: {type(exc).__name__}", flush=True)
+                            print(f"[news-sync] detail failed {record_id}: {describe_news_fetch_error(exc)}", flush=True)
                     next_offset = topic_next_offset(response.text, offset)
                     if next_offset is None:
                         if len(entries) < 6:
@@ -4256,8 +4294,9 @@ async def news_sync_once() -> dict[str, Any]:
             if detail_errors:
                 error_message = f"{detail_errors} 条详情读取失败，下次检查将重试"
         except (httpx.HTTPError, ValueError, RuntimeError) as exc:
-            error_message = f"官网读取失败（{type(exc).__name__}），已保留已有新闻"
-            print(f"[news-sync] failed: {type(exc).__name__}", flush=True)
+            reason = describe_news_fetch_error(exc)
+            error_message = f"{reason}，已保留已有新闻"
+            print(f"[news-sync] failed: {reason}", flush=True)
         with db() as conn:
             conn.execute(
                 "INSERT INTO news_sync_log(checked_at, discovered_count, changed_count, error) VALUES (?, ?, ?, ?)",

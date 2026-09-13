@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import FullCalendar from "@fullcalendar/vue3";
 import dayGridPlugin from "@fullcalendar/daygrid";
 import interactionPlugin from "@fullcalendar/interaction";
@@ -102,6 +102,8 @@ const programCategoryFilterDetails = ref(null);
 const adminAuthenticated = ref(false);
 const editAccessNotice = ref("");
 let calendarTouchStart = null;
+let calendarScrollRequestId = 0;
+let pendingCalendarScroll = null;
 const calendarAnimationClass = ref("");
 let calendarAnimationFrame = 0;
 let calendarAnimationTimer = 0;
@@ -109,6 +111,7 @@ let screenshotMessageTimer = 0;
 let html2canvasLoader = null;
 let screenshotRendererLoader = null;
 let eventernoteRequestId = 0;
+let calendarLoadRequestId = 0;
 const calendarRequestRange = ref(null);
 const requestedMonth = computed(() => routeMonth(route.params.month));
 const initialMonth = requestedMonth.value || monthKey(today);
@@ -545,7 +548,13 @@ function updateVisibleMonth(value) {
   jumpMonth.value = value.getMonth() + 1;
 }
 
+function cancelPendingCalendarScroll() {
+  calendarScrollRequestId += 1;
+  pendingCalendarScroll = null;
+}
+
 function jumpToMonth() {
+  cancelPendingCalendarScroll();
   const calendarApi = calendarRef.value?.getApi?.();
   if (!calendarApi) return;
   const targetMonth = `${jumpYear.value}-${String(jumpMonth.value).padStart(2, "0")}`;
@@ -554,6 +563,7 @@ function jumpToMonth() {
 }
 
 function previousMonth() {
+  cancelPendingCalendarScroll();
   const calendarApi = calendarRef.value?.getApi?.();
   if (!calendarApi) return;
   animateCalendar("previous");
@@ -561,6 +571,7 @@ function previousMonth() {
 }
 
 function nextMonth() {
+  cancelPendingCalendarScroll();
   const calendarApi = calendarRef.value?.getApi?.();
   if (!calendarApi) return;
   animateCalendar("next");
@@ -608,9 +619,27 @@ function goToToday() {
   if (!calendarApi) return;
   const now = new Date();
   const targetMonth = monthKey(now);
+  const targetDate = screenshotDateValue(now);
+  const requestId = calendarScrollRequestId + 1;
+  calendarScrollRequestId = requestId;
+  pendingCalendarScroll = { id: requestId, month: targetMonth, date: targetDate };
   if (targetMonth !== visibleMonth.value) animateCalendar(targetMonth > visibleMonth.value ? "next" : "previous");
   updateVisibleMonth(now);
   calendarApi.gotoDate(now);
+  void scrollCalendarToDate(targetDate, requestId);
+}
+
+async function scrollCalendarToDate(dateValue, requestId) {
+  await nextTick();
+  await new Promise(resolve => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve)));
+  if (requestId !== calendarScrollRequestId || loading.value) return;
+  const selector = viewMode.value === "calendar"
+    ? `.program-calendar .fc-daygrid-day[data-date="${dateValue}"]`
+    : `.program-list-date-group[data-date="${dateValue}"]`;
+  const target = document.querySelector(selector);
+  if (!target || requestId !== calendarScrollRequestId) return;
+  pendingCalendarScroll = null;
+  target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
 }
 
 function screenshotDateValue(date) {
@@ -988,6 +1017,8 @@ async function loadEventernoteEvents(range = calendarRequestRange.value) {
 
 async function loadCalendar(info) {
   updateVisibleMonth(info?.view?.currentStart);
+  const viewMonth = info?.view?.currentStart instanceof Date ? monthKey(info.view.currentStart) : "";
+  const requestId = ++calendarLoadRequestId;
   loading.value = true;
   error.value = "";
   try {
@@ -997,15 +1028,22 @@ async function loadCalendar(info) {
     });
     calendarRequestRange.value = { fromDate: params.get("start"), toDate: params.get("end") };
     const data = await api(`/api/programs/calendar?${params}`);
+    if (requestId !== calendarLoadRequestId) return;
     programs.value = data.programs;
     allEvents.value = data.events;
     if (eventernoteSelected.value) await loadEventernoteEvents();
     else eventernoteEvents.value = [];
     if (selectedEvent.value && !selectedProgram.value && !selectedEvent.value.isEventernote) closeDrawer();
   } catch (requestError) {
+    if (requestId !== calendarLoadRequestId) return;
     error.value = requestError.message || t("节目日历加载失败");
   } finally {
+    if (requestId !== calendarLoadRequestId) return;
     loading.value = false;
+    const pending = pendingCalendarScroll;
+    if (pending && pending.id === calendarScrollRequestId && pending.month === viewMonth) {
+      void scrollCalendarToDate(pending.date, pending.id);
+    }
   }
 }
 
@@ -1100,6 +1138,8 @@ onMounted(() => {
 onUnmounted(() => {
   document.removeEventListener("click", closeCastFilter);
   document.removeEventListener("click", closeProgramCategoryFilter);
+  cancelPendingCalendarScroll();
+  calendarLoadRequestId += 1;
   window.cancelAnimationFrame(calendarAnimationFrame);
   window.clearTimeout(calendarAnimationTimer);
   window.clearTimeout(screenshotMessageTimer);
@@ -1226,7 +1266,7 @@ onUnmounted(() => {
             <span class="section-count">{{ monthEvents.length }} EVENTS</span>
           </div>
            <p v-if="!listGroups.length" class="muted program-empty">{{ t("这个月没有符合筛选条件的节目。") }}</p>
-          <section v-for="group in listGroups" :key="group.date" class="program-list-date-group">
+          <section v-for="group in listGroups" :key="group.date" :data-date="group.date" class="program-list-date-group">
              <div class="program-list-date"><strong>{{ listDateLabel(group.date) }}</strong><span>{{ group.events.length }} {{ t("期") }}</span></div>
              <button v-for="event in group.events" :key="event.id" type="button" class="program-list-event" :class="eventStateClass(event)" @click="openEvent(event)">
                <span v-if="eventCast(event).length" class="program-list-cast-line" :aria-label="t('出场成员')"><i v-for="member in eventCast(event)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>

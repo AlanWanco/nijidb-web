@@ -7,6 +7,7 @@ import { api } from "../api";
 import { locale, localeTag, t } from "../i18n";
 import { NIJIGASAKI_CAST, castColorSegments, castMemberMatches } from "../programCast";
 import { occurrenceLinkItems } from "../programLinks";
+import NewsLightbox from "../components/NewsLightbox.vue";
 
 const weekdayNames = computed(() => locale.value === "en"
   ? ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -40,6 +41,12 @@ const occurrenceAutoSaveState = ref("");
 const occurrenceRows = ref([]);
 const occurrenceListRef = ref(null);
 const occurrenceEditorRef = ref(null);
+const occurrenceImageFileInput = ref(null);
+const occurrenceImageUrl = ref("");
+const occurrenceImageUploading = ref(false);
+const occurrenceImageDeletingId = ref("");
+const occurrenceLightboxImages = ref([]);
+const occurrenceLightboxIndex = ref(-1);
 const customPerson = ref("");
 const occurrenceGuestInput = ref("");
 const importFileInput = ref(null);
@@ -123,6 +130,7 @@ function blankOccurrence() {
     adjusted_date: "",
     adjusted_time: "",
     note: "",
+    images: [],
     guests: [],
     absent_members: [],
     generated: false,
@@ -718,6 +726,8 @@ function resetOccurrenceDraft() {
   occurrenceDraftHydrating = true;
   Object.assign(occurrenceDraft, blankOccurrence());
   occurrenceGuestInput.value = "";
+  occurrenceImageUrl.value = "";
+  closeOccurrenceLightbox();
   occurrenceEditingRowKey.value = "";
   occurrenceAutoSaveState.value = "";
   occurrenceDraftBaseline = occurrenceDraftSignature();
@@ -1048,6 +1058,8 @@ function editOccurrence(row) {
   occurrenceAutoSaveTimer = 0;
   occurrenceAutoSaveQueued = false;
   occurrenceDraftHydrating = true;
+  occurrenceImageUrl.value = "";
+  closeOccurrenceLightbox();
   setActivePanel("occurrences");
   occurrenceEditingRowKey.value = occurrenceRowKey(row);
   Object.assign(occurrenceDraft, {
@@ -1069,6 +1081,7 @@ function editOccurrence(row) {
     adjusted_date: row.adjusted_date || (row.status === "rescheduled" ? row.original_date || "" : ""),
      adjusted_time: row.adjusted_time || (row.status === "rescheduled" ? row.original_time || "" : ""),
      note: row.note || "",
+     images: [...(row.images || [])],
      guests: [...(row.guests || [])],
      absent_members: [...(row.absent_members || [])],
      generated: Boolean(row.generated),
@@ -1086,6 +1099,144 @@ function editOccurrence(row) {
     occurrenceDraftHydrating = false;
     occurrenceDraftBaseline = occurrenceDraftSignature();
   });
+}
+
+function occurrenceImages(value = occurrenceDraft) {
+  const source = value?.images || [];
+  return (Array.isArray(source) ? source : [])
+    .filter(image => image?.url)
+    .map(image => ({ ...image, alt: image.alt || image.alt_text || "" }));
+}
+
+function openOccurrenceLightbox(index = 0) {
+  const images = occurrenceImages();
+  if (!images.length) return;
+  occurrenceLightboxImages.value = images;
+  occurrenceLightboxIndex.value = Math.max(0, Math.min(images.length - 1, index));
+}
+
+function closeOccurrenceLightbox() {
+  occurrenceLightboxIndex.value = -1;
+  occurrenceLightboxImages.value = [];
+}
+
+function openOccurrenceImagePicker() {
+  occurrenceImageFileInput.value?.click();
+}
+
+function applyOccurrenceImageResponse(data) {
+  const saved = data?.occurrence;
+  if (!saved) return;
+  const rowKey = occurrenceEditingRowKey.value || occurrenceRowKey(occurrenceDraft);
+  occurrenceDraft.images = [...(saved.images || [])];
+  updateSavedOccurrence(rowKey, saved);
+}
+
+async function ensureOccurrenceSavedForImage() {
+  if (occurrenceDraft.id) return true;
+  if (!occurrenceDraft.original_date) {
+    error.value = t("请先填写单集日期，再添加返图");
+    return false;
+  }
+  const saved = await saveOccurrence();
+  if (!saved || !occurrenceDraft.id) {
+    if (!error.value) error.value = t("请先保存单集，再添加返图");
+    return false;
+  }
+  return true;
+}
+
+async function uploadOccurrenceImageRequest(path, options) {
+  const response = await fetch(path, {
+    ...options,
+    credentials: "same-origin",
+    headers: { Accept: "application/json", ...(options.headers || {}) },
+  });
+  const contentType = response.headers.get("content-type") || "";
+  const payload = contentType.includes("application/json") ? await response.json() : await response.text();
+  if (!response.ok) {
+    const requestError = new Error(typeof payload === "object" ? payload.detail || t("请求失败") : t("请求失败"));
+    requestError.status = response.status;
+    throw requestError;
+  }
+  return payload;
+}
+
+async function handleOccurrenceImageFiles(event) {
+  const files = [...(event.target.files || [])];
+  event.target.value = "";
+  if (!files.length || occurrenceImageUploading.value) return;
+  if (!(await ensureOccurrenceSavedForImage())) return;
+  occurrenceImageUploading.value = true;
+  message.value = "";
+  error.value = "";
+  let added = 0;
+  try {
+    for (const file of files) {
+      const data = await uploadOccurrenceImageRequest(
+        `/api/admin/programs/${encodeURIComponent(editingId.value)}/occurrences/${encodeURIComponent(occurrenceDraft.id)}/images`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": file.type || "application/octet-stream",
+            "X-Filename": encodeURIComponent(file.name),
+            "X-Alt-Text": encodeURIComponent(file.name),
+          },
+          body: file,
+        },
+      );
+      applyOccurrenceImageResponse(data);
+      added += 1;
+    }
+    message.value = t("已添加 {count} 张返图", { count: added });
+  } catch (requestError) {
+    showError(requestError);
+    if (added) message.value = t("已添加 {count} 张返图，另有图片失败", { count: added });
+  } finally {
+    occurrenceImageUploading.value = false;
+  }
+}
+
+async function addOccurrenceImageUrl() {
+  const url = occurrenceImageUrl.value.trim();
+  if (!url || occurrenceImageUploading.value) return;
+  if (!(await ensureOccurrenceSavedForImage())) return;
+  occurrenceImageUploading.value = true;
+  message.value = "";
+  error.value = "";
+  try {
+    const data = await api(
+      `/api/admin/programs/${encodeURIComponent(editingId.value)}/occurrences/${encodeURIComponent(occurrenceDraft.id)}/images`,
+      { method: "POST", body: { url } },
+    );
+    applyOccurrenceImageResponse(data);
+    occurrenceImageUrl.value = "";
+    message.value = t("已添加返图直链");
+  } catch (requestError) {
+    showError(requestError);
+  } finally {
+    occurrenceImageUploading.value = false;
+  }
+}
+
+async function deleteOccurrenceImage(image) {
+  if (!occurrenceDraft.id || !image?.id || occurrenceImageDeletingId.value) return;
+  if (!window.confirm(t("确定删除这张返图吗？"))) return;
+  occurrenceImageDeletingId.value = String(image.id);
+  message.value = "";
+  error.value = "";
+  try {
+    const data = await api(
+      `/api/admin/programs/${encodeURIComponent(editingId.value)}/occurrences/${encodeURIComponent(occurrenceDraft.id)}/images/${encodeURIComponent(image.id)}`,
+      { method: "DELETE" },
+    );
+    applyOccurrenceImageResponse(data);
+    message.value = t("返图已删除");
+  } catch (requestError) {
+    showError(requestError);
+  } finally {
+    occurrenceImageDeletingId.value = "";
+  }
 }
 
 function occurrenceRowKey(row) {
@@ -1799,6 +1950,22 @@ onUnmounted(() => {
                 <small>{{ t("源地址填写 HTTP/HTTPS 地址；搬运地址和字幕地址支持 BV 号、B 站地址或其他 HTTP/HTTPS 地址。") }}</small>
               </div>
               <label>{{ t("备注") }}<textarea v-model="occurrenceDraft.note" rows="3" :placeholder="t('例如：延期至下周、嘉宾变更……')"></textarea></label>
+              <div class="program-form-field occurrence-images-field">
+                <span class="program-field-label">{{ t("当期节目返图") }}</span>
+                <div v-if="occurrenceImages().length" class="occurrence-admin-image-grid">
+                  <div v-for="(image, index) in occurrenceImages()" :key="image.id || `${image.url}-${index}`" class="occurrence-admin-image-item">
+                    <button type="button" class="occurrence-admin-image-preview" :aria-label="t('查看返图 {count}', { count: index + 1 })" @click="openOccurrenceLightbox(index)"><img :src="image.url" :alt="image.alt" loading="lazy"></button>
+                    <button type="button" class="occurrence-admin-image-delete" :disabled="occurrenceImageDeletingId === String(image.id)" @click="deleteOccurrenceImage(image)">{{ occurrenceImageDeletingId === String(image.id) ? t("删除中……") : t("删除") }}</button>
+                  </div>
+                </div>
+                <div class="occurrence-image-actions">
+                  <input ref="occurrenceImageFileInput" class="program-json-file-input" type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/bmp,image/avif" multiple @change="handleOccurrenceImageFiles">
+                  <button type="button" class="secondary program-action-button" :disabled="occurrenceImageUploading || occurrenceSaving" @click="openOccurrenceImagePicker">{{ occurrenceImageUploading ? t("上传图片中……") : t("上传返图") }}</button>
+                  <input v-model="occurrenceImageUrl" type="url" :placeholder="t('粘贴图片直链（HTTP/HTTPS）')" :disabled="occurrenceImageUploading || occurrenceSaving" @keydown.enter.prevent="addOccurrenceImageUrl">
+                  <button type="button" class="secondary program-action-button" :disabled="occurrenceImageUploading || occurrenceSaving || !occurrenceImageUrl.trim()" @click="addOccurrenceImageUrl">{{ t("添加直链") }}</button>
+                </div>
+                <small>{{ t("可上传图片到本地（配置 R2 时会同步）或粘贴图片直链；点击缩略图可预览大图。") }}</small>
+              </div>
            <div class="actions">
                <span v-if="occurrenceAutoSaveEnabled && occurrenceAutoSaveState" class="occurrence-auto-save-status" :class="`is-${occurrenceAutoSaveState}`" role="status" aria-live="polite">{{ occurrenceAutoSaveState === 'saved' ? t("已自动保存") : occurrenceAutoSaveState === 'error' ? t("自动保存失败，请检查输入") : t("自动保存中……") }}</span>
                <button v-if="!occurrenceAutoSaveEnabled" class="program-action-button" :disabled="occurrenceSaving">{{ occurrenceSaving ? t("保存中……") : t("保存本期调整") }}</button>
@@ -1882,6 +2049,7 @@ onUnmounted(() => {
           </div>
         </section>
       </div>
+      <NewsLightbox :images="occurrenceLightboxImages" :start="occurrenceLightboxIndex" @close="closeOccurrenceLightbox" />
 
    </main>
 </template>

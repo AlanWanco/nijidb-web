@@ -7,7 +7,10 @@ import sqlite3
 import tempfile
 import unittest
 from datetime import date, timedelta
+from pathlib import Path
 from unittest.mock import patch
+
+import httpx
 
 
 _import_dir = tempfile.TemporaryDirectory()
@@ -111,6 +114,40 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["original_date"], start.isoformat())
 
+    def test_occurrence_images_are_normalized_and_carried_to_records(self):
+        values = main.normalized_occurrence(
+            {
+                "original_date": "2026-01-07",
+                "images": [
+                    {"url": "https://cdn.example.com/photo.jpg", "alt_text": "现场返图"},
+                    "https://cdn.example.com/photo-2.jpg",
+                ],
+            }
+        )
+        self.assertEqual(
+            values["images"],
+            [
+                {"url": "https://cdn.example.com/photo.jpg", "alt_text": "现场返图"},
+                {"url": "https://cdn.example.com/photo-2.jpg", "alt_text": ""},
+            ],
+        )
+        record = main.occurrence_record(
+            {"title": "测试节目", "delivery": "recorded"},
+            date(2026, 1, 7),
+            values,
+            schedule_time="20:00",
+        )
+        self.assertEqual([image["url"] for image in record["images"]], [
+            "https://cdn.example.com/photo.jpg",
+            "https://cdn.example.com/photo-2.jpg",
+        ])
+
+    def test_occurrence_image_url_must_be_external_http_url(self):
+        with self.assertRaises(ValueError):
+            main.normalized_occurrence(
+                {"original_date": "2026-01-07", "images": [{"url": "/media/programs/photo.jpg"}]}
+            )
+
     def test_period_auto_generate_is_persisted_in_period_rows(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -154,6 +191,90 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row["auto_generate"], 0)
         conn.close()
+
+
+class ProgramImageApiTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.media_directory = Path(self.directory.name) / "images"
+        self.media_directory.mkdir(parents=True)
+        self.backup_directory = Path(self.directory.name) / "backups"
+        self.backup_directory.mkdir(parents=True)
+        self.patches = [
+            patch.object(main, "DB_PATH", Path(self.directory.name) / "nijidb.sqlite3"),
+            patch.object(main, "MEDIA_DIR", self.media_directory),
+            patch.object(main, "BACKUP_DIR", self.backup_directory),
+            patch.object(main, "R2_ENDPOINT", ""),
+            patch.object(main, "R2_ACCESS_KEY_ID", ""),
+            patch.object(main, "R2_SECRET_ACCESS_KEY", ""),
+            patch.object(main, "R2_PUBLIC_BASE_URL", ""),
+        ]
+        for item in self.patches:
+            item.start()
+            self.addCleanup(item.stop)
+        main.init_db()
+        now = "2026-01-01T00:00:00+00:00"
+        program = main.normalized_program({
+            "title": "返图测试节目",
+            "start_date": "2026-01-01",
+            "end_date": "2026-12-31",
+            "periods": [{
+                "start_date": "2026-01-01",
+                "end_date": "2026-12-31",
+                "frequency": "weekly",
+                "schedule_time": "20:00",
+                "timezone": "Asia/Tokyo",
+            }],
+        })
+        program.update({"id": "program-image-test", "created_at": now, "updated_at": now})
+        with main.db() as conn:
+            main.insert_program_row(conn, program)
+            occurrence = main.normalized_occurrence({
+                "original_date": "2026-01-07",
+                "original_time": "20:00",
+            })
+            occurrence.update({"program_id": program["id"], "created_at": now, "updated_at": now})
+            self.occurrence_id = main.insert_occurrence_row(conn, occurrence).lastrowid
+        self.client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=main.app), base_url="http://test"
+        )
+        self.addAsyncCleanup(self.client.aclose)
+        self.client.cookies.set("nijidb_admin", main.admin_cookie_value(main.settings()["admin_password_hash"]))
+
+    async def test_direct_and_uploaded_images_are_returned_and_deletable(self):
+        endpoint = f"/api/admin/programs/program-image-test/occurrences/{self.occurrence_id}/images"
+        direct = await self.client.post(endpoint, json={"url": "https://cdn.example.com/live.jpg", "alt_text": "直链"})
+        self.assertEqual(direct.status_code, 200)
+        self.assertEqual(direct.json()["image"]["kind"], "external")
+        self.assertEqual(direct.json()["image"]["url"], "https://cdn.example.com/live.jpg")
+
+        content = b"\x89PNG\r\n\x1a\nprogram-photo"
+        uploaded = await self.client.post(
+            endpoint,
+            content=content,
+            headers={"Content-Type": "image/png", "X-Filename": "photo.png"},
+        )
+        self.assertEqual(uploaded.status_code, 200)
+        uploaded_image = uploaded.json()["image"]
+        self.assertEqual(uploaded_image["kind"], "upload")
+        self.assertEqual(uploaded_image["url"], f"/media/{uploaded_image['local_path']}")
+        self.assertTrue((self.media_directory / uploaded_image["local_path"]).is_file())
+
+        public = await self.client.get("/api/programs/program-image-test/occurrences")
+        public_occurrences = public.json()["occurrences"]
+        image_occurrence = next(item for item in public_occurrences if item["id"] == self.occurrence_id)
+        images = image_occurrence["images"]
+        self.assertEqual(len(images), 2)
+        self.assertEqual(images[0]["url"], "https://cdn.example.com/live.jpg")
+
+        deleted = await self.client.delete(
+            f"{endpoint}/{uploaded_image['id']}"
+        )
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(len(deleted.json()["occurrence"]["images"]), 1)
+        self.assertFalse((self.media_directory / uploaded_image["local_path"]).exists())
+
 
 
 def datetime_today() -> date:

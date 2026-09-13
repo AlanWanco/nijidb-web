@@ -105,9 +105,12 @@ PASSWORD_ITERATIONS = 310_000
 BACKUP_MAX_BYTES = 32 * 1024 * 1024
 BACKUP_RETENTION_COUNT = 30
 PROGRAM_JSON_FORMAT = "nijidb-program"
-PROGRAM_JSON_VERSION = 3
+PROGRAM_JSON_VERSION = 4
 PROGRAM_IMPORT_MAX_OCCURRENCES = 2000
 PROGRAM_IMPORT_PARENT_MARKER = "__nijidb_import_parent__"
+PROGRAM_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+PROGRAM_IMAGE_MAX_COUNT = 32
+PROGRAM_IMAGE_URL_MAX_LENGTH = 2000
 NIJIGASAKI_NAME_ALIASES = {
     "大西亚玖璃": "大西亜玖璃",
     "相良茉优": "相良茉優",
@@ -463,6 +466,23 @@ def init_db() -> None:
            UNIQUE(program_id, original_date, original_time)
          );
          CREATE INDEX IF NOT EXISTS idx_program_occurrences_program ON program_occurrences(program_id, original_date, original_time);
+         CREATE TABLE IF NOT EXISTS program_occurrence_images (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           occurrence_id INTEGER NOT NULL,
+           position INTEGER NOT NULL DEFAULT 0,
+           kind TEXT NOT NULL DEFAULT 'upload',
+           local_path TEXT NOT NULL DEFAULT '',
+           public_url TEXT NOT NULL DEFAULT '',
+           source_url TEXT NOT NULL DEFAULT '',
+           alt_text TEXT NOT NULL DEFAULT '',
+           width INTEGER NOT NULL DEFAULT 0,
+           height INTEGER NOT NULL DEFAULT 0,
+           bytes INTEGER NOT NULL DEFAULT 0,
+           sha256 TEXT NOT NULL DEFAULT '',
+           created_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_program_occurrence_images_occurrence
+           ON program_occurrence_images(occurrence_id, position, id);
          """)
         ensure_news_schema(conn)
         ensure_news_refresh_queue(conn, recover_processing=True)
@@ -514,6 +534,9 @@ def init_db() -> None:
         if "shift_following_days" not in occurrence_columns:
             conn.execute("ALTER TABLE program_occurrences ADD COLUMN shift_following_days INTEGER NOT NULL DEFAULT 0")
         migrate_occurrence_date_time_constraint(conn)
+        conn.execute(
+            "DELETE FROM program_occurrence_images WHERE occurrence_id NOT IN (SELECT id FROM program_occurrences)"
+        )
         normalize_legacy_cast_names(conn)
         seed_program_periods(conn)
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(releases)")}
@@ -731,6 +754,35 @@ def normalized_program_link(value: Any, label: str, allow_bilibili_id: bool = Fa
     return raw
 
 
+def normalized_occurrence_images(value: Any) -> list[dict[str, str]]:
+    source = value
+    if isinstance(value, str):
+        try:
+            source = json.loads(value)
+        except json.JSONDecodeError:
+            source = [value] if value.strip() else []
+    if source in (None, ""):
+        return []
+    if not isinstance(source, list):
+        raise ValueError("返图必须是数组")
+    if len(source) > PROGRAM_IMAGE_MAX_COUNT:
+        raise ValueError(f"每期最多保存 {PROGRAM_IMAGE_MAX_COUNT} 张返图")
+    images: list[dict[str, str]] = []
+    for index, item in enumerate(source, start=1):
+        if isinstance(item, dict):
+            url = str(item.get("url") or item.get("source_url") or item.get("public_url") or "").strip()
+            alt_text = str(item.get("alt_text") or item.get("alt") or "").strip()[:500]
+        else:
+            url = str(item or "").strip()
+            alt_text = ""
+        if not valid_external_url(url):
+            raise ValueError(f"第 {index} 张返图需要填写完整的 HTTP/HTTPS 地址")
+        if len(url) > PROGRAM_IMAGE_URL_MAX_LENGTH:
+            raise ValueError(f"第 {index} 张返图地址不能超过 {PROGRAM_IMAGE_URL_MAX_LENGTH} 个字符")
+        images.append({"url": url, "alt_text": alt_text})
+    return images
+
+
 def program_people(value: Any) -> list[str]:
     try:
         parsed = json.loads(value or "[]") if isinstance(value, str) else value
@@ -770,8 +822,60 @@ def normalize_legacy_cast_names(conn: sqlite3.Connection) -> int:
     return updated
 
 
+def program_occurrence_image_target(row: sqlite3.Row | dict[str, Any]) -> Path | None:
+    local_path = str(row.get("local_path", "") if isinstance(row, dict) else row["local_path"] or "").strip()
+    if not local_path:
+        return None
+    relative = Path(local_path)
+    if relative.is_absolute() or ".." in relative.parts or "\x00" in local_path:
+        return None
+    target = (MEDIA_DIR / relative).resolve()
+    try:
+        target.relative_to(MEDIA_DIR.resolve())
+    except ValueError:
+        return None
+    return target if target.is_file() else None
+
+
+def program_occurrence_image_url(row: sqlite3.Row | dict[str, Any]) -> str:
+    public_url = str(row.get("public_url", "") if isinstance(row, dict) else row["public_url"] or "").strip()
+    if public_url and valid_external_url(public_url):
+        return public_url
+    target = program_occurrence_image_target(row)
+    if target:
+        local_path = str(row.get("local_path", "") if isinstance(row, dict) else row["local_path"] or "").strip()
+        if local_path and r2_is_configured():
+            return r2_public_image_url(local_path)
+        if local_path:
+            return f"/media/{quote(local_path, safe='/')}"
+    source_url = str(row.get("source_url", "") if isinstance(row, dict) else row["source_url"] or "").strip()
+    return source_url if valid_external_url(source_url) else ""
+
+
+def program_occurrence_image_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    alt_text = str(row.get("alt_text", "") if isinstance(row, dict) else row["alt_text"] or "").strip()
+    url = program_occurrence_image_url(row)
+    return {
+        "id": row["id"],
+        "position": row["position"],
+        "kind": str(row.get("kind", "") if isinstance(row, dict) else row["kind"] or ""),
+        "url": url,
+        "source_url": str(row.get("source_url", "") if isinstance(row, dict) else row["source_url"] or ""),
+        "local_path": str(row.get("local_path", "") if isinstance(row, dict) else row["local_path"] or ""),
+        "public_url": str(row.get("public_url", "") if isinstance(row, dict) else row["public_url"] or ""),
+        "alt_text": alt_text,
+        "alt": alt_text,
+        "width": row["width"],
+        "height": row["height"],
+        "bytes": row["bytes"],
+        "sha256": str(row.get("sha256", "") if isinstance(row, dict) else row["sha256"] or ""),
+        "available": bool(url),
+    }
+
+
 def occurrence_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     payload = dict(row)
+    payload["images"] = [item for item in payload.get("images", []) if isinstance(item, dict)]
     payload["title"] = str(payload.get("title") or "").strip()
     payload["guests"] = program_people(payload.get("guests", "[]"))
     payload["absent_members"] = program_people(payload.get("absent_members", "[]"))
@@ -1161,6 +1265,7 @@ def program_json_metadata() -> dict[str, Any]:
             "occurrences[].note": "补充来源或播出语义；直播回看建议写明“生配信アーカイブ”，以区别于预直播 live 单集。",
             "occurrences[].guests": "本期临时嘉宾数组，不会修改节目固定成员；虹咲成员使用规范日文原名。",
             "occurrences[].absent_members": "本期明确缺席的虹咲成员数组；仅记录节目固定成员本期缺席，不要把未被邀请的非固定成员填写在这里。",
+            "occurrences[].images": "当期节目返图数组；每项使用 url（HTTP/HTTPS 图片直链）和可选 alt_text。上传到本地或 R2 的图片导出为可访问的 public URL。",
         },
         "_import_notes": [
             "期数不是 occurrences 的输入字段；EX 不占期。允许空号：不要为了补齐 #5/#7 之间的编号而伪造没有内容的单集或强行补连号，真实日期占位和后续单集按系统规则自然处理。标题中的【#N】只能作为核对提示。",
@@ -1239,6 +1344,7 @@ def program_json_template() -> dict[str, Any]:
             "mirror_url": "",
             "subtitle_url": "",
             "note": "普通单集示例。",
+            "images": [],
             "guests": ["本期嘉宾"],
             "absent_members": [],
         },
@@ -1424,6 +1530,7 @@ def normalize_import_payload(
             item.get("note"),
             item.get("guests"),
             item.get("absent_members"),
+            item.get("images"),
         ))
         if schedule_mode == "generated" and generated_marker and not has_override_content:
             skipped_generated += 1
@@ -1445,6 +1552,7 @@ def normalize_import_payload(
             "note": item.get("note", ""),
             "guests": item.get("guests", []),
             "absent_members": item.get("absent_members", []),
+            "images": item.get("images", []),
             "materialized": item.get("materialized", False),
         }
         occurrences.append(normalized_occurrence(occurrence_values))
@@ -1529,6 +1637,7 @@ def import_preview_entry(program: dict[str, Any], occurrences: list[dict[str, An
             key: occurrence.get(key, "")
             for key in ("original_date", "title", "generated_date", "original_time", "delivery", "status", "special", "adjusted_date", "adjusted_time", "shift_following_days", "source_url", "mirror_url", "subtitle_url", "note")
         }
+        item["images"] = [dict(image) for image in occurrence.get("images", []) if isinstance(image, dict)]
         item["episode"] = episode_numbers[index]
         item["guests"] = program_people(occurrence.get("guests", []))
         item["absent_members"] = program_people(occurrence.get("absent_members", []))
@@ -1815,6 +1924,7 @@ def normalized_occurrence(values: dict[str, Any]) -> dict[str, Any]:
         "note": str(values.get("note") or "").strip(),
         "guests": normalized_people(values.get("guests")),
         "absent_members": normalized_people(values.get("absent_members")),
+        "images": normalized_occurrence_images(values.get("images")),
         "materialized": boolean_value(values.get("materialized"), False),
     }
 
@@ -1828,6 +1938,24 @@ def insert_occurrence_row(conn: sqlite3.Connection, values: dict[str, Any]) -> s
         :program_id, :original_date, :title, :generated_date, :original_time, :delivery, :shift_following_days, :source_url, :mirror_url, :subtitle_url, :status,
         :adjusted_date, :adjusted_time, :note, :guests, :absent_members, :special, :materialized, :created_at, :updated_at
     )""", values)
+
+
+def insert_occurrence_images(
+    conn: sqlite3.Connection,
+    occurrence_id: int,
+    images: list[dict[str, str]] | None,
+    created_at: str,
+) -> None:
+    for position, image in enumerate(images or []):
+        url = str(image.get("url") or "").strip()
+        if not valid_external_url(url):
+            continue
+        conn.execute(
+            """INSERT OR IGNORE INTO program_occurrence_images
+               (occurrence_id, position, kind, local_path, public_url, source_url, alt_text, bytes, sha256, created_at)
+               VALUES (?, ?, 'external', '', ?, ?, ?, 0, '', ?)""",
+            (occurrence_id, position, url, url, str(image.get("alt_text") or "").strip()[:500], created_at),
+        )
 
 
 def calendar_date(value: str, fallback: date) -> date:
@@ -1941,6 +2069,7 @@ def occurrence_record(
         "note": override.get("note", ""),
         "guests": program_people(override.get("guests", [])),
         "absent_members": program_people(override.get("absent_members", [])),
+        "images": [item for item in override.get("images", []) if isinstance(item, dict)],
         "materialized": boolean_value(override.get("materialized"), False),
         "manual": manual,
     }
@@ -2387,7 +2516,7 @@ def replace_imported_program_row(
     target_id: str,
     created_at: str,
     updated_at: str,
-) -> None:
+) -> list[str]:
     values = {**values, "id": target_id, "created_at": created_at, "updated_at": updated_at}
     conn.execute("""UPDATE programs SET
         title=:title, status=:status, category=:category, format=:format, platform=:platform, delivery=:delivery, auto_generate=:auto_generate,
@@ -2401,8 +2530,18 @@ def replace_imported_program_row(
             "UPDATE programs SET title = ?, updated_at = ? WHERE parent_id = ?",
             (values["title"], updated_at, target_id),
         )
+    image_rows = conn.execute(
+        "SELECT local_path FROM program_occurrence_images WHERE occurrence_id IN (SELECT id FROM program_occurrences WHERE program_id = ?)",
+        (target_id,),
+    ).fetchall()
+    image_paths = [str(row["local_path"] or "").strip() for row in image_rows if str(row["local_path"] or "").strip()]
+    conn.execute(
+        "DELETE FROM program_occurrence_images WHERE occurrence_id IN (SELECT id FROM program_occurrences WHERE program_id = ?)",
+        (target_id,),
+    )
     conn.execute("DELETE FROM program_occurrences WHERE program_id = ?", (target_id,))
     replace_program_periods(conn, target_id, values["periods"], updated_at)
+    return image_paths
 
 
 def text_search_sql(alias: str, fields: tuple[str, ...]) -> str:
@@ -2471,12 +2610,28 @@ def program_rows(
             occurrence_sql += " WHERE 1 = 0"
         period_rows = conn.execute(f"{period_sql} ORDER BY start_date, id", selected_program_ids).fetchall()
         occurrence_rows = conn.execute(f"{occurrence_sql} ORDER BY original_date, id", selected_program_ids).fetchall()
+        if selected_program_ids and include_occurrences:
+            occurrence_image_rows = conn.execute(
+                f"""SELECT i.*
+                    FROM program_occurrence_images AS i
+                    JOIN program_occurrences AS o ON o.id = i.occurrence_id
+                   WHERE o.program_id IN ({selected_id_placeholders})
+                   ORDER BY i.occurrence_id, i.position, i.id""",
+                selected_program_ids,
+            ).fetchall()
+        else:
+            occurrence_image_rows = []
     periods_grouped: dict[str, list[dict[str, Any]]] = {}
     for row in period_rows:
         periods_grouped.setdefault(row["program_id"], []).append(period_payload(row))
+    images_grouped: dict[int, list[dict[str, Any]]] = {}
+    for row in occurrence_image_rows:
+        images_grouped.setdefault(row["occurrence_id"], []).append(program_occurrence_image_payload(row))
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in occurrence_rows:
-        grouped.setdefault(row["program_id"], []).append(occurrence_payload(row))
+        occurrence = occurrence_payload(row)
+        occurrence["images"] = images_grouped.get(row["id"], [])
+        grouped.setdefault(row["program_id"], []).append(occurrence)
     results = []
     for row in program_db_rows:
         occurrence_values = grouped.get(row["id"], [])
@@ -2536,6 +2691,15 @@ def program_json_occurrence_item(occurrence: dict[str, Any], freeze_effective_da
         "mirror_url": occurrence.get("mirror_url", ""),
         "subtitle_url": occurrence.get("subtitle_url", ""),
         "note": occurrence.get("note", ""),
+        "images": [
+            {
+                "url": str(image.get("url") or image.get("source_url") or image.get("public_url") or "").strip(),
+                "alt_text": str(image.get("alt_text") or image.get("alt") or "").strip()[:500],
+            }
+            for image in occurrence.get("images", [])
+            if isinstance(image, dict)
+            and valid_external_url(image.get("url") or image.get("source_url") or image.get("public_url"))
+        ],
         "guests": occurrence.get("guests", []),
         "absent_members": occurrence.get("absent_members", []),
     }
@@ -2680,6 +2844,7 @@ def program_calendar_events(program: dict[str, Any], range_start: date, range_en
                 "note": record["note"],
                 "guests": record["guests"],
                 "absentMembers": record["absent_members"],
+                "images": record.get("images", []),
                 "people": program_people(program.get("people", [])),
             },
         }
@@ -3383,6 +3548,48 @@ def upload_image_to_r2(path: Path, relative_path: str | None = None) -> None:
 
 def upload_cover_to_r2(path: Path) -> None:
     upload_image_to_r2(path)
+
+
+def delete_image_from_r2(relative_path: str) -> None:
+    global _r2_client
+    if not r2_upload_is_configured() or not relative_path:
+        return
+    if _r2_client is None:
+        _r2_client = boto3.client(
+            "s3",
+            endpoint_url=R2_ENDPOINT,
+            aws_access_key_id=R2_ACCESS_KEY_ID,
+            aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+            region_name=os.getenv("R2_REGION", "auto"),
+        )
+    _r2_client.delete_object(Bucket=R2_BUCKET, Key=r2_object_key(relative_path))
+
+
+async def cleanup_program_image_storage(relative_paths: list[str]) -> None:
+    unique_paths = list(dict.fromkeys(str(path or "").strip() for path in relative_paths if str(path or "").strip()))
+    if not unique_paths:
+        return
+    placeholders = ", ".join("?" for _ in unique_paths)
+    with db() as conn:
+        used_paths = {
+            str(row["local_path"] or "").strip()
+            for row in conn.execute(
+                f"SELECT DISTINCT local_path FROM program_occurrence_images WHERE local_path IN ({placeholders})",
+                unique_paths,
+            ).fetchall()
+            if str(row["local_path"] or "").strip()
+        }
+    for relative_path in unique_paths:
+        if relative_path in used_paths:
+            continue
+        target = program_occurrence_image_target({"local_path": relative_path})
+        if target:
+            target.unlink(missing_ok=True)
+        if r2_upload_is_configured():
+            try:
+                await asyncio.to_thread(delete_image_from_r2, relative_path)
+            except Exception as exc:
+                print(f"[program-image] R2 cleanup failed: {type(exc).__name__}", flush=True)
 
 
 async def cache_cover(item: dict[str, str], client: httpx.AsyncClient, force_refresh: bool = False) -> bool:
@@ -5527,6 +5734,7 @@ async def api_import_program(request: Request) -> dict[str, Any]:
 
     now = datetime.now(timezone.utc).isoformat()
     automatic_backup_path: Path | None = None
+    image_paths_to_cleanup: list[str] = []
     try:
         async with sync_lock:
             automatic_backup_path = create_persistent_database_backup("before-json-import")
@@ -5539,7 +5747,9 @@ async def api_import_program(request: Request) -> dict[str, Any]:
                     }
                     target_id = program_values["id"]
                     if entry["overwrite"]:
-                        replace_imported_program_row(conn, program_values, target_id, program_values["created_at"], now)
+                        image_paths_to_cleanup.extend(
+                            replace_imported_program_row(conn, program_values, target_id, program_values["created_at"], now)
+                        )
                     else:
                         insert_program_row(conn, program_values)
                     for occurrence in entry["occurrences"]:
@@ -5549,10 +5759,12 @@ async def api_import_program(request: Request) -> dict[str, Any]:
                             "created_at": now,
                             "updated_at": now,
                         }
-                        insert_occurrence_row(conn, values)
+                        cursor = insert_occurrence_row(conn, values)
+                        insert_occurrence_images(conn, cursor.lastrowid, occurrence.get("images"), now)
     except sqlite3.IntegrityError as exc:
         raise HTTPException(409, "导入的单集存在重复播出日期和时间") from exc
 
+    await cleanup_program_image_storage(image_paths_to_cleanup)
     root_program_values = prepared[0]["program"]
     overwrite = options["target_mode"] == "overwrite"
     imported_occurrences = sum(len(entry["occurrences"]) for entry in prepared)
@@ -5652,11 +5864,27 @@ async def api_delete_program(program_id: str, request: Request) -> dict[str, str
             raise HTTPException(404, "节目不存在")
         if not program["parent_id"] and conn.execute("SELECT 1 FROM programs WHERE parent_id = ? LIMIT 1", (program_id,)).fetchone():
             raise HTTPException(409, "请先删除该主节目下的子节目")
+        image_rows = conn.execute(
+            "SELECT local_path FROM program_occurrence_images WHERE occurrence_id IN (SELECT id FROM program_occurrences WHERE program_id = ?)",
+            (program_id,),
+        ).fetchall()
+        image_paths = [str(row["local_path"] or "").strip() for row in image_rows if str(row["local_path"] or "").strip()]
+        conn.execute("DELETE FROM program_occurrence_images WHERE occurrence_id IN (SELECT id FROM program_occurrences WHERE program_id = ?)", (program_id,))
         conn.execute("DELETE FROM program_periods WHERE program_id = ?", (program_id,))
         conn.execute("DELETE FROM program_occurrences WHERE program_id = ?", (program_id,))
         result = conn.execute("DELETE FROM programs WHERE id = ?", (program_id,))
+        if image_paths:
+            placeholders = ", ".join("?" for _ in image_paths)
+            image_paths = [
+                path for path in image_paths
+                if not conn.execute(
+                    f"SELECT 1 FROM program_occurrence_images WHERE local_path IN ({placeholders}) AND local_path = ? LIMIT 1",
+                    [*image_paths, path],
+                ).fetchone()
+            ]
     if result.rowcount == 0:
         raise HTTPException(404, "节目不存在")
+    await cleanup_program_image_storage(image_paths)
     log_database_activity("program", f"删除节目：{program['title']}")
     return {"message": "节目已删除"}
 
@@ -5737,6 +5965,169 @@ async def api_program_occurrences(program_id: str, request: Request, start: str 
     return program_occurrence_list(program, start, end)
 
 
+@app.post("/api/admin/programs/{program_id}/occurrences/{occurrence_id}/images")
+async def api_add_program_occurrence_image(
+    program_id: str, occurrence_id: int, request: Request
+) -> dict[str, Any]:
+    require_api_admin(request)
+    with db() as conn:
+        occurrence = conn.execute(
+            """SELECT o.id, o.program_id, p.title,
+                       (SELECT COUNT(*) FROM program_occurrence_images WHERE occurrence_id = o.id) AS image_count
+                 FROM program_occurrences o
+                 JOIN programs p ON p.id = o.program_id
+                WHERE o.id = ? AND o.program_id = ?""",
+            (occurrence_id, program_id),
+        ).fetchone()
+    if not occurrence:
+        raise HTTPException(404, "单集排期不存在")
+    if occurrence["image_count"] >= PROGRAM_IMAGE_MAX_COUNT:
+        raise HTTPException(409, f"每期最多保存 {PROGRAM_IMAGE_MAX_COUNT} 张返图")
+    program_title = str(occurrence["title"] or "")
+
+    content_type = str(request.headers.get("content-type", "")).split(";", 1)[0].strip().lower()
+    kind = "external"
+    local_path = ""
+    public_url = ""
+    source_url = ""
+    alt_text = ""
+    total = 0
+    digest = ""
+    if content_type == "application/json" or content_type.endswith("+json"):
+        try:
+            payload = await request.json()
+        except ValueError as exc:
+            raise HTTPException(400, "图片直链格式无效") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "图片直链格式无效")
+        try:
+            image_input = normalized_occurrence_images([payload])[0]
+        except (ValueError, IndexError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        source_url = image_input["url"]
+        public_url = source_url
+        alt_text = image_input["alt_text"]
+    else:
+        content_length = request.headers.get("content-length", "")
+        try:
+            if content_length and int(content_length) > PROGRAM_IMAGE_MAX_BYTES:
+                raise HTTPException(413, "单张节目返图不能超过 20 MB")
+        except ValueError:
+            pass
+        chunks: list[bytes] = []
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > PROGRAM_IMAGE_MAX_BYTES:
+                raise HTTPException(413, "单张节目返图不能超过 20 MB")
+            chunks.append(chunk)
+        content = b"".join(chunks)
+        if not content:
+            raise HTTPException(400, "没有收到图片")
+        filename = unquote(str(request.headers.get("x-filename", "program-image")))
+        extension = news_upload_extension(content_type, content, filename)
+        if not extension:
+            raise HTTPException(415, "只支持 JPEG、PNG、GIF、WebP、BMP 或 AVIF 图片")
+        kind = "upload"
+        digest = hashlib.sha256(content).hexdigest()
+        relative = Path("programs") / f"{digest}{extension}"
+        local_path = relative.as_posix()
+        target = MEDIA_DIR / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            temporary = target.with_name(f".{target.name}.{secrets.token_hex(6)}.tmp")
+            try:
+                temporary.write_bytes(content)
+                temporary.replace(target)
+            finally:
+                temporary.unlink(missing_ok=True)
+        if r2_upload_is_configured():
+            try:
+                await asyncio.to_thread(upload_image_to_r2, target, local_path)
+            except Exception as exc:
+                await cleanup_program_image_storage([local_path])
+                raise HTTPException(502, "节目返图上传到 R2 失败，请稍后重试") from exc
+            if r2_is_configured():
+                public_url = r2_public_image_url(local_path)
+        alt_text = unquote(str(request.headers.get("x-alt-text", ""))).strip()[:500]
+
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        image_count = conn.execute(
+            "SELECT COUNT(*) FROM program_occurrence_images WHERE occurrence_id = ?", (occurrence_id,)
+        ).fetchone()[0]
+        if image_count >= PROGRAM_IMAGE_MAX_COUNT:
+            raise HTTPException(409, f"每期最多保存 {PROGRAM_IMAGE_MAX_COUNT} 张返图")
+        if local_path:
+            existing = conn.execute(
+                "SELECT id FROM program_occurrence_images WHERE occurrence_id = ? AND local_path = ? LIMIT 1",
+                (occurrence_id, local_path),
+            ).fetchone()
+        else:
+            existing = conn.execute(
+                "SELECT id FROM program_occurrence_images WHERE occurrence_id = ? AND source_url = ? LIMIT 1",
+                (occurrence_id, source_url),
+            ).fetchone()
+        if existing:
+            image_id = existing["id"]
+            if public_url:
+                conn.execute("UPDATE program_occurrence_images SET public_url = ? WHERE id = ?", (public_url, image_id))
+        else:
+            position = conn.execute(
+                "SELECT COALESCE(MAX(position), -1) + 1 FROM program_occurrence_images WHERE occurrence_id = ?",
+                (occurrence_id,),
+            ).fetchone()[0]
+            image_id = conn.execute(
+                """INSERT INTO program_occurrence_images
+                   (occurrence_id, position, kind, local_path, public_url, source_url, alt_text, width, height, bytes, sha256, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)""",
+                (occurrence_id, position, kind, local_path, public_url, source_url, alt_text, total, digest, now),
+            ).lastrowid
+        conn.execute("UPDATE program_occurrences SET updated_at = ? WHERE id = ?", (now, occurrence_id))
+        image_row = conn.execute(
+            "SELECT * FROM program_occurrence_images WHERE id = ?", (image_id,)
+        ).fetchone()
+    occurrence = hydrated_program_occurrence(program_id, occurrence_id)
+    log_database_activity("program", f"添加节目返图：{program_title[:80]}（单集 {occurrence_id}）")
+    return {
+        "image": program_occurrence_image_payload(image_row),
+        "occurrence": occurrence,
+    }
+
+
+@app.delete("/api/admin/programs/{program_id}/occurrences/{occurrence_id}/images/{image_id}")
+async def api_delete_program_occurrence_image(
+    program_id: str, occurrence_id: int, image_id: int, request: Request
+) -> dict[str, Any]:
+    require_api_admin(request)
+    with db() as conn:
+        row = conn.execute(
+            """SELECT i.*, p.title
+                 FROM program_occurrence_images i
+                 JOIN program_occurrences o ON o.id = i.occurrence_id
+                 JOIN programs p ON p.id = o.program_id
+                WHERE i.id = ? AND i.occurrence_id = ? AND o.program_id = ?""",
+            (image_id, occurrence_id, program_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "节目返图不存在")
+        local_path = str(row["local_path"] or "").strip()
+        conn.execute("DELETE FROM program_occurrence_images WHERE id = ?", (image_id,))
+        still_used = bool(
+            local_path
+            and conn.execute(
+                "SELECT 1 FROM program_occurrence_images WHERE local_path = ? LIMIT 1", (local_path,)
+            ).fetchone()
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute("UPDATE program_occurrences SET updated_at = ? WHERE id = ?", (now, occurrence_id))
+        title = str(row["title"] or "")
+    if local_path and not still_used:
+        await cleanup_program_image_storage([local_path])
+    occurrence = hydrated_program_occurrence(program_id, occurrence_id)
+    log_database_activity("program", f"删除节目返图：{title[:80]}（单集 {occurrence_id}）")
+    return {"image_id": image_id, "occurrence": occurrence}
+
+
 @app.post("/api/admin/programs/{program_id}/occurrences")
 async def api_create_occurrence(program_id: str, request: Request) -> dict[str, Any]:
     require_api_admin(request)
@@ -5768,6 +6159,7 @@ async def api_create_occurrence(program_id: str, request: Request) -> dict[str, 
         except sqlite3.IntegrityError as exc:
             raise HTTPException(409, "该播出日期和时间已经有单集调整") from exc
         occurrence_id = cursor.lastrowid
+        insert_occurrence_images(conn, occurrence_id, values.get("images"), now)
         row = conn.execute("SELECT * FROM program_occurrences WHERE id = ?", (occurrence_id,)).fetchone()
     log_database_activity("program", f"新增单集：{program['title']}（{values['original_date']}）")
     occurrence = hydrated_program_occurrence(program_id, occurrence_id) or occurrence_payload(row)
@@ -5813,7 +6205,24 @@ async def api_clear_occurrences(program_id: str, request: Request) -> dict[str, 
         program = conn.execute("SELECT title FROM programs WHERE id = ?", (program_id,)).fetchone()
         if not program:
             raise HTTPException(404, "节目不存在")
+        image_rows = conn.execute(
+            "SELECT local_path FROM program_occurrence_images WHERE occurrence_id IN (SELECT id FROM program_occurrences WHERE program_id = ?)",
+            (program_id,),
+        ).fetchall()
+        image_paths = [str(row["local_path"] or "").strip() for row in image_rows if str(row["local_path"] or "").strip()]
+        conn.execute("DELETE FROM program_occurrence_images WHERE occurrence_id IN (SELECT id FROM program_occurrences WHERE program_id = ?)", (program_id,))
         result = conn.execute("DELETE FROM program_occurrences WHERE program_id = ?", (program_id,))
+        if image_paths:
+            placeholders = ", ".join("?" for _ in image_paths)
+            image_paths = [
+                path for path in image_paths
+                if not conn.execute(
+                    f"SELECT 1 FROM program_occurrence_images WHERE local_path IN ({placeholders}) AND local_path = ? LIMIT 1",
+                    [*image_paths, path],
+                ).fetchone()
+            ]
+    if image_paths:
+        await cleanup_program_image_storage(image_paths)
     if result.rowcount:
         log_database_activity("program", f"清空单集覆盖：{program['title']}（{result.rowcount} 条）")
     return {"deleted_count": result.rowcount}

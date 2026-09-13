@@ -1,6 +1,6 @@
 {
   "_format": "nijidb-program",
-  "_version": 3,
+  "_version": 4,
   "_description": "Nijidb 单独节目导入导出格式；一个 JSON 文件只描述一个节目及其单集资料。",
   "_field_notes": {
     "import_options.schedule_mode": "current：按每个 program 的 auto_generate 还原导出时的当前设置；individual：以 occurrences 为最终逐期数据，不自动生成；generated：按 periods 自动生成，occurrences 只作为已保存的覆盖和例外。",
@@ -32,7 +32,8 @@
     "occurrences[].status": "scheduled、rescheduled、cancelled 或 deleted。deleted 会保留为不显示的删除记录。",
     "occurrences[].note": "补充来源或播出语义；直播回看建议写明“生配信アーカイブ”，以区别于预直播 live 单集。",
     "occurrences[].guests": "本期临时嘉宾数组，不会修改节目固定成员；虹咲成员使用规范日文原名。",
-    "occurrences[].absent_members": "本期明确缺席的虹咲成员数组；仅记录节目固定成员本期缺席，不要把未被邀请的非固定成员填写在这里。"
+    "occurrences[].absent_members": "本期明确缺席的虹咲成员数组；仅记录节目固定成员本期缺席，不要把未被邀请的非固定成员填写在这里。",
+    "occurrences[].images": "当期节目返图数组；每项使用 url（HTTP/HTTPS 图片直链）和可选 alt_text。上传到本地或 R2 的图片导出为可访问的 public URL。"
   },
   "_import_notes": [
     "期数不是 occurrences 的输入字段；EX 不占期。允许空号：不要为了补齐 #5/#7 之间的编号而伪造没有内容的单集或强行补连号，真实日期占位和后续单集按系统规则自然处理。标题中的【#N】只能作为核对提示。",
@@ -107,6 +108,7 @@
       "mirror_url": "",
       "subtitle_url": "",
       "note": "普通单集示例。",
+      "images": [],
       "guests": [
         "本期嘉宾"
       ],

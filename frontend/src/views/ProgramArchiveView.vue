@@ -5,6 +5,7 @@ import { api } from "../api";
 import { locale, localeTag, t } from "../i18n";
 import { NIJIGASAKI_CAST, castColorSegments } from "../programCast";
 import { occurrenceLinkItems, programAdminPath, relatedLinkItem } from "../programLinks";
+import NewsLightbox from "../components/NewsLightbox.vue";
 
 const weekdayNames = computed(() => locale.value === "en"
   ? ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -22,6 +23,8 @@ const router = useRouter();
 const programs = ref([]);
 const subprograms = ref([]);
 const occurrences = ref([]);
+const lightboxImages = ref([]);
+const lightboxIndex = ref(-1);
 
 function queryValue(value) {
   return Array.isArray(value) ? String(value[0] || "") : String(value || "");
@@ -156,6 +159,25 @@ function showSearchHits(program) {
 
 function occurrenceCast(row) {
   return castColorSegments([...(selectedProgram.value?.people || []), ...(row.guests || [])], row.absent_members);
+}
+
+function programImages(value) {
+  const source = value?.images || [];
+  return (Array.isArray(source) ? source : [])
+    .filter(image => image?.url)
+    .map(image => ({ ...image, alt: image.alt || image.alt_text || "" }));
+}
+
+function openProgramLightbox(images, index = 0) {
+  const available = programImages({ images });
+  if (!available.length) return;
+  lightboxImages.value = available;
+  lightboxIndex.value = Math.max(0, Math.min(available.length - 1, index));
+}
+
+function closeProgramLightbox() {
+  lightboxIndex.value = -1;
+  lightboxImages.value = [];
 }
 
 function programMatchesCast(program) {
@@ -437,6 +459,7 @@ onUnmounted(() => window.clearTimeout(programSearchTimer));
                  <span v-if="occurrenceCast(row).length" class="program-readonly-episode-cast-line" role="img" :aria-label="`${t('出场成员')}：${occurrenceCast(row).map(member => member.name).join('、')}`" :title="occurrenceCast(row).map(member => member.name).join('、')"><i v-for="member in occurrenceCast(row)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
                 <div class="program-readonly-episode-heading"><strong>{{ episodeLabel(row) }}</strong><span class="program-status" :class="occurrenceStateClass(row)">{{ occurrenceStatus(row) }}</span><strong v-if="row.title" class="program-readonly-episode-title">{{ row.title }}</strong></div>
                  <time>{{ dateLabel(row.date) }}{{ row.time ? ` · ${row.time}` : ` · ${t("全天")}` }}</time>
+                 <button v-if="programImages(row).length" type="button" class="program-episode-thumbnail" :aria-label="t('查看当期返图')" @click="openProgramLightbox(programImages(row))"><img :src="programImages(row)[0].url" :alt="programImages(row)[0].alt" loading="lazy"></button>
                  <small>{{ occurrenceSourceLabel(row) }} · {{ row.delivery === "live" ? t("直播") : t("录播") }}{{ row.absent_members?.length ? ` · ${t("缺席")} ${row.absent_members.length} ${t("人")}` : "" }}</small>
                  <template v-if="row.guests?.length">
                    <p>{{ t("本期嘉宾") }}</p>
@@ -457,5 +480,6 @@ onUnmounted(() => window.clearTimeout(programSearchTimer));
         </section>
       </section>
     </template>
+    <NewsLightbox :images="lightboxImages" :start="lightboxIndex" @close="closeProgramLightbox" />
   </main>
 </template>

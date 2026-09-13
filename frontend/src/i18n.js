@@ -1612,6 +1612,25 @@ Object.assign(messages.en, {
   "备份包含设置、节目、音乐、新闻、联动及其图片路径，不包含图片文件。每天自动备份 SQLite，最多保留 30 份；不会备份整卷图库。":
     "Backups include settings, programs, music, news, collaborations and image paths, not image files. SQLite is backed up daily, retaining up to 30 files; the image volume is not archived.",
 });
+Object.assign(messages.en, {
+  "查看当期返图": "View episode photos",
+  "当期返图": "Episode photos",
+  "当期节目返图": "Episode photos",
+  "查看返图 {count}": "View episode photo {count}",
+  "请先填写单集日期，再添加返图": "Enter and save the episode date before adding photos",
+  "请先保存单集，再添加返图": "Save the episode before adding photos",
+  "上传图片中……": "Uploading photos...",
+  "上传返图": "Upload photos",
+  "粘贴图片直链（HTTP/HTTPS）": "Paste an image URL (HTTP/HTTPS)",
+  "添加直链": "Add URL",
+  "可上传图片到本地（配置 R2 时会同步）或粘贴图片直链；点击缩略图可预览大图。": "Upload photos locally (and to R2 when configured) or paste image URLs; click a thumbnail to view it full size.",
+  "已添加 {count} 张返图": "Added {count} episode photos",
+  "已添加 {count} 张返图，另有图片失败": "Added {count} episode photos; another upload failed",
+  "已添加返图直链": "Episode photo URL added",
+  "确定删除这张返图吗？": "Delete this episode photo?",
+  "返图已删除": "Episode photo deleted",
+});
+
 Object.assign(messages.ja, {
   音乐抓取设置: "音楽の取得設定",
   新闻抓取设置: "ニュースの取得設定",
@@ -1663,6 +1682,25 @@ Object.assign(messages.ja, {
     "音楽・番組・ニュース・コラボの変更履歴。時刻は端末のタイムゾーン（{timezone}）です。",
   "备份包含设置、节目、音乐、新闻、联动及其图片路径，不包含图片文件。每天自动备份 SQLite，最多保留 30 份；不会备份整卷图库。":
     "設定・番組・音楽・ニュース・コラボと画像パスを含み、画像ファイルは含みません。SQLiteを毎日バックアップし最大30件保持します。画像ボリューム全体の保存は行いません。",
+});
+
+Object.assign(messages.ja, {
+  "查看当期返图": "今回の画像を見る",
+  "当期返图": "今回の画像",
+  "当期节目返图": "番組画像",
+  "查看返图 {count}": "画像{count}を見る",
+  "请先填写单集日期，再添加返图": "画像を追加する前にEpisodeの日付を入力して保存してください",
+  "请先保存单集，再添加返图": "画像を追加する前にEpisodeを保存してください",
+  "上传图片中……": "画像をアップロード中…",
+  "上传返图": "画像をアップロード",
+  "粘贴图片直链（HTTP/HTTPS）": "画像URL（HTTP/HTTPS）を貼り付け",
+  "添加直链": "URLを追加",
+  "可上传图片到本地（配置 R2 时会同步）或粘贴图片直链；点击缩略图可预览大图。": "画像をローカル（R2設定時はR2にも同期）へアップロードするか、画像URLを貼り付けます。サムネイルで拡大表示できます。",
+  "已添加 {count} 张返图": "画像を{count}枚追加しました",
+  "已添加 {count} 张返图，另有图片失败": "画像を{count}枚追加しました。別の画像は失敗しました",
+  "已添加返图直链": "画像URLを追加しました",
+  "确定删除这张返图吗？": "この画像を削除しますか？",
+  "返图已删除": "画像を削除しました",
 });
 
 export const languageOptions = [

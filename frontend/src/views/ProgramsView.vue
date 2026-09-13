@@ -11,6 +11,7 @@ import { api } from "../api";
 import { locale, localeTag, t } from "../i18n";
 import { NIJIGASAKI_CAST, castColorSegments } from "../programCast";
 import { occurrenceLinkItems, programAdminPath, relatedLinkItem } from "../programLinks";
+import NewsLightbox from "../components/NewsLightbox.vue";
 
 const weekdayNames = computed(() => locale.value === "en"
   ? ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -30,6 +31,8 @@ const allEvents = ref([]);
 const eventernoteEvents = ref([]);
 const selectedEvent = ref(null);
 const drawerOpen = ref(false);
+const lightboxImages = ref([]);
+const lightboxIndex = ref(-1);
 const loading = ref(true);
 const error = ref("");
 const eventernoteLoading = ref(false);
@@ -1011,6 +1014,29 @@ function selectEvent(info) {
   openEvent(info.event);
 }
 
+function programImages(value) {
+  const source = value?.extendedProps?.images ?? value?.images ?? [];
+  return (Array.isArray(source) ? source : [])
+    .filter(image => image?.url)
+    .map(image => ({ ...image, alt: image.alt || image.alt_text || "" }));
+}
+
+function openProgramLightbox(images, index = 0) {
+  const available = programImages({ images });
+  if (!available.length) return;
+  lightboxImages.value = available;
+  lightboxIndex.value = Math.max(0, Math.min(available.length - 1, index));
+}
+
+function openEventImage(event, index = 0) {
+  openProgramLightbox(programImages(event), index);
+}
+
+function closeProgramLightbox() {
+  lightboxIndex.value = -1;
+  lightboxImages.value = [];
+}
+
 function openEvent(event) {
   const props = event.extendedProps || {};
   if (props.isEventernote) {
@@ -1207,6 +1233,7 @@ onUnmounted(() => {
                <span class="program-list-time">{{ eventTime(event) || t("全天") }}</span>
                <span class="program-list-main"><strong>{{ event.title }}</strong><small>{{ eventDeliveryLabel(event) }} · {{ occurrenceAirStatus(event.extendedProps) }}</small></span>
                <span v-if="eventCast(event).length" class="program-list-cast" :aria-label="t('出场成员')"><i v-for="member in eventCast(event)" :key="member.name" :style="{ '--cast-color': member.color }" :title="member.name"></i></span>
+               <span v-if="programImages(event).length" class="program-list-thumbnail" role="button" tabindex="0" :aria-label="t('查看当期返图')" @click.stop="openEventImage(event)" @keydown.enter.stop="openEventImage(event)" @keydown.space.prevent.stop="openEventImage(event)"><img :src="programImages(event)[0].url" :alt="programImages(event)[0].alt" loading="lazy"></span>
               <span class="program-list-arrow" aria-hidden="true">→</span>
             </button>
           </section>
@@ -1275,6 +1302,14 @@ onUnmounted(() => {
             </template>
              <p v-if="selectedEvent.absentMembers?.length" class="program-occurrence-absence">{{ t("本期缺席：") }}{{ selectedEvent.absentMembers.join("、") }}</p>
             <p v-if="selectedEvent.note">{{ selectedEvent.note }}</p>
+            <div v-if="programImages(selectedEvent).length" class="program-occurrence-images">
+              <span class="program-image-label">{{ t("当期返图") }}</span>
+              <div class="program-occurrence-image-strip">
+                <button v-for="(image, index) in programImages(selectedEvent)" :key="image.id || `${image.url}-${index}`" type="button" class="program-occurrence-image-button" :aria-label="t('查看返图 {count}', { count: index + 1 })" @click="openProgramLightbox(programImages(selectedEvent), index)">
+                  <img :src="image.url" :alt="image.alt" loading="lazy">
+                </button>
+              </div>
+            </div>
         </div>
         <p v-if="selectedProgram.description" class="program-description">{{ selectedProgram.description }}</p>
         <dl class="program-meta">
@@ -1318,5 +1353,6 @@ onUnmounted(() => {
        </div>
       </aside>
     </Transition>
+    <NewsLightbox :images="lightboxImages" :start="lightboxIndex" @close="closeProgramLightbox" />
   </main>
 </template>

@@ -5612,7 +5612,8 @@ html[data-theme="mocha"] .dp__theme_dark {
 
 .archive-landing-intro h1 {
   margin: 14px 0 14px;
-  font-family: var(--display-font);
+  font-family: var(--hero-title-font);
+  font-weight: 800;
   font-size: clamp(38px, 6vw, 68px);
   letter-spacing: -.055em;
   line-height: 1.08;
@@ -5705,7 +5706,8 @@ html[data-theme="mocha"] .dp__theme_dark {
 
 .archive-choice-content h2 {
   margin: 13px 0 10px;
-  font-family: var(--display-font);
+  font-family: var(--hero-title-font);
+  font-weight: 800;
   font-size: clamp(27px, 3vw, 38px);
   letter-spacing: -.045em;
   line-height: 1.1;

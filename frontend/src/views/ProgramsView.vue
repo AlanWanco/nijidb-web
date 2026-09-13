@@ -1272,8 +1272,8 @@ onUnmounted(() => {
                <span v-if="eventCast(event).length" class="program-list-cast-line" :aria-label="t('出场成员')"><i v-for="member in eventCast(event)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
                <span class="program-list-time">{{ eventTime(event) || t("全天") }}</span>
                <span class="program-list-main"><strong>{{ event.title }}</strong><small>{{ eventDeliveryLabel(event) }} · {{ occurrenceAirStatus(event.extendedProps) }}</small></span>
-               <span v-if="eventCast(event).length" class="program-list-cast" :aria-label="t('出场成员')"><i v-for="member in eventCast(event)" :key="member.name" :style="{ '--cast-color': member.color }" :title="member.name"></i></span>
                <span v-if="programImages(event).length" class="program-list-thumbnail" role="button" tabindex="0" :aria-label="t('查看当期返图')" @click.stop="openEventImage(event)" @keydown.enter.stop="openEventImage(event)" @keydown.space.prevent.stop="openEventImage(event)"><img :src="programImages(event)[0].url" :alt="programImages(event)[0].alt" loading="lazy"></span>
+               <span v-if="eventCast(event).length" class="program-list-cast" :aria-label="t('出场成员')"><i v-for="member in eventCast(event)" :key="member.name" :style="{ '--cast-color': member.color }" :title="member.name"></i></span>
               <span class="program-list-arrow" aria-hidden="true">→</span>
             </button>
           </section>

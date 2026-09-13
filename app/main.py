@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import calendar
+import difflib
 import hashlib
 import hmac
 import json
@@ -2955,15 +2956,158 @@ async def send_onebot(message: str, config: dict[str, str]) -> None:
         response.raise_for_status()
 
 
+NOTIFICATION_VALUE_LIMIT = 180
+NOTIFICATION_DIFF_LINE_LIMIT = 18
+
+
+def notification_value(value: Any, limit: int = NOTIFICATION_VALUE_LIMIT) -> str:
+    if isinstance(value, (dict, list)):
+        try:
+            text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except TypeError:
+            text = str(value)
+    elif value is None:
+        text = ""
+    else:
+        text = str(value)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return "（空）"
+    return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+
+def notification_text_lines(value: Any) -> list[str]:
+    return [
+        re.sub(r"[ \t]+", " ", line).strip()
+        for line in str(value or "").replace("\r\n", "\n").replace("\r", "\n").splitlines()
+        if line.strip()
+    ]
+
+
+def notification_sequence_diff(
+    old_values: list[str], new_values: list[str], limit: int = NOTIFICATION_DIFF_LINE_LIMIT
+) -> list[str]:
+    changed: list[str] = []
+    matcher = difflib.SequenceMatcher(a=old_values, b=new_values, autojunk=False)
+    for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        changed.extend(f"- {notification_value(value)}" for value in old_values[old_start:old_end])
+        changed.extend(f"+ {notification_value(value)}" for value in new_values[new_start:new_end])
+    if len(changed) > limit:
+        omitted = len(changed) - limit
+        changed = changed[:limit] + [f"…省略其余 {omitted} 项"]
+    return changed
+
+
+def notification_text_diff(old_value: Any, new_value: Any, limit: int = NOTIFICATION_DIFF_LINE_LIMIT) -> list[str]:
+    changed = notification_sequence_diff(notification_text_lines(old_value), notification_text_lines(new_value), limit)
+    if not changed and str(old_value or "") != str(new_value or ""):
+        return [f"- {notification_value(old_value)}", f"+ {notification_value(new_value)}"]
+    return changed
+
+
+def append_notification_pair(
+    details: list[str], label: str, old_value: Any, new_value: Any, has_previous: bool
+) -> None:
+    if has_previous:
+        details.append(f"- {label}：{notification_value(old_value)}")
+    details.append(f"+ {label}：{notification_value(new_value)}")
+
+
+def append_notification_content_diff(
+    details: list[str],
+    heading: str,
+    old_value: Any,
+    new_value: Any,
+    has_previous: bool,
+    limit: int = NOTIFICATION_DIFF_LINE_LIMIT,
+) -> None:
+    details.append(heading)
+    if has_previous:
+        changed = notification_text_diff(old_value, new_value, limit)
+    else:
+        changed = [f"+ {notification_value(line)}" for line in notification_text_lines(new_value)[:limit]]
+        if len(notification_text_lines(new_value)) > limit:
+            changed.append(f"…省略其余 {len(notification_text_lines(new_value)) - limit} 行")
+        if not changed and new_value:
+            changed = [f"+ {notification_value(new_value)}"]
+    details.extend(changed or [f"+ {notification_value(new_value)}"])
+
+
+def release_track_value(track: Any) -> str:
+    if not isinstance(track, dict):
+        return notification_value(track)
+    number = track.get("number")
+    try:
+        number_text = f"{int(number):02d}"
+    except (TypeError, ValueError):
+        number_text = str(number or "").strip()
+    disc = str(track.get("disc") or "").strip()
+    title = str(track.get("title") or "").strip() or "（无标题）"
+    credits = track.get("credits")
+    if isinstance(credits, dict) and credits:
+        credit_text = "；".join(f"{key}:{value}" for key, value in credits.items() if str(value).strip())
+        if credit_text:
+            title = f"{title}（{credit_text}）"
+    return notification_value(" ".join(part for part in (disc, number_text, title) if part))
+
+
+def release_extra_value(extra: Any) -> str:
+    if not isinstance(extra, dict):
+        return notification_value(extra)
+    title = str(extra.get("title") or "相关项目").strip()
+    url = str(extra.get("url") or "").strip()
+    entries = extra.get("entries")
+    entry_text = (
+        "；".join(str(entry).strip() for entry in entries if str(entry).strip())
+        if isinstance(entries, list)
+        else ""
+    )
+    suffix = url or entry_text
+    return notification_value(f"{title}：{suffix}" if suffix else title)
+
+
+def notification_mapping_diff(
+    details: list[str],
+    heading: str,
+    old_values: dict[str, Any],
+    new_values: dict[str, Any],
+    labels: dict[str, str] | None = None,
+    excluded: set[str] | frozenset[str] = frozenset(),
+    has_previous: bool = True,
+) -> None:
+    labels = labels or {}
+    keys = list(dict.fromkeys([*old_values.keys(), *new_values.keys()]))
+    changed = [key for key in keys if key not in excluded and old_values.get(key) != new_values.get(key)]
+    if not has_previous:
+        changed = [key for key in keys if key not in excluded and new_values.get(key)]
+    if not changed:
+        return
+    details.append(heading)
+    for key in changed:
+        label = labels.get(key, key)
+        append_notification_pair(details, label, old_values.get(key), new_values.get(key), has_previous)
+
+
 def release_change_details(item: dict[str, Any]) -> list[str]:
     previous = item.get("_previous")
-    if previous is None:
-        details = ["新增 CD/资料"]
-    else:
-        details = []
+    has_previous = previous is not None
+    previous = previous or {}
+    details: list[str] = []
+    if not has_previous:
+        details.append("+ 新增 CD/资料")
 
     if item.get("_cover_changed"):
-        details.append("封面已更新" if previous is not None else "封面已添加")
+        details.append("封面")
+        old_cover = previous.get("cover_url", "")
+        new_cover = item.get("cover_url", "")
+        if has_previous and old_cover != new_cover:
+            append_notification_pair(details, "封面", old_cover, new_cover, True)
+        elif has_previous:
+            details.append("+ 封面：图片内容已更新")
+        else:
+            details.append(f"+ 封面：{notification_value(new_cover)}")
 
     basic_labels = {
         "title": "标题",
@@ -2972,63 +3116,77 @@ def release_change_details(item: dict[str, Any]) -> list[str]:
         "release_date": "发售日",
         "price": "价格",
     }
-    if previous is None:
-        changed_basic = [key for key in basic_labels if item.get(key, "")]
-    else:
-        changed_basic = [key for key in basic_labels if previous.get(key, "") != item.get(key, "")]
+    changed_basic = (
+        [key for key in basic_labels if previous.get(key, "") != item.get(key, "")]
+        if has_previous
+        else [key for key in basic_labels if item.get(key, "")]
+    )
     if changed_basic:
-        basic_values = [f"{basic_labels[key]} {str(item.get(key, '')).strip()[:80]}" for key in changed_basic if item.get(key, "")]
-        summary = f"基本信息已更新：{'、'.join(basic_labels[key] for key in changed_basic)}"
-        if basic_values:
-            summary += f"（{'；'.join(basic_values)}）"
-        details.append(summary)
+        details.append("基本信息")
+        for key in changed_basic:
+            append_notification_pair(details, basic_labels[key], previous.get(key, ""), item.get(key, ""), has_previous)
 
-    old_tracks = decode_json(previous.get("tracks_json"), []) if previous else []
+    old_tracks = decode_json(previous.get("tracks_json"), []) if has_previous else []
     new_tracks = decode_json(item.get("tracks_json"), [])
     if not isinstance(old_tracks, list):
         old_tracks = []
     if not isinstance(new_tracks, list):
         new_tracks = []
-    if (previous is None and new_tracks) or (previous is not None and old_tracks != new_tracks):
-        titles = [str(track.get("title", "")).strip() for track in new_tracks if isinstance(track, dict) and track.get("title")]
-        track_summary = f"曲目（{len(new_tracks)} 首）"
-        if titles:
-            track_summary += f"：{' / '.join(titles[:6])}"
-            if len(titles) > 6:
-                track_summary += f" 等 {len(titles)} 首"
-        details.append(track_summary)
+    if (has_previous and old_tracks != new_tracks) or (not has_previous and new_tracks):
+        old_track_values = [release_track_value(track) for track in old_tracks]
+        new_track_values = [release_track_value(track) for track in new_tracks]
+        heading = (
+            f"曲目（{len(old_tracks)} 首 → {len(new_tracks)} 首）"
+            if has_previous
+            else f"曲目（新增 {len(new_tracks)} 首）"
+        )
+        details.append(heading)
+        details.extend(notification_sequence_diff(old_track_values, new_track_values) or ["+ 曲目资料已更新"])
 
-    old_specs = decode_json(previous.get("spec_json"), {}) if previous else {}
+    spec_labels = {
+        "仕様": "收录/规格",
+        "収録内容": "收录内容",
+        "収録曲": "收录曲目",
+    }
+    old_specs = decode_json(previous.get("spec_json"), {}) if has_previous else {}
     new_specs = decode_json(item.get("spec_json"), {})
     if not isinstance(old_specs, dict):
         old_specs = {}
     if not isinstance(new_specs, dict):
         new_specs = {}
-    changed_specs = [key for key in new_specs if old_specs.get(key) != new_specs.get(key)]
-    if previous is None or changed_specs:
-        spec_labels = {
-            "仕様": "收录/规格",
-            "収録内容": "收录内容",
-            "収録曲": "收录曲目",
-        }
-        detail_keys = [spec_labels.get(key, key) for key in changed_specs if key not in {"アーティスト", "発売日", "一般発売日", "劇場先行発売日", "価格"}]
-        if previous is None:
-            detail_keys = [spec_labels.get(key, key) for key in new_specs if key not in {"アーティスト", "発売日", "一般発売日", "劇場先行発売日", "価格"}]
-        if detail_keys:
-            details.append(f"资料字段已更新：{'、'.join(detail_keys[:6])}")
+    notification_mapping_diff(
+        details,
+        "资料字段",
+        old_specs,
+        new_specs,
+        spec_labels,
+        {"アーティスト", "発売日", "一般発売日", "劇場先行発売日", "価格"},
+        has_previous,
+    )
 
-    old_extras = decode_json(previous.get("extras_json"), []) if previous else []
+    old_extras = decode_json(previous.get("extras_json"), []) if has_previous else []
     new_extras = decode_json(item.get("extras_json"), [])
     if not isinstance(old_extras, list):
         old_extras = []
     if not isinstance(new_extras, list):
         new_extras = []
-    if (previous is None and new_extras) or (previous is not None and old_extras != new_extras):
-        details.append(f"特典/相关链接已更新（{len(new_extras)} 项）")
+    if (has_previous and old_extras != new_extras) or (not has_previous and new_extras):
+        details.append(
+            f"特典/相关链接（{len(old_extras)} 项 → {len(new_extras)} 项）"
+            if has_previous
+            else f"特典/相关链接（新增 {len(new_extras)} 项）"
+        )
+        details.extend(
+            notification_sequence_diff(
+                [release_extra_value(extra) for extra in old_extras],
+                [release_extra_value(extra) for extra in new_extras],
+            )
+            or ["+ 特典/相关链接已更新"]
+        )
 
-    if previous is not None and previous.get("detail_html", "") != item.get("detail_html", "") and len(details) == 0:
-        details.append("详情页面内容已更新")
-    return details[:6]
+    if has_previous and previous.get("detail_html", "") != item.get("detail_html", "") and not details:
+        details.extend(["详情页面内容", "- 详情页面：旧版本", "+ 详情页面：新版本"])
+    return details[:48]
 
 
 async def notify(changed: list[dict[str, Any]], config: dict[str, str], category: str) -> None:
@@ -3037,24 +3195,111 @@ async def notify(changed: list[dict[str, Any]], config: dict[str, str], category
     lines = [f"[{category}]", f"虹咲音乐资料有 {len(changed)} 项更新："]
     for item in changed[:10]:
         lines.append(f"• {item['title']}")
-        lines.extend(f"  - {detail}" for detail in release_change_details(item))
+        lines.extend(f"  {detail}" for detail in release_change_details(item))
     if len(changed) > 10:
         lines.append(f"以及其他 {len(changed) - 10} 项")
     await send_onebot("\n".join(lines), config)
 
 
-def news_notification_items(news_ids: list[str]) -> list[dict[str, Any]]:
+def news_image_value(image: Any) -> str:
+    if not isinstance(image, dict):
+        return notification_value(image)
+    value = str(image.get("source_url") or image.get("public_url") or image.get("local_path") or "").strip()
+    alt_text = str(image.get("alt_text") or "").strip()
+    return notification_value(f"{value}（{alt_text}）" if alt_text else value)
+
+
+def news_tags_value(value: Any) -> str:
+    tags = decode_json(value, []) if isinstance(value, str) else value
+    if not isinstance(tags, list):
+        tags = clean_tag_values(tags)
+    return notification_value("、".join(str(tag).strip() for tag in tags if str(tag).strip()))
+
+
+def news_change_details(item: dict[str, Any]) -> list[str]:
+    previous = item.get("_previous")
+    has_previous = previous is not None
+    previous = previous or {}
+    details: list[str] = []
+    if not has_previous:
+        details.append("+ 新增新闻")
+
+    basic_labels = {
+        "title": "标题",
+        "published_at": "发布日期",
+        "category": "分类",
+        "source_url": "来源链接",
+    }
+    changed_basic = (
+        [key for key in basic_labels if previous.get(key, "") != item.get(key, "")]
+        if has_previous
+        else [key for key in basic_labels if item.get(key, "")]
+    )
+    if changed_basic:
+        details.append("基本信息")
+        for key in changed_basic:
+            append_notification_pair(details, basic_labels[key], previous.get(key, ""), item.get(key, ""), has_previous)
+
+    old_tags = previous.get("tags_json", "[]") if has_previous else "[]"
+    new_tags = item.get("tags_json", "[]")
+    if (
+        (has_previous and news_tags_value(old_tags) != news_tags_value(new_tags))
+        or (not has_previous and news_tags_value(new_tags) != "（空）")
+    ):
+        details.append("标签")
+        append_notification_pair(details, "标签", news_tags_value(old_tags), news_tags_value(new_tags), has_previous)
+
+    old_summary = previous.get("summary", "")
+    new_summary = item.get("summary", "")
+    if (has_previous and old_summary != new_summary) or (not has_previous and new_summary):
+        append_notification_content_diff(details, "摘要", old_summary, new_summary, has_previous)
+
+    old_body = previous.get("body_markdown", "")
+    new_body = item.get("body_markdown", "")
+    if (has_previous and old_body != new_body) or (not has_previous and new_body):
+        append_notification_content_diff(details, "正文", old_body, new_body, has_previous, 24)
+
+    old_images = previous.get("_images", []) if has_previous else []
+    new_images = item.get("_images", [])
+    old_image_values = [news_image_value(image) for image in old_images]
+    new_image_values = [news_image_value(image) for image in new_images]
+    if (has_previous and old_image_values != new_image_values) or (not has_previous and new_image_values):
+        details.append(
+            f"图片（{len(old_image_values)} 张 → {len(new_image_values)} 张）"
+            if has_previous
+            else f"图片（新增 {len(new_image_values)} 张）"
+        )
+        details.extend(notification_sequence_diff(old_image_values, new_image_values) or ["+ 图片内容已更新"])
+
+    if not details:
+        details.append("+ 新闻内容已更新")
+    return details[:48]
+
+
+def news_notification_items(
+    news_ids: list[str], previous_by_id: dict[str, dict[str, Any] | None] | None = None
+) -> list[dict[str, Any]]:
     unique_ids = list(dict.fromkeys(str(news_id) for news_id in news_ids if str(news_id).strip()))
     if not unique_ids:
         return []
     placeholders = ", ".join("?" for _ in unique_ids)
     with db() as conn:
-        rows = conn.execute(
-            f"SELECT id, title, published_at, category, source_url FROM news_articles WHERE id IN ({placeholders})",
-            unique_ids,
+        rows = conn.execute(f"SELECT * FROM news_articles WHERE id IN ({placeholders})", unique_ids).fetchall()
+        images_by_id: dict[str, list[dict[str, Any]]] = {news_id: [] for news_id in unique_ids}
+        image_rows = conn.execute(
+            f"SELECT * FROM news_images WHERE news_id IN ({placeholders}) ORDER BY news_id, position, id", unique_ids
         ).fetchall()
-    by_id = {str(row["id"]): dict(row) for row in rows}
-    return [by_id[news_id] for news_id in unique_ids if news_id in by_id]
+        for row in image_rows:
+            images_by_id.setdefault(str(row["news_id"]), []).append(dict(row))
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        news_id_value = str(row["id"])
+        item = dict(row)
+        item["_images"] = images_by_id.get(news_id_value, [])
+        if previous_by_id is not None:
+            item["_previous"] = previous_by_id.get(news_id_value)
+        result.append(item)
+    return [item for news_id_value in unique_ids for item in result if str(item["id"]) == news_id_value]
 
 
 async def notify_news(changed: list[dict[str, Any]], config: dict[str, str]) -> None:
@@ -3064,19 +3309,7 @@ async def notify_news(changed: list[dict[str, Any]], config: dict[str, str]) -> 
     for item in changed[:10]:
         title = re.sub(r"\s+", " ", str(item.get("title") or "未命名新闻")).strip()[:160]
         lines.append(f"• {title or '未命名新闻'}")
-        metadata = [
-            value
-            for value in (
-                str(item.get("published_at") or "").strip(),
-                str(item.get("category") or "").strip(),
-            )
-            if value
-        ]
-        if metadata:
-            lines.append(f"  - {' · '.join(metadata)}")
-        source_url = str(item.get("source_url") or "").strip()
-        if source_url:
-            lines.append(f"  - {source_url[:300]}")
+        lines.extend(f"  {detail}" for detail in news_change_details(item))
     if len(changed) > 10:
         lines.append(f"以及其他 {len(changed) - 10} 项")
     await send_onebot("\n".join(lines), config)
@@ -3767,6 +4000,7 @@ async def news_sync_once() -> dict[str, Any]:
         print("[news-sync] started", flush=True)
         discovered_count = changed_count = detail_errors = 0
         changed_news_ids: list[str] = []
+        previous_news: dict[str, dict[str, Any] | None] = {}
         error_message = None
         try:
             async with httpx.AsyncClient(timeout=30, headers=NEWS_HEADERS) as client:
@@ -3784,6 +4018,20 @@ async def news_sync_once() -> dict[str, Any]:
                         seen_urls.add(entry["source_url"])
                         discovered_count += 1
                         record_id = news_id("niji_topics", entry["page_name"], entry["source_url"])
+                        with db() as conn:
+                            previous_row = conn.execute(
+                                "SELECT * FROM news_articles WHERE id = ?", (record_id,)
+                            ).fetchone()
+                            previous = dict(previous_row) if previous_row else None
+                            if previous is not None:
+                                previous["_images"] = [
+                                    dict(image)
+                                    for image in conn.execute(
+                                        "SELECT * FROM news_images WHERE news_id = ? ORDER BY position, id",
+                                        (record_id,),
+                                    ).fetchall()
+                                ]
+                            previous_news[record_id] = previous
                         try:
                             changed = await refresh_news_record(client, record_id, entry["source_url"], entry)
                             if changed:
@@ -3810,7 +4058,7 @@ async def news_sync_once() -> dict[str, Any]:
             )
         if changed_news_ids:
             try:
-                await notify_news(news_notification_items(changed_news_ids), settings())
+                await notify_news(news_notification_items(changed_news_ids, previous_news), settings())
             except Exception as exc:
                 print(f"[news-sync] notification failed: {type(exc).__name__}", flush=True)
         print(f"[news-sync] completed: {changed_count} changed, {discovered_count} topics checked", flush=True)

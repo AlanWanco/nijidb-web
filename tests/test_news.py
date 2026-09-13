@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sqlite3
 import tempfile
@@ -166,6 +167,85 @@ class NewsStorageTests(unittest.TestCase):
         self.assertNotIn("全てのニュース", parsed["body_markdown"])
         self.assertNotIn("音楽商品", parsed["body_markdown"])
         self.assertNotIn("グッズ", parsed["body_markdown"])
+
+
+class NotificationFormattingTests(unittest.TestCase):
+    def test_release_notification_contains_before_and_after_values(self):
+        previous = {
+            "title": "旧标题",
+            "subtitle": "",
+            "artist": "旧艺人",
+            "release_date": "旧日期",
+            "price": "旧价格",
+            "cover_url": "https://example.com/old.jpg",
+            "tracks_json": json.dumps([{"number": 1, "title": "旧曲", "credits": {}}], ensure_ascii=False),
+            "spec_json": json.dumps({"仕様": "旧规格"}, ensure_ascii=False),
+            "extras_json": json.dumps([{"title": "旧特典", "entries": ["旧内容"]}], ensure_ascii=False),
+            "detail_html": "旧详情",
+        }
+        item = {
+            "title": "新标题",
+            "subtitle": "",
+            "artist": "新艺人",
+            "release_date": "新日期",
+            "price": "新价格",
+            "cover_url": "https://example.com/new.jpg",
+            "tracks_json": json.dumps(
+                [{"number": 1, "title": "旧曲", "credits": {}}, {"number": 2, "title": "新曲", "credits": {}}],
+                ensure_ascii=False,
+            ),
+            "spec_json": json.dumps({"仕様": "新规格"}, ensure_ascii=False),
+            "extras_json": json.dumps([{"title": "新特典", "entries": ["新内容"]}], ensure_ascii=False),
+            "detail_html": "新详情",
+            "_previous": previous,
+            "_cover_changed": True,
+        }
+        details = main.release_change_details(item)
+        self.assertIn("- 艺人：旧艺人", details)
+        self.assertIn("+ 艺人：新艺人", details)
+        self.assertIn("- 封面：https://example.com/old.jpg", details)
+        self.assertIn("+ 封面：https://example.com/new.jpg", details)
+        self.assertIn("曲目（1 首 → 2 首）", details)
+        self.assertIn("+ 02 新曲", details)
+        self.assertIn("- 收录/规格：旧规格", details)
+        self.assertIn("+ 收录/规格：新规格", details)
+        self.assertIn("- 旧特典：旧内容", details)
+        self.assertIn("+ 新特典：新内容", details)
+
+    def test_news_notification_contains_before_and_after_values(self):
+        previous = {
+            "title": "旧新闻标题",
+            "published_at": "2026-09-10",
+            "category": "旧分类",
+            "source_url": "https://example.com/old",
+            "tags_json": '["goods"]',
+            "summary": "旧摘要",
+            "body_markdown": "旧正文",
+            "_images": [{"source_url": "https://example.com/old.jpg", "alt_text": "旧图"}],
+        }
+        item = {
+            "title": "新新闻标题",
+            "published_at": "2026-09-11",
+            "category": "新分类",
+            "source_url": "https://example.com/new",
+            "tags_json": '["goods", "music"]',
+            "summary": "新摘要",
+            "body_markdown": "旧正文\n新增正文",
+            "_images": [{"source_url": "https://example.com/new.jpg", "alt_text": "新图"}],
+            "_previous": previous,
+        }
+        details = main.news_change_details(item)
+        self.assertIn("- 标题：旧新闻标题", details)
+        self.assertIn("+ 标题：新新闻标题", details)
+        self.assertIn("- 标签：goods", details)
+        self.assertIn("+ 标签：goods、music", details)
+        self.assertIn("摘要", details)
+        self.assertIn("- 旧摘要", details)
+        self.assertIn("+ 新摘要", details)
+        self.assertIn("正文", details)
+        self.assertIn("+ 新增正文", details)
+        self.assertIn("- https://example.com/old.jpg（旧图）", details)
+        self.assertIn("+ https://example.com/new.jpg（新图）", details)
 
 
 class NewsApiTests(unittest.IsolatedAsyncioTestCase):
@@ -468,7 +548,9 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
         message = send.await_args.args[0]
         self.assertIn("[官网新闻更新]", message)
         self.assertIn("同じタイトル", message)
-        self.assertIn(URL, message)
+        self.assertIn("正文", message)
+        self.assertIn("+ **更新本文** [リンク](https://www.lovelive-anime.jp/link)", message)
+        self.assertNotIn(f"+ 来源链接：{URL}", message)
 
     async def test_slow_refresh_uses_official_images_and_removes_archive_refs(self):
         article_id = news_id("niji_topics", "01_123")

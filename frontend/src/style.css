@@ -5780,10 +5780,12 @@ html[data-theme="mocha"] .dp__theme_dark {
 
 .archive-choice-content .eyebrow {
   color: var(--choice-accent);
+  transform: translateY(-40px);
 }
 
 .archive-choice-content h2 {
   margin: 13px 0 10px;
+  transform: translateY(-40px);
   font-family: var(--hero-title-font);
   font-weight: 800;
   font-size: clamp(27px, 3vw, 38px);

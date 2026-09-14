@@ -75,7 +75,7 @@ function formatLabel(program) {
 function periodScheduleLabel(period) {
   const time = period.schedule_time ? ` ${period.schedule_time}` : "";
   if (period.frequency === "single") return `${t("单次")}${time}`;
-  if (period.frequency === "individual") return t("逐期设置 · 手动录入单集");
+  if (period.frequency === "individual") return `${t("逐期设置 · 手动录入单集")}${time}`;
   const weekday = weekdayNames.value[period.weekday] || "";
   if (period.frequency === "monthly") {
     if (period.monthly_mode === "irregular") return t("每月 · 日期不定");

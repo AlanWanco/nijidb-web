@@ -29,7 +29,7 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
     def test_period_defaults_separate_monthly_irregular_and_individual(self):
         start = date(2026, 1, 1)
         individual = main.normalized_period(
-            {"start_date": start.isoformat(), "frequency": "individual"},
+            {"start_date": start.isoformat(), "frequency": "individual", "schedule_time": "20:00"},
             start,
             None,
         )
@@ -54,6 +54,7 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
             None,
         )
         self.assertFalse(individual["auto_generate"])
+        self.assertEqual(individual["schedule_time"], "20:00")
         self.assertTrue(single["auto_generate"])
         self.assertTrue(weekly["auto_generate"])
         self.assertTrue(monthly["auto_generate"])

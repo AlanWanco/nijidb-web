@@ -89,6 +89,9 @@ async function setup(context) {
 
     await periodCard.getByRole("button", { name: "逐期设置" }).click();
     assert.equal(await autoToggle.count(), 0);
+    assert.equal(await periodCard.locator(".period-time-field").count(), 1);
+    await periodCard.locator('input[placeholder="选择时间"]').fill("20:00");
+    assert.equal(await periodCard.locator('input[placeholder="选择时间"]').inputValue(), "20:00");
     assert.match(await periodCard.innerText(), /逐期设置不代表月更/);
 
     await periodCard.getByRole("button", { name: "月更" }).click();

@@ -17,7 +17,7 @@
     "program.periods[].week_index": "有规律月更的第几周，1–5 表示顺数，-1–-5 表示倒数；无规律月更填 0。",
     "program.periods[].start_date": "时期开始日期必填；第一段时期的 start_date 就是节目第一期的原定日期。",
     "program.periods[].end_date": "时期结束日期可空；留空表示该时期或节目仍在连载，不要把最后一条单集日期误填为结束日期。",
-    "program.periods[].schedule_time": "时期默认播出时间，格式 HH:MM；monthly/irregular 和 individual 无默认时间，单集可分别填写；所有 period 的日期和时间按 timezone 解释。",
+    "program.periods[].schedule_time": "时期默认播出时间，格式 HH:MM；individual 逐期设置可作为新增单集的默认时间且可逐期修改，monthly/irregular 无默认时间；所有 period 的日期和时间按 timezone 解释。",
     "program.periods[].timezone": "规范 JSON 统一使用 Asia/Tokyo（UTC+09:00）；period 的日期和时间必须与该时区一致。",
     "occurrences[].episode_number（系统推导）": "occurrences 没有显式期数字段；系统按非 EX 单集的原定日期升序、同日按原定时间升序计算运行序号。EX 不占期。",
     "occurrences[].original_date": "单集原定日期，必填；支持 YYYY-MM-DD。同一节目同一天允许多个单集，但播出时间必须不同；按匹配 period 的 timezone 解释。",

@@ -326,7 +326,7 @@ function programDateRangeLabel(program) {
 function periodScheduleLabel(period) {
   const time = period.schedule_time ? ` ${period.schedule_time}` : "";
   if (period.frequency === "single") return `${t("单次")}${time}`;
-  if (period.frequency === "individual") return t("逐期设置 · 手动录入单集");
+  if (period.frequency === "individual") return `${t("逐期设置 · 手动录入单集")}${time}`;
   const weekday = weekdayNames.value[period.weekday] || "";
   if (period.frequency === "monthly") {
     if (period.monthly_mode === "irregular") return t("每月 · 日期不定");
@@ -728,7 +728,7 @@ function legacyPeriod(program) {
     week_interval: program.week_interval || 1,
     week_index: legacyIrregular ? 0 : program.week_index || 1,
     weekday: legacyIrregular || frequency === "individual" ? 0 : program.weekday || 0,
-    schedule_time: legacyIrregular || frequency === "individual" ? "" : program.schedule_time || "",
+    schedule_time: legacyIrregular ? "" : program.schedule_time || "",
     timezone: program.timezone || "Asia/Tokyo",
   };
 }
@@ -981,7 +981,7 @@ function programBody() {
       ? (period.week_direction === "last" ? -Number(period.week_number) : Number(period.week_number))
       : 0,
     weekday: period.frequency === "weekly" || (period.frequency === "monthly" && period.monthly_mode !== "irregular") ? Number(period.weekday) : 0,
-    schedule_time: period.frequency === "individual" || (period.frequency === "monthly" && period.monthly_mode === "irregular") ? "" : period.schedule_time,
+    schedule_time: period.frequency === "monthly" && period.monthly_mode === "irregular" ? "" : period.schedule_time,
     timezone: period.timezone || "Asia/Tokyo",
   }));
   const sorted = [...periods].sort((left, right) => left.start_date.localeCompare(right.start_date));
@@ -1070,7 +1070,6 @@ async function convertMonthlyToIndividual() {
       period.frequency = "individual";
       period.monthly_mode = "week";
       period.auto_generate = false;
-      period.schedule_time = "";
     }
   });
   const saved = await saveProgram(t("已将固定月更切换为逐期设置"));
@@ -1356,7 +1355,13 @@ function newOccurrence() {
   }
   const lastOccurrence = [...occurrenceRows.value].reverse().find(row => !row._draft && row.status !== "deleted");
   const originalDate = lastOccurrence?.original_date || lastOccurrence?.date || "";
-  const originalTime = lastOccurrence?.original_time || lastOccurrence?.time || "";
+  const defaultPeriod = form.periods.find(period => {
+    if (!period.start_date) return false;
+    return !originalDate || (originalDate >= period.start_date && (!period.end_date || originalDate <= period.end_date));
+  }) || form.periods[0];
+  const originalTime = lastOccurrence
+    ? String(lastOccurrence.original_time ?? lastOccurrence.time ?? "")
+    : String(defaultPeriod?.schedule_time || "");
   const draft = {
     ...blankOccurrence(),
     original_date: originalDate,
@@ -1857,10 +1862,11 @@ onUnmounted(() => {
                 <button v-for="(name, weekday) in weekdayNames" :key="name" type="button" :class="{ selected: period.weekday === weekday }" @click="period.weekday = weekday">{{ name }}</button>
               </div>
             </div>
-            <div v-if="period.frequency === 'weekly' || (period.frequency === 'monthly' && period.monthly_mode !== 'irregular') || period.frequency === 'single'" class="program-form-field period-time-field">
+            <div v-if="period.frequency === 'weekly' || (period.frequency === 'monthly' && period.monthly_mode !== 'irregular') || period.frequency === 'individual' || period.frequency === 'single'" class="program-form-field period-time-field">
                <span class="program-field-label">{{ t("播出时间") }}</span>
                <VueDatePicker v-model="period.schedule_time" class="program-date-picker" time-picker model-type="HH:mm" format="HH:mm" :locale="localeTag()" auto-apply :clearable="true" :is-24="true" :teleport="true" text-input :placeholder="t('选择时间')" @keydown.enter.prevent />
-               <small>{{ t("留空表示全天事件。") }}</small>
+               <small v-if="period.frequency === 'individual'">{{ t("作为新增单集的默认时间；每期可以单独修改。") }}</small>
+               <small v-else>{{ t("留空表示全天事件。") }}</small>
             </div>
             <p v-else class="muted period-schedule-note program-field-wide">{{ t("播出时间未知；单集保存时可填写每期实际时间。") }}</p>
             <div class="program-form-field period-timezone-field" :class="{ 'program-field-wide': period.frequency === 'individual' || (period.frequency === 'monthly' && period.monthly_mode === 'irregular') }">

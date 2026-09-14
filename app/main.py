@@ -549,7 +549,7 @@ def init_db() -> None:
         # Individual periods are manual-only; older versions used this flag for
         # monthly placeholders, which now have an explicit monthly/irregular mode.
         conn.execute(
-            "UPDATE program_periods SET auto_generate = 0, week_index = 0, weekday = 0, schedule_time = '' WHERE frequency = 'individual'"
+            "UPDATE program_periods SET auto_generate = 0, week_index = 0, weekday = 0 WHERE frequency = 'individual'"
         )
         if "timezone" not in period_columns:
             conn.execute("ALTER TABLE program_periods ADD COLUMN timezone TEXT NOT NULL DEFAULT 'Asia/Tokyo'")
@@ -606,6 +606,27 @@ def init_db() -> None:
         }
         for key, value in defaults.items():
             conn.execute("INSERT OR IGNORE INTO settings VALUES (?, ?)", (key, value))
+        individual_time_migration_key = "program_individual_time_migration_v1"
+        if not conn.execute("SELECT 1 FROM settings WHERE key = ?", (individual_time_migration_key,)).fetchone():
+            # The previous migration cleared individual period times. Restore the
+            # old program-level default once, without overwriting later edits.
+            conn.execute(
+                """UPDATE program_periods
+                   SET schedule_time = (
+                       SELECT TRIM(schedule_time)
+                       FROM programs
+                       WHERE programs.id = program_periods.program_id
+                   )
+                   WHERE frequency = 'individual'
+                     AND COALESCE(TRIM(schedule_time), '') = ''
+                     AND program_id IN (
+                         SELECT id FROM programs WHERE COALESCE(TRIM(schedule_time), '') != ''
+                     )"""
+            )
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?)",
+                (individual_time_migration_key, "1"),
+            )
 
 
 def settings() -> dict[str, str]:
@@ -959,6 +980,7 @@ def period_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     ):
         payload["week_index"] = 0
         payload["weekday"] = 0
+    if payload["frequency"] == "monthly" and payload["monthly_mode"] == "irregular":
         payload["schedule_time"] = ""
     payload["timezone"] = payload.get("timezone") or "Asia/Tokyo"
     return payload
@@ -1013,6 +1035,7 @@ def legacy_period(values: dict[str, Any]) -> dict[str, Any]:
     schedule_time = str(values.get("schedule_time") or "").strip()
     if frequency == "individual" or (frequency == "monthly" and monthly_mode == "irregular"):
         weekday = 0
+    if frequency == "monthly" and monthly_mode == "irregular":
         schedule_time = ""
     return {
         "start_date": start_date,
@@ -1138,7 +1161,7 @@ def normalized_period(values: dict[str, Any], program_start: date, program_end: 
     schedule_time = str(values.get("schedule_time") or "").strip()
     if schedule_time and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", schedule_time):
         raise ValueError("播出时间格式应为 HH:MM")
-    if frequency == "individual" or (frequency == "monthly" and monthly_mode == "irregular"):
+    if frequency == "monthly" and monthly_mode == "irregular":
         schedule_time = ""
     timezone = str(values.get("timezone") or "Asia/Tokyo").strip()
     if timezone not in PROGRAM_TIMEZONES:
@@ -1356,7 +1379,7 @@ def program_json_metadata() -> dict[str, Any]:
             "program.periods[].week_index": "有规律月更的第几周，1–5 表示顺数，-1–-5 表示倒数；无规律月更填 0。",
             "program.periods[].start_date": "时期开始日期必填；第一段时期的 start_date 就是节目第一期的原定日期。",
             "program.periods[].end_date": "时期结束日期可空；留空表示该时期或节目仍在连载，不要把最后一条单集日期误填为结束日期。",
-            "program.periods[].schedule_time": "时期默认播出时间，格式 HH:MM；monthly/irregular 和 individual 无默认时间，单集可分别填写；所有 period 的日期和时间按 timezone 解释。",
+            "program.periods[].schedule_time": "时期默认播出时间，格式 HH:MM；individual 逐期设置可作为新增单集的默认时间且可逐期修改，monthly/irregular 无默认时间；所有 period 的日期和时间按 timezone 解释。",
             "program.periods[].timezone": "规范 JSON 统一使用 Asia/Tokyo（UTC+09:00）；period 的日期和时间必须与该时区一致。",
             "occurrences[].episode_number（系统推导）": "occurrences 没有显式期数字段；系统按非 EX 单集的原定日期升序、同日按原定时间升序计算运行序号。EX 不占期。",
             "occurrences[].original_date": "单集原定日期，必填；支持 YYYY-MM-DD。同一节目同一天允许多个单集，但播出时间必须不同；按匹配 period 的 timezone 解释。",

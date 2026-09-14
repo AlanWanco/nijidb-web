@@ -1300,8 +1300,11 @@ onUnmounted(() => {
             <span v-if="eventCast(selectedEventernote).length" class="program-drawer-cast-line" role="img" :aria-label="`${t('出场成员')}：${eventCast(selectedEventernote).map(member => member.name).join('、')}`" :title="eventCast(selectedEventernote).map(member => member.name).join('、')"><i v-for="member in eventCast(selectedEventernote)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
             <span>{{ t("线下活动") }} · {{ occurrenceAirStatus(selectedEventernote) }}</span>
             <strong>{{ fullDateLabel(selectedEventernote.date) }}</strong>
-            <b v-if="selectedEventernote.time">{{ selectedEventernote.time }}</b>
-            <small>{{ t("显示时区") }}：{{ deviceTimeZone }}；{{ t("排期时区") }}：{{ timezoneLabel(selectedEventernote.timezone) }}</small>
+            <div class="program-occurrence-time-line">
+              <b v-if="selectedEventernote.time">{{ selectedEventernote.time }}</b>
+              <span>{{ t("排期时区") }}：{{ timezoneLabel(selectedEventernote.timezone) }}</span>
+            </div>
+            <small class="program-occurrence-calendar-timezone">{{ t("日历时区") }}：{{ deviceTimeZone }}</small>
             <p v-if="selectedEventernote.people?.length">{{ t("参与成员") }}：{{ selectedEventernote.people.join("、") }}</p>
             <p v-if="selectedEventernote.note">{{ selectedEventernote.note }}</p>
           </div>
@@ -1331,8 +1334,11 @@ onUnmounted(() => {
                 <span>{{ eventEpisodeLabel({ extendedProps: selectedEvent }) }} · {{ selectedEvent.delivery === "live" ? t("直播") : t("录播") }} · {{ occurrenceAirStatus(selectedEvent) }}</span>
            <strong v-if="selectedEvent.occurrenceTitle" class="program-occurrence-title">{{ selectedEvent.occurrenceTitle }}</strong>
            <strong>{{ fullDateLabel(selectedEvent.date) }}</strong>
-          <b v-if="selectedEvent.time">{{ selectedEvent.time }}</b>
-            <small>{{ t("显示时区") }}：{{ deviceTimeZone }}；{{ t("排期时区") }}：{{ timezoneLabel(selectedEvent.timezone) }}</small>
+          <div class="program-occurrence-time-line">
+            <b v-if="selectedEvent.time">{{ selectedEvent.time }}</b>
+            <span>{{ t("排期时区") }}：{{ timezoneLabel(selectedEvent.timezone) }}</span>
+          </div>
+            <small class="program-occurrence-calendar-timezone">{{ t("日历时区") }}：{{ deviceTimeZone }}</small>
             <p v-if="selectedEvent.adjustedDate">{{ t("原定") }} {{ fullDateLabel(selectedEvent.originalDate) }}，{{ t("本期已改期") }}</p>
             <p v-if="selectedEvent.occurrenceStatus === 'cancelled'">{{ t("本期已取消") }}</p>
              <template v-if="selectedEvent.guests?.length">

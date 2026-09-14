@@ -4246,6 +4246,21 @@ footer {
   font: 600 12px var(--mono);
 }
 
+.program-occurrence-time-line {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0 8px;
+}
+
+.program-occurrence-calendar-timezone {
+  display: block;
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .program-occurrence-card p {
   margin-top: 5px;
   line-height: 1.55;

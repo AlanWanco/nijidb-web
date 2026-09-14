@@ -325,6 +325,17 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(data["news_slow_refresh"]["enabled"])
         self.assertEqual(data["news_slow_refresh"]["delay_seconds"], 5)
 
+    async def test_music_auto_sync_setting_can_be_disabled(self):
+        self.login()
+        response = await self.client.patch(
+            "/api/admin/settings",
+            json={"music_auto_sync": "0"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["settings"]["music_auto_sync"], "0")
+        data = (await self.client.get("/api/admin/settings")).json()
+        self.assertEqual(data["settings"]["music_auto_sync"], "0")
+
     async def test_database_backup_contains_program_news_and_collabo_tables(self):
         self.login()
         response = await self.client.get("/api/admin/backup")
@@ -625,6 +636,34 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.01)
                 self.assertEqual(calls, [])
                 response = await self.client.patch("/api/admin/settings", json={"news_auto_sync": "1"})
+                self.assertEqual(response.status_code, 200)
+                await asyncio.wait_for(task, 1)
+                self.assertEqual(calls, [True])
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def test_music_scheduler_skips_when_disabled_until_enabled(self):
+        self.login()
+        await self.client.patch("/api/admin/settings", json={"music_auto_sync": "0"})
+        stop = asyncio.Event()
+        wake = asyncio.Event()
+        calls = []
+
+        async def sync():
+            calls.append(True)
+            stop.set()
+
+        with (
+            patch.object(main, "stop_event", stop),
+            patch.object(main, "music_settings_event", wake),
+            patch.object(main, "sync_once", sync),
+        ):
+            task = asyncio.create_task(main.source_scheduler())
+            try:
+                await asyncio.sleep(0.01)
+                self.assertEqual(calls, [])
+                response = await self.client.patch("/api/admin/settings", json={"music_auto_sync": "1"})
                 self.assertEqual(response.status_code, 200)
                 await asyncio.wait_for(task, 1)
                 self.assertEqual(calls, [True])

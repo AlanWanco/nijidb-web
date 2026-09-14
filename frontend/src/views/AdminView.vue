@@ -28,6 +28,7 @@ const refreshingLogs = ref(false);
 const settings = reactive({
   interval_minutes: "10",
   detail_interval_minutes: "5",
+  music_auto_sync: "1",
   news_interval_minutes: "30",
   news_auto_sync: "1",
   news_slow_refresh_enabled: "0",
@@ -194,7 +195,7 @@ async function saveSettings() {
           ]
         : section.value === "bot"
           ? ["onebot_url", "onebot_token", "onebot_target", "onebot_profile"]
-          : ["interval_minutes", "detail_interval_minutes"];
+          : ["music_auto_sync", "interval_minutes", "detail_interval_minutes"];
     const data = await api("/api/admin/settings", {
       method: "PATCH",
       body: Object.fromEntries(keys.map((key) => [key, settings[key]])),
@@ -524,6 +525,15 @@ onMounted(loadSettings);
                   <h2>{{ t("音乐抓取设置") }}</h2>
                 </div>
               </div>
+              <label class="settings-checkbox"
+                ><input
+                  type="checkbox"
+                  :checked="settings.music_auto_sync === '1'"
+                  @change="
+                    settings.music_auto_sync = $event.target.checked ? '1' : '0'
+                  "
+                /><span>{{ t("启用音乐自动检查") }}</span></label
+              >
               <label
                 >{{ t("整页目录检查（分钟）")
                 }}<input

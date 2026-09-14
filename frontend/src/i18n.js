@@ -1591,6 +1591,7 @@ Object.assign(messages.ja, {
 Object.assign(messages.en, {
   音乐抓取设置: "Music crawling",
   新闻抓取设置: "News crawling",
+  "启用音乐自动检查": "Enable automatic music checks",
   "启用慢速官方图床刷新": "Enable slow official-image refresh",
   "单篇刷新间隔（秒）": "Delay between articles (seconds)",
   "每篇新闻之间至少等待 5–60 秒；失败页面会记录并延迟重试。":
@@ -1662,6 +1663,7 @@ Object.assign(messages.en, {
 Object.assign(messages.ja, {
   音乐抓取设置: "音楽の取得設定",
   新闻抓取设置: "ニュースの取得設定",
+  "启用音乐自动检查": "音楽の自動確認を有効化",
   "启用慢速官方图床刷新": "公式画像による低速更新を有効化",
   "单篇刷新间隔（秒）": "記事間の待機時間（秒）",
   "每篇新闻之间至少等待 5–60 秒；失败页面会记录并延迟重试。":

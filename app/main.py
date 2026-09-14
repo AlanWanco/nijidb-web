@@ -135,6 +135,7 @@ os.chmod(BACKUP_DIR, 0o700)
 stop_event = asyncio.Event()
 sync_lock = asyncio.Lock()
 news_run_lock = asyncio.Lock()
+music_settings_event = asyncio.Event()
 news_settings_event = asyncio.Event()
 _r2_client: Any | None = None
 
@@ -594,6 +595,7 @@ def init_db() -> None:
         defaults = {
             "interval_minutes": os.getenv("CHECK_INTERVAL_MINUTES", "10"),
             "detail_interval_minutes": os.getenv("DETAIL_CHECK_INTERVAL_MINUTES", "5"),
+            "music_auto_sync": os.getenv("MUSIC_AUTO_SYNC", "1"),
             "news_interval_minutes": os.getenv("NEWS_CHECK_INTERVAL_MINUTES", "30"),
             "news_auto_sync": os.getenv("NEWS_AUTO_SYNC", "1"),
             "news_slow_refresh_enabled": os.getenv("NEWS_SLOW_REFRESH", "0"),
@@ -3076,11 +3078,13 @@ def normalized_settings(values: dict[str, Any]) -> dict[str, str]:
         )
     except ValueError:
         news_slow_refresh_delay = 10
+    music_auto_sync = "1" if boolean_value(values.get("music_auto_sync"), True) else "0"
     news_auto_sync = "1" if boolean_value(values.get("news_auto_sync"), True) else "0"
     news_slow_refresh_enabled = "1" if boolean_value(values.get("news_slow_refresh_enabled"), False) else "0"
     return {
         "interval_minutes": str(interval),
         "detail_interval_minutes": str(detail_interval),
+        "music_auto_sync": music_auto_sync,
         "news_interval_minutes": str(news_interval),
         "news_auto_sync": news_auto_sync,
         "news_slow_refresh_enabled": news_slow_refresh_enabled,
@@ -4482,27 +4486,52 @@ async def wait_or_stop(seconds: int) -> None:
         pass
 
 
+async def wait_for_setting_or_stop(seconds: int, setting_event: asyncio.Event) -> None:
+    stop_task = asyncio.create_task(stop_event.wait())
+    setting_task = asyncio.create_task(setting_event.wait())
+    try:
+        await asyncio.wait(
+            {stop_task, setting_task},
+            timeout=seconds,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    finally:
+        for task in (stop_task, setting_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(stop_task, setting_task, return_exceptions=True)
+
+
 async def source_scheduler() -> None:
     while not stop_event.is_set():
-        await sync_once()
-        config = settings()
+        music_settings_event.clear()
+        config = normalized_settings(settings())
+        if boolean_value(config.get("music_auto_sync"), True):
+            await sync_once()
+        config = normalized_settings(settings())
+        music_settings_event.clear()
         try:
             seconds = max(300, min(3600, int(float(config.get("interval_minutes", "10")) * 60)))
-        except ValueError:
+        except (TypeError, ValueError):
             seconds = 600
-        await wait_or_stop(seconds)
+        await wait_for_setting_or_stop(seconds, music_settings_event)
 
 
 async def detail_scheduler() -> None:
-    await wait_or_stop(30)
+    music_settings_event.clear()
+    await wait_for_setting_or_stop(30, music_settings_event)
     while not stop_event.is_set():
-        await refresh_deferred_once()
-        config = settings()
+        music_settings_event.clear()
+        config = normalized_settings(settings())
+        if boolean_value(config.get("music_auto_sync"), True):
+            await refresh_deferred_once()
+        config = normalized_settings(settings())
+        music_settings_event.clear()
         try:
             seconds = max(60, min(1800, int(float(config.get("detail_interval_minutes", "5")) * 60)))
-        except ValueError:
+        except (TypeError, ValueError):
             seconds = 300
-        await wait_or_stop(seconds)
+        await wait_for_setting_or_stop(seconds, music_settings_event)
 
 
 async def news_scheduler() -> None:
@@ -5100,6 +5129,8 @@ async def api_save_settings(request: Request) -> dict[str, dict[str, str]]:
         raise HTTPException(400, "请求格式无效")
     values = normalized_settings({**settings(), **payload})
     save_settings(values)
+    if {"music_auto_sync", "interval_minutes", "detail_interval_minutes"} & payload.keys():
+        music_settings_event.set()
     news_settings_event.set()
     return {"settings": values}
 

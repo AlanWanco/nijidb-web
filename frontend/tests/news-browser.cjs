@@ -123,6 +123,7 @@ async function setup(context) {
         settings: {
           interval_minutes: "10",
           detail_interval_minutes: "5",
+          music_auto_sync: "1",
           news_interval_minutes: "30",
           news_auto_sync: "1",
           news_slow_refresh_enabled: "0",
@@ -283,6 +284,12 @@ async function swipe(page, dx) {
     await page.getByText("图片已删除").waitFor();
     assert.equal(await page.locator(".news-existing-image").count(), 1);
     await page.getByRole("button", { name: "取消", exact: true }).click();
+    await page.goto(base + "/admin?section=music");
+    const musicSettings = page.locator("form.settings-card").filter({ hasText: "音乐抓取设置" });
+    await musicSettings.waitFor();
+    assert.equal(await musicSettings.locator('input[type="checkbox"]').count(), 1);
+    assert.equal(await musicSettings.locator('input[type="checkbox"]').isChecked(), true);
+    assert.ok((await musicSettings.innerText()).includes("启用音乐自动检查"));
     await page.goto(base + "/admin?section=news");
     await page.locator(".news-monitor-card").waitFor();
     assert.deepEqual(

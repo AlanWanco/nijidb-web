@@ -26,7 +26,7 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
         self.assertEqual(main.sync_exception_label(error), "HTTPStatusError HTTP 403")
         self.assertEqual(main.sync_exception_label(httpx.ReadTimeout("")), "ReadTimeout")
 
-    def test_individual_period_defaults_to_disabled(self):
+    def test_period_defaults_separate_monthly_irregular_and_individual(self):
         start = date(2026, 1, 1)
         individual = main.normalized_period(
             {"start_date": start.isoformat(), "frequency": "individual"},
@@ -43,16 +43,25 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
             start,
             None,
         )
+        irregular = main.normalized_period(
+            {"start_date": start.isoformat(), "frequency": "monthly", "monthly_mode": "irregular"},
+            start,
+            None,
+        )
         single = main.normalized_period(
-            {"start_date": start.isoformat(), "frequency": "single"},
+            {"start_date": start.isoformat(), "frequency": "single", "auto_generate": False},
             start,
             None,
         )
         self.assertFalse(individual["auto_generate"])
-        self.assertFalse(single["auto_generate"])
+        self.assertTrue(single["auto_generate"])
         self.assertTrue(weekly["auto_generate"])
         self.assertTrue(monthly["auto_generate"])
-        self.assertTrue(
+        self.assertEqual(irregular["monthly_mode"], "irregular")
+        self.assertEqual(irregular["week_index"], 0)
+        self.assertEqual(irregular["weekday"], 0)
+        self.assertEqual(irregular["schedule_time"], "")
+        self.assertFalse(
             main.normalized_period(
                 {"start_date": start.isoformat(), "frequency": "individual", "auto_generate": True},
                 start,
@@ -60,7 +69,7 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
             )["auto_generate"]
         )
 
-    def test_period_auto_generation_can_be_disabled_without_removing_manual_episode(self):
+    def test_individual_period_is_manual_even_if_legacy_flag_is_true(self):
         today = datetime_today()
         start = date(today.year, today.month, 1)
         range_end = today + timedelta(days=100)
@@ -68,7 +77,7 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
             "start_date": start.isoformat(),
             "end_date": range_end.isoformat(),
             "frequency": "individual",
-            "auto_generate": False,
+            "auto_generate": True,
             "schedule_time": "20:00",
             "timezone": "Asia/Tokyo",
         }
@@ -89,13 +98,21 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
         self.assertEqual(len(manual_records), 1)
         self.assertTrue(manual_records[0]["manual"])
 
-        period["auto_generate"] = True
-        generated_records = main.program_occurrence_records(program, start, range_end)
-        self.assertGreaterEqual(len(generated_records), 3)
-        self.assertTrue(any(record["generated"] for record in generated_records))
-        self.assertTrue(any(record["manual"] for record in generated_records))
+    def test_irregular_monthly_period_uses_first_of_each_month_as_placeholder(self):
+        start = date(2026, 1, 1)
+        end = date(2026, 4, 30)
+        period = {
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "frequency": "monthly",
+            "monthly_mode": "irregular",
+            "auto_generate": True,
+            "timezone": "Asia/Tokyo",
+        }
+        dates = main.period_recurring_dates(period, end)
+        self.assertEqual(dates, [date(2026, 1, 1), date(2026, 2, 1), date(2026, 3, 1), date(2026, 4, 1)])
 
-    def test_single_period_only_generates_start_date_when_enabled(self):
+    def test_single_period_generates_start_date_by_default(self):
         today = datetime_today()
         start = date(today.year, today.month, 1)
         period = {
@@ -115,11 +132,11 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
             "periods": [period],
             "occurrences": [],
         }
-        self.assertEqual(main.program_occurrence_records(program, start, start), [])
-        period["auto_generate"] = True
         records = main.program_occurrence_records(program, start, start)
         self.assertEqual(len(records), 1)
+        self.assertTrue(records[0]["generated"])
         self.assertEqual(records[0]["original_date"], start.isoformat())
+        self.assertEqual(records[0]["original_time"], "20:00")
 
     def test_occurrence_images_are_normalized_and_carried_to_records(self):
         values = main.normalized_occurrence(
@@ -165,6 +182,7 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
                 start_date TEXT NOT NULL,
                 end_date TEXT NOT NULL DEFAULT '',
                 frequency TEXT NOT NULL DEFAULT 'weekly',
+                monthly_mode TEXT NOT NULL DEFAULT 'week',
                 auto_generate INTEGER NOT NULL DEFAULT 1,
                 week_interval INTEGER NOT NULL DEFAULT 1,
                 week_index INTEGER NOT NULL DEFAULT 0,
@@ -183,6 +201,7 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
                     "start_date": "2026-01-01",
                     "end_date": "",
                     "frequency": "individual",
+                    "monthly_mode": "week",
                     "auto_generate": False,
                     "week_interval": 1,
                     "week_index": 0,

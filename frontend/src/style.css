@@ -5184,6 +5184,31 @@ html[data-theme="mocha"] .dp__theme_dark {
   line-height: 1.6;
 }
 
+.period-form-grid {
+  align-items: start;
+}
+
+.period-form-grid .period-time-field,
+.period-form-grid .period-start-field {
+  grid-column: 1;
+}
+
+.period-form-grid .period-timezone-field,
+.period-form-grid .period-end-field {
+  grid-column: 2;
+}
+
+.period-form-grid .period-timezone-field.program-field-wide {
+  grid-column: 1 / -1;
+}
+
+.period-schedule-note {
+  align-self: start;
+  margin: 10px 0 16px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .program-period-card {
   margin: 14px 0;
   border: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
@@ -6210,7 +6235,7 @@ html[data-theme="mocha"] .dp__theme_dark {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin: -4px 0 17px;
+  margin: 12px 0 17px;
   border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
   border-radius: 12px;
   padding: 12px 14px;
@@ -6798,6 +6823,13 @@ html[data-theme="mocha"] .dp__theme_dark {
 
   .program-form-grid {
     grid-template-columns: 1fr;
+  }
+
+  .period-form-grid .period-time-field,
+  .period-form-grid .period-timezone-field,
+  .period-form-grid .period-start-field,
+  .period-form-grid .period-end-field {
+    grid-column: 1 / -1;
   }
 
   .occurrence-link-fields {

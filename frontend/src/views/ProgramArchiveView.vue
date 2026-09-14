@@ -75,9 +75,10 @@ function formatLabel(program) {
 function periodScheduleLabel(period) {
   const time = period.schedule_time ? ` ${period.schedule_time}` : "";
   if (period.frequency === "single") return `${t("单次")}${time}`;
-  if (period.frequency === "individual") return `${t("月更 · 逐期设置")}${time}`;
+  if (period.frequency === "individual") return t("逐期设置 · 手动录入单集");
   const weekday = weekdayNames.value[period.weekday] || "";
   if (period.frequency === "monthly") {
+    if (period.monthly_mode === "irregular") return t("每月 · 日期不定");
     const direction = period.week_direction || (period.week_index < 0 ? "last" : "first");
     const number = period.week_number || Math.abs(period.week_index) || 1;
     const week = direction === "last" ? t("倒数第{count}周", { count: number }) : t("第{count}周", { count: number });

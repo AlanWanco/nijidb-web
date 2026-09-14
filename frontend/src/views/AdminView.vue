@@ -547,6 +547,9 @@ onMounted(loadSettings);
                 }}</small></label
               >
               <div class="actions">
+                <button type="submit" :disabled="saving">
+                  {{ saving ? t("保存中……") : t("保存设置") }}
+                </button>
                 <button
                   type="button"
                   class="secondary"

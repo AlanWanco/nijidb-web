@@ -82,6 +82,7 @@ async function setup(context) {
     await page.getByRole("button", { name: "新建节目" }).first().click();
     const periodCard = page.locator(".program-period-card").first();
     await periodCard.waitFor();
+    assert.equal(await page.locator(".program-editor-danger-actions").count(), 0);
     const autoToggle = periodCard.locator(".period-auto-toggle input");
     assert.equal(await autoToggle.count(), 1);
     assert.equal(await autoToggle.isChecked(), true);

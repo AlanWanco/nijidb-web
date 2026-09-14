@@ -1889,8 +1889,8 @@ onUnmounted(() => {
 
         <div class="actions program-editor-actions">
             <button class="program-action-button" :disabled="saving">{{ saving ? t("保存中……") : editingId ? t("保存修改") : t("添加节目") }}</button>
-           <span class="program-editor-danger-actions">
-              <button v-if="editingId" type="button" class="danger program-action-button" :disabled="deletingId === editingId" @click="deleteProgram({ id: editingId, title: form.title })">{{ deletingId === editingId ? t("删除中……") : t("删除节目") }}</button>
+           <span v-if="editingId" class="program-editor-danger-actions">
+              <button type="button" class="danger program-action-button" :disabled="deletingId === editingId" @click="deleteProgram({ id: editingId, title: form.title })">{{ deletingId === editingId ? t("删除中……") : t("删除节目") }}</button>
            </span>
            <input ref="importFileInput" class="program-json-file-input" type="file" accept=".json,application/json" @change="handleImportFile">
         </div>

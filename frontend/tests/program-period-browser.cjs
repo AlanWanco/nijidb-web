@@ -92,6 +92,9 @@ async function setup(context) {
     assert.equal(await periodCard.locator(".period-time-field").count(), 1);
     await periodCard.locator('input[placeholder="选择时间"]').fill("20:00");
     assert.equal(await periodCard.locator('input[placeholder="选择时间"]').inputValue(), "20:00");
+    const individualTimeBox = await periodCard.locator(".period-time-field").boundingBox();
+    const individualTimezoneBox = await periodCard.locator(".period-timezone-field").boundingBox();
+    assert.ok(Math.abs(individualTimeBox.y - individualTimezoneBox.y) < 1);
     assert.match(await periodCard.innerText(), /逐期设置不代表月更/);
 
     await periodCard.getByRole("button", { name: "月更" }).click();

@@ -1869,7 +1869,7 @@ onUnmounted(() => {
                <small v-else>{{ t("留空表示全天事件。") }}</small>
             </div>
             <p v-else class="muted period-schedule-note program-field-wide">{{ t("播出时间未知；单集保存时可填写每期实际时间。") }}</p>
-            <div class="program-form-field period-timezone-field" :class="{ 'program-field-wide': period.frequency === 'individual' || (period.frequency === 'monthly' && period.monthly_mode === 'irregular') }">
+            <div class="program-form-field period-timezone-field" :class="{ 'program-field-wide': period.frequency === 'monthly' && period.monthly_mode === 'irregular' }">
                <span class="program-field-label">{{ t("更新时间时区") }}</span>
               <select v-model="period.timezone">
                 <option v-for="option in timezoneOptions" :key="option.value" :value="option.value">{{ option.label }}</option>

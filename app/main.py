@@ -135,6 +135,7 @@ os.chmod(BACKUP_DIR, 0o700)
 stop_event = asyncio.Event()
 sync_lock = asyncio.Lock()
 news_run_lock = asyncio.Lock()
+official_site_health_lock = asyncio.Lock()
 music_settings_event = asyncio.Event()
 news_settings_event = asyncio.Event()
 _r2_client: Any | None = None
@@ -395,6 +396,12 @@ def init_db() -> None:
           id INTEGER PRIMARY KEY AUTOINCREMENT, checked_at TEXT NOT NULL,
           changed_count INTEGER NOT NULL, error TEXT
         );
+        CREATE TABLE IF NOT EXISTS official_site_health (
+          id INTEGER PRIMARY KEY CHECK (id = 1), status TEXT NOT NULL DEFAULT 'ok',
+          last_error TEXT NOT NULL DEFAULT '', last_source TEXT NOT NULL DEFAULT '',
+          checked_at TEXT NOT NULL DEFAULT ''
+        );
+        INSERT OR IGNORE INTO official_site_health (id, status) VALUES (1, 'ok');
         CREATE TABLE IF NOT EXISTS database_activity_log (
           id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
           category TEXT NOT NULL, summary TEXT NOT NULL
@@ -3241,7 +3248,7 @@ async def scrape() -> list[dict[str, str]]:
     boxes = {box.get("id"): box for box in soup.select(".box[id]")}
     source_list = soup.select_one("ul.list")
     if not source_list:
-        return result
+        raise ValueError("官网音乐目录无法解析")
     missing_detail_ids = []
     for link in source_list.select("a[href^='#']"):
         release_id = link["href"][1:]
@@ -3343,6 +3350,55 @@ def notification_text_lines(value: Any) -> list[str]:
         for line in str(value or "").replace("\r\n", "\n").replace("\r", "\n").splitlines()
         if line.strip()
     ]
+
+
+def official_site_health_message(success: bool, source: str, error: str = "") -> str:
+    if success:
+        return "[官网状态]\n官网访问已恢复。\n检测来源：" + notification_value(source)
+    return (
+        "[官网状态]\n官网访问失败（本轮故障首次）。\n"
+        f"检测来源：{notification_value(source)}\n错误：{notification_value(error or '未知的官网读取错误')}"
+    )
+
+
+async def record_official_site_health(success: bool, source: str, error: str = "") -> None:
+    """Persist the official-site state and notify only on ok/error transitions."""
+    notification: str | None = None
+    try:
+        async with official_site_health_lock:
+            checked_at = datetime.now(timezone.utc).isoformat()
+            next_status = "ok" if success else "error"
+            with db() as conn:
+                row = conn.execute("SELECT status FROM official_site_health WHERE id = 1").fetchone()
+                previous_status = str(row["status"] if row else "ok")
+                conn.execute(
+                    """INSERT INTO official_site_health (id, status, last_error, last_source, checked_at)
+                       VALUES (1, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET status = excluded.status,
+                         last_error = excluded.last_error, last_source = excluded.last_source,
+                         checked_at = excluded.checked_at""",
+                    (next_status, "" if success else notification_value(error), str(source), checked_at),
+                )
+            if previous_status == next_status:
+                return
+            if next_status == "error" and previous_status != "error":
+                notification = official_site_health_message(False, source, error)
+            elif next_status == "ok" and previous_status == "error":
+                notification = official_site_health_message(True, source)
+
+        if not notification:
+            return
+        config = settings()
+        if not config.get("onebot_url") or not config.get("onebot_target"):
+            return
+        try:
+            await send_onebot(notification, config)
+        except Exception as exc:
+            # A Bot delivery failure must not turn a successful site check into a site failure.
+            print(f"[site-health] notification failed: {type(exc).__name__}", flush=True)
+    except Exception as exc:
+        # Health reporting is best-effort and must never break a scrape or refresh.
+        print(f"[site-health] state update failed: {type(exc).__name__}", flush=True)
 
 
 def notification_sequence_diff(
@@ -3841,8 +3897,11 @@ async def store_records(
 async def sync_once() -> tuple[int, str | None]:
     print("[sync] started", flush=True)
     async with sync_lock:
+        site_checked = False
         try:
             records = await scrape()
+            site_checked = True
+            await record_official_site_health(True, "音乐目录")
             refresh_ids = cover_refresh_ids(records)
             refresh_all = not cover_cache_is_current()
             image_headers = {
@@ -3869,6 +3928,8 @@ async def sync_once() -> tuple[int, str | None]:
             return len(changed), None
         except Exception as exc:
             error_label = sync_exception_label(exc)
+            if not site_checked:
+                await record_official_site_health(False, "音乐目录", error_label)
             print(f"[sync] failed: {error_label}", flush=True)
             with db() as conn:
                 conn.execute("INSERT INTO sync_log(checked_at, changed_count, error) VALUES (?, 0, ?)", (datetime.now(timezone.utc).isoformat(), error_label))
@@ -3878,12 +3939,15 @@ async def sync_once() -> tuple[int, str | None]:
 async def refresh_deferred_once() -> tuple[int, str | None]:
     print("[detail-sync] started", flush=True)
     async with sync_lock:
+        site_checked = False
+        health_recorded = False
         try:
             with db() as conn:
                 rows = conn.execute("SELECT id, position FROM releases WHERE id LIKE '%\\_%' ESCAPE '\\' ORDER BY position").fetchall()
             if not rows:
                 print("[detail-sync] no deferred releases", flush=True)
                 return 0, None
+            site_checked = True
             headers = {
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
                 "Referer": SOURCE_URL,
@@ -3902,6 +3966,15 @@ async def refresh_deferred_once() -> tuple[int, str | None]:
                     except Exception as exc:
                         detail_errors += 1
                         print(f"[detail-sync] detail unavailable {row['id']}: {sync_exception_label(exc)}", flush=True)
+            if detail_errors:
+                await record_official_site_health(
+                    False,
+                    "音乐详情",
+                    f"{detail_errors} 条音乐详情读取失败，下次检查将重试",
+                )
+            else:
+                await record_official_site_health(True, "音乐详情")
+            health_recorded = True
             if not records:
                 print(f"[detail-sync] no details fetched; failed={detail_errors}", flush=True)
                 return 0, None
@@ -3924,6 +3997,8 @@ async def refresh_deferred_once() -> tuple[int, str | None]:
             return len(changed), None
         except Exception as exc:
             error_label = sync_exception_label(exc)
+            if site_checked and not health_recorded:
+                await record_official_site_health(False, "音乐详情", error_label)
             print(f"[detail-sync] failed: {error_label}", flush=True)
             return 0, error_label
 
@@ -4254,6 +4329,7 @@ async def news_slow_refresh_once() -> dict[str, Any]:
                 )
         except Exception as exc:
             reason = describe_news_fetch_error(exc)
+            await record_official_site_health(False, "新闻慢速刷新", reason)
             risk = news_refresh_error_is_risk(exc, reason)
             permanent = news_refresh_error_is_permanent(exc)
             next_attempt_at = "" if permanent else news_refresh_retry_at(attempts, risk)
@@ -4281,6 +4357,7 @@ async def news_slow_refresh_once() -> dict[str, Any]:
                 "next_attempt_at": next_attempt_at,
             }
 
+        await record_official_site_health(True, "新闻慢速刷新")
         completed_at = datetime.now(timezone.utc).isoformat()
         with db() as conn:
             conn.execute(
@@ -4415,11 +4492,13 @@ async def news_sync_once() -> dict[str, Any]:
         changed_news_ids: list[str] = []
         previous_news: dict[str, dict[str, Any] | None] = {}
         error_message = None
+        site_checked = False
         try:
             async with httpx.AsyncClient(timeout=30, headers=NEWS_HEADERS) as client:
                 seen_urls: set[str] = set()
                 offset = 0
                 for _ in range(4):
+                    site_checked = True
                     response = await fetch_news_page(client, news_listing_url(offset))
                     entries = parse_topic_listing(response.text, NEWS_TOPICS_URL)
                     if not entries:
@@ -4450,7 +4529,7 @@ async def news_sync_once() -> dict[str, Any]:
                             if changed:
                                 changed_count += 1
                                 changed_news_ids.append(record_id)
-                        except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+                        except Exception as exc:
                             detail_errors += 1
                             print(f"[news-sync] detail failed {record_id}: {describe_news_fetch_error(exc)}", flush=True)
                     next_offset = topic_next_offset(response.text, offset)
@@ -4461,10 +4540,12 @@ async def news_sync_once() -> dict[str, Any]:
                     offset = next_offset
             if detail_errors:
                 error_message = f"{detail_errors} 条详情读取失败，下次检查将重试"
-        except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+        except Exception as exc:
             reason = describe_news_fetch_error(exc)
             error_message = f"{reason}，已保留已有新闻"
             print(f"[news-sync] failed: {reason}", flush=True)
+        if site_checked:
+            await record_official_site_health(not error_message, "官网新闻", error_message or "")
         with db() as conn:
             conn.execute(
                 "INSERT INTO news_sync_log(checked_at, discovered_count, changed_count, error) VALUES (?, ?, ?, ?)",
@@ -5201,12 +5282,17 @@ async def api_admin_news_refresh(news_id: str, request: Request) -> dict[str, An
             article = conn.execute("SELECT * FROM news_articles WHERE id = ?", (news_id,)).fetchone()
         if not article:
             raise HTTPException(404, "新闻不存在")
+        site_checked = False
         try:
             source_url = validate_news_url(article["source_url"])
+            site_checked = True
             async with httpx.AsyncClient(timeout=30, headers=NEWS_HEADERS) as client:
                 changed = await refresh_news_record(client, news_id, source_url, force=True)
-        except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+            await record_official_site_health(True, "新闻手动刷新")
+        except Exception as exc:
             reason = describe_news_fetch_error(exc)
+            if site_checked:
+                await record_official_site_health(False, "新闻手动刷新", reason)
             print(f"[news-refresh] failed {news_id}: {reason}", flush=True)
             raise HTTPException(502, f"官网刷新失败：{reason}；已有内容未被覆盖") from exc
         with db() as conn:

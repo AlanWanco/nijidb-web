@@ -278,6 +278,7 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "ILLUSTRATION_MANIFEST_PATH", Path(self.directory.name) / "none"),
             patch.object(main, "news_run_lock", asyncio.Lock()),
             patch.object(main, "sync_lock", asyncio.Lock()),
+            patch.object(main, "official_site_health_lock", asyncio.Lock()),
         ]
         for item in self.patches:
             item.start()
@@ -291,6 +292,22 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
 
     def login(self):
         self.client.cookies.set("nijidb_admin", main.admin_cookie_value(main.settings()["admin_password_hash"]))
+
+    async def test_official_site_health_notifies_only_on_failure_and_recovery(self):
+        config = {"onebot_url": "https://bot.example.test", "onebot_target": "123", "onebot_token": ""}
+        with (
+            patch.object(main, "settings", return_value=config),
+            patch.object(main, "send_onebot", new_callable=AsyncMock) as send,
+        ):
+            await main.record_official_site_health(False, "音乐目录", "HTTPStatusError HTTP 403")
+            await main.record_official_site_health(False, "音乐目录", "HTTPStatusError HTTP 403")
+            await main.record_official_site_health(True, "音乐目录")
+            await main.record_official_site_health(True, "音乐目录")
+
+        self.assertEqual(send.await_count, 2)
+        self.assertIn("官网访问失败", send.await_args_list[0].args[0])
+        self.assertIn("HTTPStatusError HTTP 403", send.await_args_list[0].args[0])
+        self.assertIn("官网访问已恢复", send.await_args_list[1].args[0])
 
     async def test_search_matches_article_body(self):
         article_id = news_id("niji_topics", "01_123")

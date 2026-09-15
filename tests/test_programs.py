@@ -44,7 +44,12 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
             None,
         )
         irregular = main.normalized_period(
-            {"start_date": start.isoformat(), "frequency": "monthly", "monthly_mode": "irregular"},
+            {
+                "start_date": start.isoformat(),
+                "frequency": "monthly",
+                "monthly_mode": "irregular",
+                "schedule_time": "20:00",
+            },
             start,
             None,
         )
@@ -61,7 +66,7 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
         self.assertEqual(irregular["monthly_mode"], "irregular")
         self.assertEqual(irregular["week_index"], 0)
         self.assertEqual(irregular["weekday"], 0)
-        self.assertEqual(irregular["schedule_time"], "")
+        self.assertEqual(irregular["schedule_time"], "20:00")
         self.assertFalse(
             main.normalized_period(
                 {"start_date": start.isoformat(), "frequency": "individual", "auto_generate": True},
@@ -108,10 +113,23 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
             "frequency": "monthly",
             "monthly_mode": "irregular",
             "auto_generate": True,
+            "schedule_time": "20:00",
             "timezone": "Asia/Tokyo",
         }
         dates = main.period_recurring_dates(period, end)
         self.assertEqual(dates, [date(2026, 1, 1), date(2026, 2, 1), date(2026, 3, 1), date(2026, 4, 1)])
+        program = {
+            "id": "irregular-program-test",
+            "title": "无规律月更测试节目",
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "auto_generate": True,
+            "delivery": "recorded",
+            "periods": [period],
+            "occurrences": [],
+        }
+        records = main.program_occurrence_records(program, start, end)
+        self.assertEqual([record["original_time"] for record in records], ["20:00"] * 4)
 
     def test_single_period_generates_start_date_by_default(self):
         today = datetime_today()
@@ -218,6 +236,79 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row["auto_generate"], 0)
         conn.close()
+
+
+class IndividualProgramApiTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.media_directory = Path(self.directory.name) / "images"
+        self.media_directory.mkdir(parents=True)
+        self.backup_directory = Path(self.directory.name) / "backups"
+        self.backup_directory.mkdir(parents=True)
+        self.patches = [
+            patch.object(main, "DB_PATH", Path(self.directory.name) / "nijidb.sqlite3"),
+            patch.object(main, "MEDIA_DIR", self.media_directory),
+            patch.object(main, "BACKUP_DIR", self.backup_directory),
+            patch.object(main, "R2_ENDPOINT", ""),
+            patch.object(main, "R2_ACCESS_KEY_ID", ""),
+            patch.object(main, "R2_SECRET_ACCESS_KEY", ""),
+            patch.object(main, "R2_PUBLIC_BASE_URL", ""),
+        ]
+        for item in self.patches:
+            item.start()
+            self.addCleanup(item.stop)
+        main.init_db()
+        self.client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=main.app), base_url="http://test"
+        )
+        self.addAsyncCleanup(self.client.aclose)
+        self.client.cookies.set("nijidb_admin", main.admin_cookie_value(main.settings()["admin_password_hash"]))
+
+    async def test_individual_program_seeds_first_occurrence_regardless_of_auto_generation(self):
+        start = main.datetime.now(main.JAPAN_TZ).date() + timedelta(days=7)
+        for auto_generate in (False, True):
+            payload = {
+                "title": f"逐期首集测试节目-{auto_generate}",
+                "auto_generate": auto_generate,
+                "episode_start": 37,
+                "periods": [{
+                    "start_date": start.isoformat(),
+                    "frequency": "individual",
+                    "schedule_time": "20:00",
+                    "timezone": "Asia/Tokyo",
+                }],
+            }
+            created = await self.client.post("/api/admin/programs", json=payload)
+            self.assertEqual(created.status_code, 200)
+            program_id = created.json()["program"]["id"]
+
+            listing = await self.client.get(f"/api/admin/programs/{program_id}/occurrences")
+            self.assertEqual(listing.status_code, 200)
+            occurrences = listing.json()["occurrences"]
+            self.assertEqual(len(occurrences), 1)
+            first = occurrences[0]
+            self.assertEqual(first["original_date"], start.isoformat())
+            self.assertEqual(first["original_time"], "20:00")
+            self.assertEqual(first["episode"], 37)
+            self.assertFalse(first["generated"])
+            self.assertTrue(first["individual"])
+            self.assertTrue(first["manual"])
+
+            with main.db() as conn:
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM program_occurrences WHERE program_id = ?",
+                        (program_id,),
+                    ).fetchone()[0],
+                    1,
+                )
+
+            payload["auto_generate"] = not auto_generate
+            updated = await self.client.patch(f"/api/admin/programs/{program_id}", json=payload)
+            self.assertEqual(updated.status_code, 200)
+            listing_after_update = await self.client.get(f"/api/admin/programs/{program_id}/occurrences")
+            self.assertEqual(len(listing_after_update.json()["occurrences"]), 1)
 
 
 class MusicSyncTests(unittest.IsolatedAsyncioTestCase):

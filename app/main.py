@@ -465,12 +465,12 @@ def init_db() -> None:
         )
         conn.execute(
             """UPDATE programs
-               SET frequency = 'monthly', monthly_mode = 'irregular', week_index = 0, weekday = 0, schedule_time = ''
+               SET frequency = 'monthly', monthly_mode = 'irregular', week_index = 0, weekday = 0
                WHERE frequency = 'irregular'"""
         )
         conn.execute(
             """UPDATE program_periods
-               SET frequency = 'monthly', monthly_mode = 'irregular', week_index = 0, weekday = 0, schedule_time = ''
+               SET frequency = 'monthly', monthly_mode = 'irregular', week_index = 0, weekday = 0
                WHERE frequency = 'irregular'"""
         )
         # Older versions represented monthly/irregular as a single period and
@@ -480,19 +480,19 @@ def init_db() -> None:
             """UPDATE program_periods
                SET frequency = 'monthly', monthly_mode = 'irregular', end_date = COALESCE(
                    (SELECT end_date FROM programs WHERE programs.id = program_periods.program_id), ''
-               ), week_index = 0, weekday = 0, schedule_time = ''
+               ), week_index = 0, weekday = 0
                WHERE program_id IN (SELECT id FROM programs WHERE monthly_mode = 'irregular')
                  AND monthly_mode = 'week'
                  AND frequency IN ('single', 'monthly')"""
         )
         conn.execute(
             """UPDATE programs
-               SET frequency = 'monthly', week_index = 0, weekday = 0, schedule_time = ''
+               SET frequency = 'monthly', week_index = 0, weekday = 0
                WHERE monthly_mode = 'irregular' AND frequency IN ('single', 'monthly')"""
         )
         conn.execute(
             """UPDATE program_periods
-               SET week_index = 0, weekday = 0, schedule_time = ''
+               SET week_index = 0, weekday = 0
                WHERE frequency = 'monthly' AND monthly_mode = 'irregular'"""
         )
         # Individual periods are manual-only; older versions used this flag for
@@ -954,8 +954,6 @@ def period_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     ):
         payload["week_index"] = 0
         payload["weekday"] = 0
-    if payload["frequency"] == "monthly" and payload["monthly_mode"] == "irregular":
-        payload["schedule_time"] = ""
     payload["timezone"] = payload.get("timezone") or "Asia/Tokyo"
     return payload
 
@@ -1009,8 +1007,6 @@ def legacy_period(values: dict[str, Any]) -> dict[str, Any]:
     schedule_time = str(values.get("schedule_time") or "").strip()
     if frequency == "individual" or (frequency == "monthly" and monthly_mode == "irregular"):
         weekday = 0
-    if frequency == "monthly" and monthly_mode == "irregular":
-        schedule_time = ""
     return {
         "start_date": start_date,
         "end_date": end_date,
@@ -1135,8 +1131,6 @@ def normalized_period(values: dict[str, Any], program_start: date, program_end: 
     schedule_time = str(values.get("schedule_time") or "").strip()
     if schedule_time and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", schedule_time):
         raise ValueError("播出时间格式应为 HH:MM")
-    if frequency == "monthly" and monthly_mode == "irregular":
-        schedule_time = ""
     timezone = str(values.get("timezone") or "Asia/Tokyo").strip()
     if timezone not in PROGRAM_TIMEZONES:
         raise ValueError("更新时间时区无效")
@@ -1353,7 +1347,7 @@ def program_json_metadata() -> dict[str, Any]:
             "program.periods[].week_index": "有规律月更的第几周，1–5 表示顺数，-1–-5 表示倒数；无规律月更填 0。",
             "program.periods[].start_date": "时期开始日期必填；第一段时期的 start_date 就是节目第一期的原定日期。",
             "program.periods[].end_date": "时期结束日期可空；留空表示该时期或节目仍在连载，不要把最后一条单集日期误填为结束日期。",
-            "program.periods[].schedule_time": "时期默认播出时间，格式 HH:MM；individual 逐期设置可作为新增单集的默认时间且可逐期修改，monthly/irregular 无默认时间；所有 period 的日期和时间按 timezone 解释。",
+            "program.periods[].schedule_time": "时期默认播出时间，格式 HH:MM；monthly/irregular 可设置默认时间并在单集列表中逐期修改，individual 逐期设置也可作为新增单集的默认时间；所有 period 的日期和时间按 timezone 解释。",
             "program.periods[].timezone": "规范 JSON 统一使用 Asia/Tokyo（UTC+09:00）；period 的日期和时间必须与该时区一致。",
             "occurrences[].episode_number（系统推导）": "occurrences 没有显式期数字段；系统按非 EX 单集的原定日期升序、同日按原定时间升序计算运行序号。EX 不占期。",
             "occurrences[].original_date": "单集原定日期，必填；支持 YYYY-MM-DD。同一节目同一天允许多个单集，但播出时间必须不同；按匹配 period 的 timezone 解释。",
@@ -1383,7 +1377,7 @@ def program_json_metadata() -> dict[str, Any]:
             "schedule_mode 缺省为 individual：导入的 occurrences 是准确的最终逐期数据，program.auto_generate 会被关闭，不会凭 periods 生成额外单集。",
             "需要手动指定导入行为时，可将 schedule_mode 设置为 individual 或 generated；current 由导出文件使用，按每个 program 的 auto_generate 还原当前设置。",
             "导出 JSON 会根据当前节目设置保留 auto_generate、periods（包括每个时期的 auto_generate）和当前生效的 occurrences；自动生成节目按系统现有约半年的生成窗口导出。",
-            "逐期设置不代表月更，individual 时期完全手动且不自动生成；single 时期默认自动生成一条与播出日期和时间相同的单集；weekly 和 monthly 时期默认开启，monthly/irregular 使用每月 1 日作为占位日期。",
+            "逐期设置不代表月更，individual 时期不会按规则自动生成后续单集；保存节目排期时会先创建一条以时期开始日期和默认时间为初始值的首期，之后按实际情况手动维护；monthly/irregular 时期可设置默认播出时间，开启自动生成后以每月 1 日作为占位日期并使用该时间；single 时期默认自动生成一条与播出日期和时间相同的单集；weekly 和规律 monthly 时期默认开启。",
             "target_mode 缺省为 new；覆盖导入必须指定 target_program_id，并在网页导入预览中明确选择覆盖目标。",
             "子节目 JSON 导入必须在预览中选择一个已有的主节目；new 会在该主节目下新建子节目，overwrite 会覆盖该主节目下同名或同 ID 的子节目。",
             "JSON 可以保留这些说明字段；导入器也兼容 // 和 /* */ 注释。",
@@ -2633,6 +2627,58 @@ def replace_program_periods(conn: sqlite3.Connection, program_id: str, periods: 
         )
         for period in periods
     ])
+
+
+def ensure_individual_occurrence_starts(
+    conn: sqlite3.Connection,
+    program_id: str,
+    periods: list[dict[str, Any]],
+    timestamp: str,
+) -> int:
+    """Create one editable first episode for every individual period.
+
+    Individual periods deliberately do not generate a recurring series, but
+    their start date is still the initial episode anchor. Keep the row as a
+    normal manual occurrence (no generated_date/materialized marker), so it
+    behaves like an episode added from the editor and can be changed freely.
+    Existing rows, including cancelled or deleted rows, suppress reseeding.
+    """
+    individual_periods = [
+        period for period in periods if str(period.get("frequency") or "") == "individual"
+    ]
+    if not individual_periods:
+        return 0
+
+    existing_dates = {
+        str(row["original_date"] or "").strip()
+        for row in conn.execute(
+            "SELECT original_date FROM program_occurrences WHERE program_id = ?",
+            (program_id,),
+        ).fetchall()
+    }
+    created = 0
+    for period in individual_periods:
+        original_date = str(period.get("start_date") or "").strip()
+        if not original_date or original_date in existing_dates:
+            continue
+        occurrence = normalized_occurrence({
+            "original_date": original_date,
+            "original_time": str(period.get("schedule_time") or "").strip(),
+        })
+        occurrence.update({
+            "program_id": program_id,
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        })
+        try:
+            insert_occurrence_row(conn, occurrence)
+        except sqlite3.IntegrityError:
+            # A concurrent save may have inserted the same start slot after
+            # the lookup. The existing occurrence is the desired result.
+            continue
+        existing_dates.add(original_date)
+        created += 1
+    return created
 
 
 def insert_program_row(conn: sqlite3.Connection, values: dict[str, Any]) -> None:
@@ -6164,6 +6210,7 @@ async def api_create_program(request: Request) -> dict[str, Any]:
     values.update({"id": f"program-{secrets.token_hex(6)}", "created_at": now, "updated_at": now})
     with db() as conn:
         insert_program_row(conn, values)
+        ensure_individual_occurrence_starts(conn, values["id"], values["periods"], now)
     log_database_activity("program", f"新增节目：{values['title']}")
     program = next(item for item in program_rows(program_ids={values["id"]}, include_occurrences=False) if item["id"] == values["id"])
     return {"program": program}
@@ -6210,6 +6257,7 @@ async def api_update_program(program_id: str, request: Request) -> dict[str, Any
             )
         backfill_individual_occurrence_anchors(conn, program_id, old_periods, values["periods"])
         replace_program_periods(conn, program_id, values["periods"], values["updated_at"])
+        ensure_individual_occurrence_starts(conn, program_id, values["periods"], values["updated_at"])
     log_database_activity("program", f"更新节目：{values['title']}")
     program = next(item for item in program_rows(program_ids={program_id}, include_occurrences=False) if item["id"] == program_id)
     return {"program": program}

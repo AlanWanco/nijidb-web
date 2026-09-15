@@ -108,7 +108,11 @@ async function setup(context) {
     await periodCard.getByRole("button", { name: "无规律" }).click();
     assert.equal(await autoToggle.count(), 1);
     assert.equal(await autoToggle.isChecked(), true);
-    assert.equal(await periodCard.getByText("播出时间", { exact: true }).count(), 0);
+    assert.equal(await periodCard.getByText("播出时间", { exact: true }).count(), 1);
+    const irregularTimeBox = await periodCard.locator(".period-time-field").boundingBox();
+    const irregularTimezoneBox = await periodCard.locator(".period-timezone-field").boundingBox();
+    assert.ok(Math.abs(irregularTimeBox.y - irregularTimezoneBox.y) < 1);
+    assert.equal(await periodCard.locator('input[placeholder="选择时间"]').inputValue(), "20:00");
     assert.match(await periodCard.locator(".period-auto-toggle").innerText(), /每月 1 日/);
 
     await periodCard.getByRole("button", { name: "单次" }).click();

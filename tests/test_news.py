@@ -337,6 +337,43 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
         main.save_settings({"admin_password_hash": main.hash_password("new-admin-pass")})
         self.assertEqual((await self.client.get("/api/auth/session")).json()["role"], "editor")
 
+    async def test_admin_can_change_editor_password_but_editor_cannot(self):
+        main.save_settings({"admin_password_hash": main.hash_password("admin-pass")})
+        self.login()
+        response = await self.client.patch(
+            "/api/admin/editor-password",
+            json={
+                "current_password": "admin-pass",
+                "new_password": "editor-new-pass",
+                "confirm_password": "editor-new-pass",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["message"], "编辑者密码已更新")
+        self.assertTrue(main.verify_password("editor-new-pass", main.settings()["editor_password_hash"]))
+
+        await self.client.post("/api/auth/logout")
+        old_login = await self.client.post(
+            "/api/auth/login",
+            json={"username": "editor", "password": "editor-pass"},
+        )
+        self.assertEqual(old_login.status_code, 401)
+        new_login = await self.client.post(
+            "/api/auth/login",
+            json={"username": "editor", "password": "editor-new-pass"},
+        )
+        self.assertEqual(new_login.status_code, 200)
+        self.assertEqual(new_login.json()["role"], "editor")
+        editor_response = await self.client.patch(
+            "/api/admin/editor-password",
+            json={
+                "current_password": "editor-new-pass",
+                "new_password": "another-pass",
+                "confirm_password": "another-pass",
+            },
+        )
+        self.assertEqual(editor_response.status_code, 403)
+
     async def test_search_matches_article_body(self):
         article_id = news_id("niji_topics", "01_123")
         with main.db() as conn:

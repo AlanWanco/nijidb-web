@@ -49,6 +49,11 @@ const passwordForm = reactive({
   new_password: "",
   confirm_password: "",
 });
+const editorPasswordForm = reactive({
+  current_password: "",
+  new_password: "",
+  confirm_password: "",
+});
 const loading = ref(true);
 const saving = ref(false);
 const testing = ref(false);
@@ -58,10 +63,13 @@ const newsSlowRefreshing = ref(false);
 const newsSlowRetrying = ref(false);
 const activityLogs = ref([]);
 const changingPassword = ref(false);
+const changingEditorPassword = ref(false);
 const message = ref("");
 const error = ref("");
 const passwordMessage = ref("");
 const passwordError = ref("");
+const editorPasswordMessage = ref("");
+const editorPasswordError = ref("");
 const backingUp = ref(false);
 const databaseBackups = ref([]);
 const backupsLoading = ref(false);
@@ -249,6 +257,29 @@ async function changePassword() {
     else passwordError.value = requestError.message || t("密码修改失败");
   } finally {
     changingPassword.value = false;
+  }
+}
+
+async function changeEditorPassword() {
+  changingEditorPassword.value = true;
+  editorPasswordMessage.value = "";
+  editorPasswordError.value = "";
+  try {
+    const data = await api("/api/admin/editor-password", {
+      method: "PATCH",
+      body: { ...editorPasswordForm },
+    });
+    editorPasswordMessage.value = data.message;
+    Object.assign(editorPasswordForm, {
+      current_password: "",
+      new_password: "",
+      confirm_password: "",
+    });
+  } catch (requestError) {
+    if (requestError.status === 401) showError(requestError);
+    else editorPasswordError.value = requestError.message || t("编辑者密码修改失败");
+  } finally {
+    changingEditorPassword.value = false;
   }
 }
 
@@ -744,6 +775,58 @@ onMounted(loadSettings);
               /></label>
               <button :disabled="changingPassword">
                 {{ changingPassword ? t("修改中……") : t("修改密码") }}
+              </button>
+            </form>
+            <form
+              v-if="!editorMode"
+              v-show="section === 'account'"
+              class="settings-card password-form"
+              @submit.prevent="changeEditorPassword"
+            >
+              <div class="form-heading">
+                <span class="form-number">04B</span>
+                <div>
+                  <p class="form-kicker">EDITOR ACCESS</p>
+                  <h2>{{ t("修改编辑者密码") }}</h2>
+                </div>
+              </div>
+              <p class="muted">
+                {{ t("为 editor 账户设置新密码，旧的编辑者登录会立即失效。") }}
+              </p>
+              <p v-if="editorPasswordMessage" class="success">
+                {{ editorPasswordMessage }}
+              </p>
+              <p v-if="editorPasswordError" class="state error">
+                {{ editorPasswordError }}
+              </p>
+              <label
+                >{{ t("当前管理员密码")
+                }}<input
+                  v-model="editorPasswordForm.current_password"
+                  type="password"
+                  autocomplete="current-password"
+                  required
+              /></label>
+              <label
+                >{{ t("新密码")
+                }}<input
+                  v-model="editorPasswordForm.new_password"
+                  type="password"
+                  autocomplete="new-password"
+                  minlength="8"
+                  required
+              /></label>
+              <label
+                >{{ t("确认新密码")
+                }}<input
+                  v-model="editorPasswordForm.confirm_password"
+                  type="password"
+                  autocomplete="new-password"
+                  minlength="8"
+                  required
+              /></label>
+              <button :disabled="changingEditorPassword">
+                {{ changingEditorPassword ? t("修改中……") : t("更新编辑者密码") }}
               </button>
             </form>
             <section

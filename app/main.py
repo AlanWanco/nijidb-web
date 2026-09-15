@@ -3068,6 +3068,14 @@ def require_api_admin(request: Request) -> str:
     return role
 
 
+def require_admin_role(request: Request) -> None:
+    role = authenticated_role(request)
+    if role is None:
+        raise HTTPException(401, "需要管理员登录")
+    if role != ADMIN_ROLE:
+        raise HTTPException(403, "只有管理员可以修改账户密码")
+
+
 def set_auth_cookie(response: JSONResponse, role: str) -> None:
     values = settings()
     if role == EDITOR_ROLE:
@@ -5944,21 +5952,13 @@ async def api_test_onebot(request: Request) -> dict[str, str]:
     return {"message": "测试消息已发送"}
 
 
-@app.patch("/api/admin/password")
-async def api_change_password(request: Request) -> dict[str, str]:
-    require_api_admin(request)
-    try:
-        payload = await request.json()
-    except ValueError as exc:
-        raise HTTPException(400, "请求格式无效") from exc
-    if not isinstance(payload, dict):
-        raise HTTPException(400, "请求格式无效")
+def validated_new_password(payload: dict[str, Any], current_password_hash: str) -> str:
     current_password = payload.get("current_password")
     new_password = payload.get("new_password")
     confirm_password = payload.get("confirm_password")
     if not all(isinstance(value, str) for value in (current_password, new_password, confirm_password)):
         raise HTTPException(400, "密码格式无效")
-    if not verify_password(current_password, settings().get("admin_password_hash", "")):
+    if not verify_password(current_password, current_password_hash):
         raise HTTPException(400, "当前密码错误")
     if len(new_password) < 8:
         raise HTTPException(400, "新密码至少需要 8 位")
@@ -5966,8 +5966,35 @@ async def api_change_password(request: Request) -> dict[str, str]:
         raise HTTPException(400, "新密码不能超过 256 位")
     if new_password != confirm_password:
         raise HTTPException(400, "两次输入的新密码不一致")
+    return new_password
+
+
+@app.patch("/api/admin/password")
+async def api_change_password(request: Request) -> dict[str, str]:
+    require_admin_role(request)
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "请求格式无效") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "请求格式无效")
+    new_password = validated_new_password(payload, settings().get("admin_password_hash", ""))
     save_settings({"admin_password_hash": hash_password(new_password)})
     return {"message": "管理员密码已更新"}
+
+
+@app.patch("/api/admin/editor-password")
+async def api_change_editor_password(request: Request) -> dict[str, str]:
+    require_admin_role(request)
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "请求格式无效") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "请求格式无效")
+    new_password = validated_new_password(payload, settings().get("admin_password_hash", ""))
+    save_settings({"editor_password_hash": hash_password(new_password)})
+    return {"message": "编辑者密码已更新"}
 
 
 @app.post("/api/admin/sync")

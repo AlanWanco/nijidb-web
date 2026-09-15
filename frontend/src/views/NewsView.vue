@@ -16,6 +16,8 @@ const tagCatalog = ref([]);
 const sourceOptions = ref([]);
 const lastSync = ref(null);
 const authenticated = ref(false);
+const userRole = ref("");
+const administrator = computed(() => userRole.value === "admin");
 const tagManagerOpen = ref(false);
 const tagDrafts = ref([]);
 const tagSaving = ref(false);
@@ -168,8 +170,10 @@ async function loadAuth() {
   try {
     const data = await api("/api/auth/session");
     authenticated.value = Boolean(data.authenticated);
+    userRole.value = data.role || (data.authenticated ? "admin" : "");
   } catch {
     authenticated.value = false;
+    userRole.value = "";
   }
 }
 
@@ -213,6 +217,7 @@ async function saveTagCatalog() {
   } catch (requestError) {
     if (requestError.status === 401) {
       authenticated.value = false;
+      userRole.value = "";
       tagManagerOpen.value = false;
     }
     tagError.value = requestError.message || t("标签目录保存失败");
@@ -250,6 +255,7 @@ async function createTag() {
   } catch (requestError) {
     if (requestError.status === 401) {
       authenticated.value = false;
+      userRole.value = "";
       tagManagerOpen.value = false;
     }
     tagError.value = requestError.message || t("标签新增失败");
@@ -284,6 +290,7 @@ async function deleteTag(tag) {
   } catch (requestError) {
     if (requestError.status === 401) {
       authenticated.value = false;
+      userRole.value = "";
       tagManagerOpen.value = false;
     }
     tagError.value = requestError.message || t("标签删除失败");
@@ -543,7 +550,7 @@ onBeforeUnmount(() => {
             {{ t("清除筛选") }}
           </button>
           <button
-            v-if="authenticated"
+            v-if="administrator"
             class="text-button"
             type="button"
             @click="tagManagerOpen ? closeTagManager() : openTagManager()"
@@ -580,7 +587,7 @@ onBeforeUnmount(() => {
           #{{ tagLabel(tag) }} <small>{{ tag.count }}</small>
         </button>
       </div>
-      <section v-if="authenticated && tagManagerOpen" class="news-tag-manager">
+      <section v-if="administrator && tagManagerOpen" class="news-tag-manager">
         <div class="news-tag-manager-heading">
           <div>
             <span class="eyebrow">TAG DIRECTORY / ADMIN</span>

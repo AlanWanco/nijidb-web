@@ -1642,6 +1642,11 @@ Object.assign(messages.en, {
     "Backups include settings, programs, music, news, collaborations and image paths, not image files. SQLite is backed up daily, retaining up to 30 files; the image volume is not archived.",
 });
 Object.assign(messages.en, {
+  "编辑者控制台": "Editor console",
+  "编辑者只能管理节目和联动，数据库仅支持下载。": "Editors can manage programs and collaborations; the database is download-only.",
+  "管理员密码已修改；编辑者请使用 editor 账户登录。": "The administrator password has been changed; editors should sign in with the editor account.",
+  "数据库备份": "Database backup",
+  "数据库仅支持下载，不支持上传覆盖；备份包含设置、节目、音乐、新闻、联动及其图片路径，不包含图片文件。每天自动备份 SQLite，最多保留 30 份。": "The database is download-only; uploads and overwrites are disabled. Backups include settings, programs, music, news, collaborations and image paths, not image files. SQLite is backed up daily, retaining up to 30 files.",
   "查看当期返图": "View episode photos",
   "当期返图": "Episode photos",
   "当期节目返图": "Episode photos",
@@ -1715,6 +1720,11 @@ Object.assign(messages.ja, {
 });
 
 Object.assign(messages.ja, {
+  "编辑者控制台": "編集者コンソール",
+  "编辑者只能管理节目和联动，数据库仅支持下载。": "編集者は番組とコラボのみ管理できます。データベースはダウンロード専用です。",
+  "管理员密码已修改；编辑者请使用 editor 账户登录。": "管理者パスワードは変更済みです。編集者はeditorアカウントでログインしてください。",
+  "数据库备份": "データベースバックアップ",
+  "数据库仅支持下载，不支持上传覆盖；备份包含设置、节目、音乐、新闻、联动及其图片路径，不包含图片文件。每天自动备份 SQLite，最多保留 30 份。": "データベースはダウンロード専用で、アップロードや上書きはできません。設定・番組・音楽・ニュース・コラボと画像パスを含み、画像ファイルは含みません。SQLiteを毎日バックアップし、最新30件を保持します。",
   "查看当期返图": "今回の画像を見る",
   "当期返图": "今回の画像",
   "当期节目返图": "番組画像",

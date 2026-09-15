@@ -2445,10 +2445,21 @@ button.secondary,
 
 .login-intro {
   max-width: 360px;
-  margin: 0 0 30px;
+  margin: 0 0 16px;
   color: var(--muted);
   font-size: 13px;
   line-height: 1.7;
+}
+
+.login-notice {
+  margin: 0 0 24px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent-soft) 70%, transparent);
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .login-footnote {

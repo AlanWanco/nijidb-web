@@ -34,6 +34,8 @@ const following = ref(null);
 const loading = ref(true);
 const error = ref("");
 const authenticated = ref(false);
+const userRole = ref("");
+const administrator = computed(() => userRole.value === "admin");
 const editMode = ref(false);
 const loginPrompt = ref(false);
 const saving = ref(false);
@@ -177,7 +179,11 @@ async function refreshArticle() {
       data.changed ? "新闻已刷新，手动修改已保留" : "官网内容没有变化",
     );
   } catch (requestError) {
-    saveError.value = requestError.message;
+    if (requestError.status === 401) {
+      authenticated.value = false;
+      userRole.value = "";
+    }
+    saveError.value = requestError.message || t("请求失败");
   } finally {
     refreshing.value = false;
   }
@@ -225,8 +231,10 @@ async function loadAuth() {
   try {
     const data = await api("/api/auth/session");
     authenticated.value = Boolean(data.authenticated);
+    userRole.value = data.role || (data.authenticated ? "admin" : "");
   } catch {
     authenticated.value = false;
+    userRole.value = "";
   }
 }
 
@@ -307,6 +315,7 @@ async function deleteImage(image) {
   } catch (requestError) {
     if (requestError.status === 401) {
       authenticated.value = false;
+      userRole.value = "";
       loginPrompt.value = true;
     } else {
       saveError.value = requestError.message || t("图片删除失败");
@@ -389,6 +398,7 @@ async function saveEdit() {
   } catch (requestError) {
     if (requestError.status === 401) {
       authenticated.value = false;
+      userRole.value = "";
       loginPrompt.value = true;
     } else {
       saveError.value = requestError.message || t("新闻保存失败");
@@ -468,7 +478,7 @@ onMounted(() => {
           </p>
           <div class="news-detail-actions">
             <button
-              v-if="authenticated"
+              v-if="administrator"
               type="button"
               class="secondary"
               :disabled="busy || editMode"
@@ -477,6 +487,7 @@ onMounted(() => {
               {{ refreshing ? t("刷新中……") : t("从官网刷新此条") }}
             </button>
             <button
+              v-if="administrator || !authenticated"
               type="button"
               class="secondary"
               :disabled="busy"

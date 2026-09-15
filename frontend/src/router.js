@@ -61,14 +61,18 @@ const router = createRouter({
     {
       path: "/admin/collabo/:id?",
       component: () => import("./views/CollaboAdminView.vue"),
-      meta: { requiresAuth: true, title: collaboPageTitle },
+      meta: { requiresAuth: true, roles: ["admin", "editor"], title: collaboPageTitle },
     },
     { path: "/admin/login", component: () => import("./views/LoginView.vue"), meta: { title: "管理员登录" } },
-    { path: "/admin", component: () => import("./views/AdminView.vue"), meta: { requiresAuth: true, title: "设置" } },
+    {
+      path: "/admin",
+      component: () => import("./views/AdminView.vue"),
+      meta: { requiresAuth: true, roles: ["admin", "editor"], title: "设置" },
+    },
     {
       path: "/admin/programs",
       component: () => import("./views/ProgramAdminView.vue"),
-      meta: { requiresAuth: true, title: "节目档案管理" },
+      meta: { requiresAuth: true, roles: ["admin", "editor"], title: "节目档案管理" },
     },
     { path: "/:pathMatch(.*)*", redirect: "/" },
   ],
@@ -100,7 +104,16 @@ router.beforeEach(async (to, from) => {
   if (!to.meta.requiresAuth) return true;
   try {
     const session = await api("/api/auth/session");
-    if (session.authenticated) return true;
+    if (session.authenticated) {
+      const role = session.role || "admin";
+      if (!to.meta.roles || to.meta.roles.includes(role)) {
+        if (role === "editor" && to.path === "/admin" && to.query.section !== "database") {
+          return { path: "/admin", query: { ...to.query, section: "database" } };
+        }
+        return true;
+      }
+      return role === "editor" ? { path: "/admin", query: { section: "database" } } : { path: "/" };
+    }
   } catch {
     // The view will show the request error if the API itself is unavailable.
   }

@@ -11,12 +11,25 @@ const password = ref("");
 const loading = ref(false);
 const error = ref("");
 
+function editorRedirect(redirect) {
+  if (
+    redirect === "/admin" ||
+    redirect.startsWith("/admin?") ||
+    redirect.startsWith("/admin/programs") ||
+    redirect.startsWith("/admin/collabo")
+  ) {
+    return redirect;
+  }
+  return "/admin?section=database";
+}
+
 async function login() {
   loading.value = true;
   error.value = "";
   try {
-    await api("/api/auth/login", { method: "POST", body: { username: username.value, password: password.value } });
-    router.replace(typeof route.query.redirect === "string" ? route.query.redirect : "/admin");
+    const data = await api("/api/auth/login", { method: "POST", body: { username: username.value, password: password.value } });
+    const redirect = typeof route.query.redirect === "string" ? route.query.redirect : "/admin";
+    router.replace(data.role === "editor" ? editorRedirect(redirect) : redirect);
   } catch (requestError) {
     error.value = requestError.message || t("账号或密码错误");
   } finally {
@@ -32,6 +45,7 @@ async function login() {
       <p class="eyebrow">PRIVATE AREA / 01</p>
        <h1>{{ t("管理员登录") }}</h1>
        <p class="login-intro">{{ t("进入控制室，管理资料同步、通知和本地档案。") }}</p>
+       <p class="login-notice">{{ t("管理员密码已修改；编辑者请使用 editor 账户登录。") }}</p>
       <p v-if="error" class="state error">{{ error }}</p>
       <form @submit.prevent="login">
          <label>{{ t("账号") }}<input v-model="username" autocomplete="username" required></label>

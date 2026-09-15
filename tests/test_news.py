@@ -309,6 +309,34 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("HTTPStatusError HTTP 403", send.await_args_list[0].args[0])
         self.assertIn("官网访问已恢复", send.await_args_list[1].args[0])
 
+    async def test_editor_login_is_limited_to_programs_collabo_and_database_downloads(self):
+        values = main.settings()
+        self.assertEqual(values["editor_password_hash"], values["admin_password_hash"])
+        with main.db() as conn:
+            conn.execute("UPDATE settings SET value = ? WHERE key = 'editor_password_hash'", (main.hash_password("editor-pass"),))
+
+        login = await self.client.post(
+            "/api/auth/login",
+            json={"username": "editor", "password": "editor-pass"},
+        )
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(login.json()["role"], "editor")
+        self.assertEqual((await self.client.get("/api/auth/session")).json()["role"], "editor")
+        settings = await self.client.get("/api/admin/settings")
+        self.assertEqual(settings.status_code, 200)
+        self.assertEqual(settings.json()["role"], "editor")
+        self.assertEqual(settings.json()["settings"], {})
+        self.assertEqual((await self.client.get("/api/admin/program-json-template")).status_code, 200)
+        self.assertEqual((await self.client.get("/api/admin/collabo")).status_code, 200)
+        self.assertEqual((await self.client.get("/api/admin/backups")).status_code, 200)
+        self.assertEqual((await self.client.get("/api/admin/backup")).status_code, 200)
+        self.assertEqual((await self.client.patch("/api/admin/settings", json={"news_auto_sync": "0"})).status_code, 403)
+        self.assertEqual((await self.client.post("/api/admin/news/sync")).status_code, 403)
+        self.assertEqual((await self.client.patch("/api/admin/password", json={})).status_code, 403)
+        self.assertEqual((await self.client.post("/api/admin/backup/restore", content=b"not-a-database")).status_code, 403)
+        main.save_settings({"admin_password_hash": main.hash_password("new-admin-pass")})
+        self.assertEqual((await self.client.get("/api/auth/session")).json()["role"], "editor")
+
     async def test_search_matches_article_body(self):
         article_id = news_id("niji_topics", "01_123")
         with main.db() as conn:

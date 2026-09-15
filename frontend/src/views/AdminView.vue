@@ -15,11 +15,17 @@ const sections = [
   { id: "database", label: "数据库" },
   { id: "account", label: "账号安全" },
 ];
-const section = computed(() =>
-  sections.some((item) => item.id === route.query.section)
-    ? route.query.section
-    : "music",
+const userRole = ref("admin");
+const editorMode = computed(() => userRole.value === "editor");
+const visibleSections = computed(() =>
+  editorMode.value ? sections.filter((item) => item.id === "database") : sections,
 );
+const section = computed(() => {
+  if (editorMode.value) return "database";
+  return sections.some((item) => item.id === route.query.section)
+    ? route.query.section
+    : "music";
+});
 const logCategory = ref("");
 const logPage = ref(1);
 const newsLastSync = ref(null);
@@ -56,13 +62,9 @@ const message = ref("");
 const error = ref("");
 const passwordMessage = ref("");
 const passwordError = ref("");
-const backupInput = ref(null);
-const backupFile = ref(null);
 const backingUp = ref(false);
-const restoring = ref(false);
 const databaseBackups = ref([]);
 const backupsLoading = ref(false);
-const restoringBackupName = ref("");
 const backupMessage = ref("");
 const backupError = ref("");
 const filteredLogs = computed(() =>
@@ -125,6 +127,7 @@ function activityLogSummary(log) {
 async function loadSettings() {
   try {
     const data = await api("/api/admin/settings");
+    userRole.value = data.role || "admin";
     setSettings(data.settings);
     activityLogs.value = data.activity_logs || [];
     newsLastSync.value = data.news_last_sync;
@@ -332,12 +335,6 @@ async function syncNow() {
   }
 }
 
-function selectBackup(event) {
-  backupFile.value = event.target.files?.[0] || null;
-  backupMessage.value = "";
-  backupError.value = "";
-}
-
 async function downloadBackup() {
   backingUp.value = true;
   backupMessage.value = "";
@@ -372,87 +369,6 @@ async function downloadBackup() {
   }
 }
 
-async function restoreBackup() {
-  if (!backupFile.value) {
-    backupError.value = t("请先选择数据库备份文件");
-    return;
-  }
-  if (
-    !window.confirm(
-      t("第一次确认：还原会覆盖当前数据库中的设置、节目和资料，确定继续吗？"),
-    )
-  )
-    return;
-  if (!window.confirm(t("第二次确认：还原后当前数据库会被替换，继续执行吗？")))
-    return;
-  restoring.value = true;
-  backupMessage.value = "";
-  backupError.value = "";
-  try {
-    const response = await fetch("/api/admin/backup/restore", {
-      method: "POST",
-      headers: { "Content-Type": "application/vnd.sqlite3" },
-      body: backupFile.value,
-      credentials: "same-origin",
-    });
-    const contentType = response.headers.get("content-type") || "";
-    const payload = contentType.includes("application/json")
-      ? await response.json()
-      : {};
-    if (!response.ok) {
-      if (response.status === 401) {
-        showError({ status: 401 });
-        return;
-      }
-      throw new Error(payload.detail || t("数据库还原失败"));
-    }
-    backupMessage.value = payload.message || t("数据库还原成功");
-    backupFile.value = null;
-    if (backupInput.value) backupInput.value.value = "";
-    await loadSettings();
-  } catch (requestError) {
-    backupError.value = requestError.message || t("数据库还原失败");
-  } finally {
-    restoring.value = false;
-  }
-}
-
-async function restoreStoredBackup(backup) {
-  if (restoringBackupName.value) return;
-  if (
-    !window.confirm(
-      t("第一次确认：确定还原备份「{filename}」吗？当前数据库会被替换。", {
-        filename: backup.filename,
-      }),
-    )
-  )
-    return;
-  if (
-    !window.confirm(
-      t("第二次确认：还原「{filename}」不可自动撤销，继续执行吗？", {
-        filename: backup.filename,
-      }),
-    )
-  )
-    return;
-  restoringBackupName.value = backup.filename;
-  backupMessage.value = "";
-  backupError.value = "";
-  try {
-    const data = await api(
-      `/api/admin/backups/${encodeURIComponent(backup.filename)}/restore`,
-      { method: "POST" },
-    );
-    backupMessage.value = data.message || t("数据库还原成功");
-    await loadSettings();
-  } catch (requestError) {
-    if (requestError.status === 401) showError(requestError);
-    else backupError.value = requestError.message || t("数据库还原失败");
-  } finally {
-    restoringBackupName.value = "";
-  }
-}
-
 async function logout() {
   await api("/api/auth/logout", { method: "POST" });
   router.replace("/");
@@ -467,9 +383,13 @@ onMounted(loadSettings);
       <div class="settings-heading">
         <div>
           <p class="eyebrow">CONTROL ROOM / 01</p>
-          <h1>{{ t("运行设置") }}</h1>
+          <h1>{{ editorMode ? t("编辑者控制台") : t("运行设置") }}</h1>
           <p class="settings-intro">
-            {{ t("调整同步节奏、通知出口与本地档案的维护方式。") }}
+            {{
+              editorMode
+                ? t("编辑者只能管理节目和联动，数据库仅支持下载。")
+                : t("调整同步节奏、通知出口与本地档案的维护方式。")
+            }}
           </p>
         </div>
         <div class="settings-heading-actions">
@@ -485,7 +405,7 @@ onMounted(loadSettings);
         <div class="settings-workspace">
           <nav class="settings-directory" :aria-label="t('设置目录')">
             <RouterLink
-              v-for="item in sections"
+              v-for="item in visibleSections"
               :key="item.id"
               :to="{
                 path: '/admin',
@@ -514,6 +434,7 @@ onMounted(loadSettings);
               </button>
             </div>
             <form
+              v-if="!editorMode"
               v-show="section === 'music'"
               class="settings-card"
               @submit.prevent="saveSettings"
@@ -571,6 +492,7 @@ onMounted(loadSettings);
               </div>
             </form>
             <form
+              v-if="!editorMode"
               v-show="section === 'bot'"
               class="settings-card bot-settings-card"
               @submit.prevent="saveSettings"
@@ -619,6 +541,7 @@ onMounted(loadSettings);
               </div>
             </form>
             <section
+              v-if="!editorMode"
               v-show="section === 'news'"
               class="settings-card news-monitor-card"
             >
@@ -772,6 +695,7 @@ onMounted(loadSettings);
               </div>
             </section>
             <form
+              v-if="!editorMode"
               v-show="section === 'account'"
               class="settings-card password-form"
               @submit.prevent="changePassword"
@@ -912,13 +836,13 @@ onMounted(loadSettings);
                 <span class="form-number">06</span>
                 <div>
                   <p class="form-kicker">DATA SAFETY</p>
-                  <h2>{{ t("数据库备份与还原") }}</h2>
+                  <h2>{{ t("数据库备份") }}</h2>
                 </div>
               </div>
               <p class="muted">
                 {{
                   t(
-                    "备份包含设置、节目、音乐、新闻、联动及其图片路径，不包含图片文件。每天自动备份 SQLite，最多保留 30 份；不会备份整卷图库。",
+                    "数据库仅支持下载，不支持上传覆盖；备份包含设置、节目、音乐、新闻、联动及其图片路径，不包含图片文件。每天自动备份 SQLite，最多保留 30 份。",
                   )
                 }}
               </p>
@@ -932,26 +856,7 @@ onMounted(loadSettings);
                 >
                   {{ backingUp ? t("准备中……") : t("下载数据库备份") }}
                 </button>
-                <label class="backup-file"
-                  >{{ t("选择备份文件")
-                  }}<input
-                    ref="backupInput"
-                    type="file"
-                    accept=".sqlite3,.sqlite,.db"
-                    @change="selectBackup"
-                /></label>
-                <button
-                  type="button"
-                  class="secondary"
-                  :disabled="restoring || !backupFile"
-                  @click="restoreBackup"
-                >
-                  {{ restoring ? t("还原中……") : t("还原所选备份") }}
-                </button>
               </div>
-              <small v-if="backupFile"
-                >{{ t("已选择：") }}{{ backupFile.name }}</small
-              >
               <div class="backup-list-heading">
                 <div>
                   <strong>{{ t("已保存的数据库备份") }}</strong
@@ -990,18 +895,7 @@ onMounted(loadSettings);
                       class="secondary backup-list-button"
                       :href="backupDownloadPath(backup.filename)"
                       >{{ t("下载") }}</a
-                    ><button
-                      type="button"
-                      class="danger backup-list-button"
-                      :disabled="restoringBackupName === backup.filename"
-                      @click="restoreStoredBackup(backup)"
                     >
-                      {{
-                        restoringBackupName === backup.filename
-                          ? t("还原中……")
-                          : t("还原")
-                      }}
-                    </button>
                   </div>
                 </li>
               </ol>

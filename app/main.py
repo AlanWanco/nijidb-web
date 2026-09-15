@@ -10,9 +10,7 @@ import mimetypes
 import re
 import os
 import secrets
-import shutil
 import sqlite3
-import tempfile
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -102,8 +100,10 @@ NEWS_ARCHIVE_DEFAULT = Path("/Volumes/SSK/Download/bangumi-parser/ll-offical-sit
 NEWS_ARCHIVE_DIR = Path(os.getenv("NEWS_ARCHIVE_DIR", str(NEWS_ARCHIVE_DEFAULT if NEWS_ARCHIVE_DEFAULT.is_dir() else MEDIA_DIR / "news-archive")))
 NEWS_RUNTIME_DIR = MEDIA_DIR / "news"
 PASSWORD_ITERATIONS = 310_000
-BACKUP_MAX_BYTES = 32 * 1024 * 1024
 BACKUP_RETENTION_COUNT = 30
+ADMIN_ROLE = "admin"
+EDITOR_ROLE = "editor"
+EDITOR_USERNAME = "editor"
 PROGRAM_JSON_FORMAT = "nijidb-program"
 PROGRAM_JSON_VERSION = 5
 PROGRAM_IMPORT_MAX_OCCURRENCES = 2000
@@ -237,65 +237,6 @@ def resolve_database_backup(filename: str) -> Path:
     if not path.is_file():
         raise FileNotFoundError(filename)
     return path
-
-
-def validate_database_backup(path: Path) -> None:
-    connection = sqlite3.connect(path)
-    try:
-        integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
-        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    finally:
-        connection.close()
-    required_tables = {"settings", "releases", "sync_log"}
-    if integrity != "ok":
-        raise ValueError("数据库完整性校验失败")
-    if not required_tables.issubset(tables):
-        raise ValueError("备份文件不是 Nijidb 数据库")
-
-
-def remove_database_sidecars() -> None:
-    remove_file(Path(f"{DB_PATH}-wal"))
-    remove_file(Path(f"{DB_PATH}-shm"))
-
-
-def restore_database_file(source_path: Path) -> None:
-    handle, raw_path = tempfile.mkstemp(prefix=".nijidb-restore-", suffix=".sqlite3", dir=DB_PATH.parent)
-    os.close(handle)
-    restore_path = Path(raw_path)
-    try:
-        shutil.copyfile(source_path, restore_path)
-        os.chmod(restore_path, 0o600)
-        remove_database_sidecars()
-        os.replace(restore_path, DB_PATH)
-    finally:
-        remove_file(restore_path)
-
-
-async def save_backup_upload(request: Request) -> Path:
-    content_length = request.headers.get("content-length", "")
-    try:
-        if content_length and int(content_length) > BACKUP_MAX_BYTES:
-            raise HTTPException(413, "备份文件不能超过 32 MB")
-    except ValueError:
-        pass
-
-    handle, raw_path = tempfile.mkstemp(prefix=".nijidb-upload-", suffix=".sqlite3", dir=DB_PATH.parent)
-    os.close(handle)
-    upload_path = Path(raw_path)
-    total = 0
-    try:
-        with upload_path.open("wb") as target:
-            async for chunk in request.stream():
-                total += len(chunk)
-                if total > BACKUP_MAX_BYTES:
-                    raise HTTPException(413, "备份文件不能超过 32 MB")
-                target.write(chunk)
-        if total == 0:
-            raise HTTPException(400, "请选择有效的数据库备份文件")
-        return upload_path
-    except BaseException:
-        remove_file(upload_path)
-        raise
 
 
 def hash_password(password: str) -> str:
@@ -615,6 +556,12 @@ def init_db() -> None:
         }
         for key, value in defaults.items():
             conn.execute("INSERT OR IGNORE INTO settings VALUES (?, ?)", (key, value))
+        if not conn.execute("SELECT 1 FROM settings WHERE key = 'editor_password_hash'").fetchone():
+            admin_hash = conn.execute("SELECT value FROM settings WHERE key = 'admin_password_hash'").fetchone()[0]
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('editor_password_hash', ?)",
+                (admin_hash,),
+            )
         individual_time_migration_key = "program_individual_time_migration_v1"
         if not conn.execute("SELECT 1 FROM settings WHERE key = ?", (individual_time_migration_key,)).fetchone():
             # The previous migration cleared individual period times. Restore the
@@ -646,6 +593,7 @@ def settings() -> dict[str, str]:
 def public_settings() -> dict[str, str]:
     values = settings()
     values.pop("admin_password_hash", None)
+    values.pop("editor_password_hash", None)
     return values
 
 
@@ -708,9 +656,26 @@ def recent_database_logs(limit: int = 20) -> list[dict[str, Any]]:
     return logs[:limit]
 
 
-def admin_cookie_value(password_hash: str) -> str:
+def configured_admin_username() -> str:
+    return str(os.getenv("ADMIN_USERNAME", "admin") or "admin").strip() or "admin"
+
+
+def auth_cookie_value(username: str, password_hash: str) -> str:
+    secret = os.getenv("ADMIN_SECRET", "change-me")
+    return hmac.new(secret.encode(), f"nijidb:{username}:{password_hash}".encode(), hashlib.sha256).hexdigest()
+
+
+def legacy_admin_cookie_value(password_hash: str) -> str:
     secret = os.getenv("ADMIN_SECRET", "change-me")
     return hmac.new(secret.encode(), f"admin:{password_hash}".encode(), hashlib.sha256).hexdigest()
+
+
+def admin_cookie_value(password_hash: str) -> str:
+    return auth_cookie_value(configured_admin_username(), password_hash)
+
+
+def editor_cookie_value(password_hash: str) -> str:
+    return auth_cookie_value(EDITOR_USERNAME, password_hash)
 
 
 def decode_json(value: str | None, fallback: Any) -> Any:
@@ -3051,19 +3016,71 @@ def eventernote_event_payload(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def admin_cookie(request: Request) -> bool:
+def authenticated_role(request: Request) -> str | None:
     raw = request.cookies.get("nijidb_admin", "")
-    expected = admin_cookie_value(settings().get("admin_password_hash", ""))
-    return bool(raw and hmac.compare_digest(raw, expected))
+    if not raw:
+        return None
+    values = settings()
+    candidates = (
+        (ADMIN_ROLE, configured_admin_username(), values.get("admin_password_hash", "")),
+        (EDITOR_ROLE, EDITOR_USERNAME, values.get("editor_password_hash", "")),
+    )
+    for role, username, password_hash in candidates:
+        if password_hash and hmac.compare_digest(raw, auth_cookie_value(username, password_hash)):
+            return role
+    # Accept an existing administrator cookie until the next login/password change.
+    admin_hash = values.get("admin_password_hash", "")
+    if admin_hash and hmac.compare_digest(raw, legacy_admin_cookie_value(admin_hash)):
+        return ADMIN_ROLE
+    return None
 
 
-def require_api_admin(request: Request) -> None:
-    if not admin_cookie(request):
+def admin_cookie(request: Request) -> bool:
+    return authenticated_role(request) is not None
+
+
+def editor_request_allowed(request: Request) -> bool:
+    path = request.url.path
+    method = request.method.upper()
+    if path == "/api/admin/settings":
+        return method == "GET"
+    if path == "/api/admin/backup":
+        return method == "GET"
+    if path == "/api/admin/backups":
+        return method == "GET"
+    if path.startswith("/api/admin/backups/") and path.endswith("/download"):
+        return method == "GET"
+    if path == "/api/admin/program-json-template":
+        return True
+    if path == "/api/admin/programs" or path.startswith("/api/admin/programs/"):
+        return True
+    if path == "/api/admin/collabo" or path.startswith("/api/admin/collabo/"):
+        return True
+    return False
+
+
+def require_api_admin(request: Request) -> str:
+    role = authenticated_role(request)
+    if role is None:
         raise HTTPException(401, "需要管理员登录")
+    if role == EDITOR_ROLE and not editor_request_allowed(request):
+        raise HTTPException(403, "编辑者只能管理节目、联动或下载数据库")
+    return role
+
+
+def set_auth_cookie(response: JSONResponse, role: str) -> None:
+    values = settings()
+    if role == EDITOR_ROLE:
+        username = EDITOR_USERNAME
+        password_hash = values.get("editor_password_hash", "")
+    else:
+        username = configured_admin_username()
+        password_hash = values.get("admin_password_hash", "")
+    response.set_cookie("nijidb_admin", auth_cookie_value(username, password_hash), httponly=True, samesite="strict")
 
 
 def set_admin_cookie(response: JSONResponse) -> None:
-    response.set_cookie("nijidb_admin", admin_cookie_value(settings().get("admin_password_hash", "")), httponly=True, samesite="strict")
+    set_auth_cookie(response, ADMIN_ROLE)
 
 
 def normalized_settings(values: dict[str, Any]) -> dict[str, str]:
@@ -5151,8 +5168,15 @@ async def api_program_detail(program_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/auth/session")
-async def api_session(request: Request) -> dict[str, bool]:
-    return {"authenticated": admin_cookie(request)}
+async def api_session(request: Request) -> dict[str, Any]:
+    role = authenticated_role(request)
+    return {
+        "authenticated": role is not None,
+        "role": role,
+        "username": (
+            configured_admin_username() if role == ADMIN_ROLE else EDITOR_USERNAME if role == EDITOR_ROLE else None
+        ),
+    }
 
 
 @app.post("/api/auth/login")
@@ -5165,9 +5189,25 @@ async def api_login(request: Request) -> JSONResponse:
         raise HTTPException(400, "请求格式无效")
     username = str(payload.get("username", ""))
     password = str(payload.get("password", ""))
-    if hmac.compare_digest(username, os.getenv("ADMIN_USERNAME", "admin")) and verify_password(password, settings().get("admin_password_hash", "")):
-        response = JSONResponse({"authenticated": True})
-        set_admin_cookie(response)
+    values = settings()
+    role = None
+    if hmac.compare_digest(username, configured_admin_username()) and verify_password(
+        password, values.get("admin_password_hash", "")
+    ):
+        role = ADMIN_ROLE
+    elif hmac.compare_digest(username, EDITOR_USERNAME) and verify_password(
+        password, values.get("editor_password_hash", "")
+    ):
+        role = EDITOR_ROLE
+    if role:
+        response = JSONResponse(
+            {
+                "authenticated": True,
+                "role": role,
+                "username": configured_admin_username() if role == ADMIN_ROLE else EDITOR_USERNAME,
+            }
+        )
+        set_auth_cookie(response, role)
         return response
     raise HTTPException(401, "账号或密码错误")
 
@@ -5181,7 +5221,16 @@ async def api_logout() -> JSONResponse:
 
 @app.get("/api/admin/settings")
 async def api_get_settings(request: Request) -> dict[str, Any]:
-    require_api_admin(request)
+    role = require_api_admin(request)
+    if role == EDITOR_ROLE:
+        return {
+            "role": role,
+            "settings": {},
+            "activity_logs": recent_database_logs(200),
+            "news_last_sync": None,
+            "news_syncing": False,
+            "news_slow_refresh": None,
+        }
     with db() as conn:
         news_last = news_sync_status(conn)
         slow_refresh = news_slow_refresh_status(conn)
@@ -5191,6 +5240,7 @@ async def api_get_settings(request: Request) -> dict[str, Any]:
         normalized_settings(config)["news_slow_refresh_delay_seconds"]
     )
     return {
+        "role": role,
         "settings": public_settings(),
         "activity_logs": recent_database_logs(200),
         "news_last_sync": news_last,
@@ -5242,24 +5292,6 @@ async def api_admin_news_slow_refresh_retry(request: Request) -> dict[str, Any]:
         )
         status = news_slow_refresh_status(conn)
     return {"reset_count": result.rowcount, "news_slow_refresh": status}
-
-
-async def restore_validated_database(source_path: Path) -> dict[str, str]:
-    async with sync_lock:
-        rollback_path = create_persistent_database_backup("before-restore")
-        try:
-            restore_database_file(source_path)
-            init_db()
-            remove_file(COVER_CACHE_VERSION_PATH)
-        except Exception as exc:
-            try:
-                restore_database_file(rollback_path)
-                init_db()
-            except Exception as rollback_error:
-                print(f"[backup] rollback failed: {type(rollback_error).__name__}", flush=True)
-            raise HTTPException(500, "数据库还原失败，原数据库已保留") from exc
-    print("[backup] database restored", flush=True)
-    return {"message": "数据库还原成功，下一次同步会重新检查封面缓存"}
 
 
 @app.post("/api/admin/news/sync")
@@ -5871,17 +5903,7 @@ async def api_download_stored_backup(filename: str, request: Request) -> FileRes
 @app.post("/api/admin/backups/{filename}/restore")
 async def api_restore_stored_backup(filename: str, request: Request) -> dict[str, str]:
     require_api_admin(request)
-    try:
-        backup_path = resolve_database_backup(filename)
-    except FileNotFoundError as exc:
-        raise HTTPException(404, "数据库备份不存在") from exc
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    try:
-        validate_database_backup(backup_path)
-    except (OSError, sqlite3.DatabaseError, ValueError) as exc:
-        raise HTTPException(400, "数据库备份文件无效") from exc
-    return await restore_validated_database(backup_path)
+    raise HTTPException(403, "数据库仅支持下载，不支持上传覆盖")
 
 
 @app.get("/api/admin/backup")
@@ -5895,16 +5917,7 @@ async def api_download_backup(request: Request) -> FileResponse:
 @app.post("/api/admin/backup/restore")
 async def api_restore_backup(request: Request) -> dict[str, str]:
     require_api_admin(request)
-    upload_path = await save_backup_upload(request)
-    try:
-        try:
-            validate_database_backup(upload_path)
-        except (OSError, sqlite3.DatabaseError, ValueError) as exc:
-            raise HTTPException(400, "数据库备份文件无效") from exc
-
-        return await restore_validated_database(upload_path)
-    finally:
-        remove_file(upload_path)
+    raise HTTPException(403, "数据库仅支持下载，不支持上传覆盖")
 
 
 @app.post("/api/admin/test-onebot")

@@ -26,7 +26,28 @@ const router = useRouter();
 const route = useRoute();
 const programs = ref([]);
 const programSearch = ref("");
-const programCastFilter = ref([]);
+
+function queryValues(value) {
+  return (Array.isArray(value) ? value : [value])
+    .flatMap(item => String(item || "").split(","))
+    .map(item => item.trim())
+    .filter(Boolean);
+}
+
+function castValuesFromQuery(value) {
+  const names = [];
+  queryValues(value).forEach(name => {
+    const member = NIJIGASAKI_CAST.find(item => [item.name, ...item.aliases].includes(name));
+    if (member && !names.includes(member.name)) names.push(member.name);
+  });
+  return names;
+}
+
+function sameValues(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+const programCastFilter = ref(castValuesFromQuery(route.query.cast));
 const programCastFilterDetails = ref(null);
 const programCastFilterOpen = ref(false);
 const editingId = ref("");
@@ -611,6 +632,18 @@ function nextPanel() {
 }
 
 watch([message, error], scheduleToastDismiss);
+
+watch(() => route.query.cast, value => {
+  const nextFilter = castValuesFromQuery(value);
+  if (!sameValues(programCastFilter.value, nextFilter)) programCastFilter.value = nextFilter;
+});
+
+watch(programCastFilter, value => {
+  const nextQuery = { ...route.query };
+  if (value.length && !allProgramCastSelected.value) nextQuery.cast = value.join(",");
+  else delete nextQuery.cast;
+  if (JSON.stringify(nextQuery) !== JSON.stringify(route.query)) router.replace({ path: route.path, query: nextQuery });
+}, { deep: true });
 
 watch(() => occurrenceBody(), () => {
   if (occurrenceDraftHydrating || !occurrenceAutoSaveEnabled.value) return;

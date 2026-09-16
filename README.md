@@ -144,3 +144,13 @@ docker run -d --name nijidb-web --restart unless-stopped -p 8000:8000 \
 容器启动后会立即检查 `cd.php`；之后异步检查 `cd_detail.php`，封面会下载到 `/data/images`，页面由镜像内的 Vue `dist` 提供。新宿主机使用全新的 `nijidb-data` 时会重新建立数据库并抓取资料；迁移旧卷时会保留已有资料和已经修改过的管理员密码。抓取能否成功取决于新宿主机的 DNS、HTTPS 出站网络和目标站点对该出口 IP 的访问限制。
 
 如果 OneBot 跑在宿主机而不是另一个容器内，OneBot 地址不要填写容器内的 `127.0.0.1`：Docker Desktop 通常使用 `http://host.docker.internal:端口`，Linux 则使用宿主机网关地址或把两个容器加入同一个 Docker network。
+
+---
+
+## 支持作者
+
+如果这个项目对你有帮助，欢迎请我喝杯咖啡 ☕️
+
+<p align="center">
+  <img src="./docs/buy-me-a-coffee.png" alt="Buy me a coffee" width="580">
+</p>

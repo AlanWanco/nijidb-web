@@ -63,8 +63,8 @@ async function assertHeroFont(page, path, selector, expectedFamily) {
   await title.waitFor();
   const details = await title.evaluate(async (element) => {
     await Promise.all([
-      document.fonts.load('800 60px "Logo SC Unbounded Sans"'),
-      document.fonts.load('800 60px "Dela Gothic One"'),
+      document.fonts.load('800 60px "Logo SC Unbounded Sans"', element.textContent),
+      document.fonts.load('800 60px "Dela Gothic One"', element.textContent),
     ]);
     return {
       family: getComputedStyle(element).fontFamily,
@@ -77,6 +77,29 @@ async function assertHeroFont(page, path, selector, expectedFamily) {
   assert.equal(details.logoLoaded, true);
   assert.equal(details.delaLoaded, true);
   return details;
+}
+
+async function assertTitleGlyphCoverage(page, cdp, selector, expectedText, expectedFamily) {
+  const title = page.locator(selector);
+  assert.equal((await title.textContent()).trim(), expectedText);
+  const documentNode = await cdp.send("DOM.getDocument");
+  const node = await cdp.send("DOM.querySelector", {
+    nodeId: documentNode.root.nodeId,
+    selector,
+  });
+  assert.notEqual(node.nodeId, 0);
+  const platformFonts = (await cdp.send("CSS.getPlatformFontsForNode", { nodeId: node.nodeId })).fonts;
+  const normalizeFamily = (value) => String(value || "").replace(/\s/g, "");
+  const customFont = platformFonts.find(
+    (font) => font.isCustomFont && normalizeFamily(font.familyName) === normalizeFamily(expectedFamily),
+  );
+  assert.ok(customFont, `${expectedText} did not use ${expectedFamily}: ${JSON.stringify(platformFonts)}`);
+  assert.equal(customFont.glyphCount, [...expectedText].length);
+  assert.equal(
+    platformFonts.filter((font) => !font.isCustomFont && font.glyphCount > 0).length,
+    0,
+    `${expectedText} still uses a fallback font: ${JSON.stringify(platformFonts)}`,
+  );
 }
 
 (async () => {
@@ -99,6 +122,9 @@ async function assertHeroFont(page, path, selector, expectedFamily) {
     });
     await setup(context);
     const page = await context.newPage();
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("DOM.enable");
+    await cdp.send("CSS.enable");
     const fontRequests = [];
     page.on("request", request => {
       if (request.url().includes("/assets/fonts/")) fontRequests.push(request.url());
@@ -114,12 +140,16 @@ async function assertHeroFont(page, path, selector, expectedFamily) {
       const details = await assertHeroFont(page, path, selector, "Logo SC Unbounded Sans");
       assert.equal(details.lang, "zh-CN");
     }
+    await assertHeroFont(page, "/programs/archive", ".programs-topline h1", "Logo SC Unbounded Sans");
+    await assertTitleGlyphCoverage(page, cdp, ".programs-topline h1", "节目列表", "Logo SC Unbounded Sans");
 
     await page.evaluate(() => localStorage.setItem("locale", "ja"));
     for (const [path, selector] of heroes) {
       const details = await assertHeroFont(page, path, selector, "Dela Gothic One");
       assert.equal(details.lang, "ja-JP");
     }
+    await assertHeroFont(page, "/programs/archive", ".programs-topline h1", "Dela Gothic One");
+    await assertTitleGlyphCoverage(page, cdp, ".programs-topline h1", "番組一覧", "Dela Gothic One");
     assert.equal(fontRequests.some(url => url.endsWith("LogoSCUnboundedSans-hero.woff2")), true);
     assert.equal(fontRequests.some(url => url.endsWith("DelaGothicOne-hero.woff2")), true);
     assert.equal(fontRequests.some(url => /\.(?:otf|ttf)(?:$|\?)/i.test(url)), false);

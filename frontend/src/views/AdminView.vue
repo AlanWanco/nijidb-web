@@ -75,6 +75,10 @@ const newsSlowRetrying = ref(false);
 const externalApiDocs = ref(null);
 const externalApiLoading = ref(false);
 const externalApiPage = ref(0);
+const externalApiKeyGenerating = ref(false);
+const externalApiGeneratedKey = ref("");
+const externalApiCopyStatus = ref("");
+let externalApiCopyTimer = null;
 const activityLogs = ref([]);
 const changingPassword = ref(false);
 const changingEditorPassword = ref(false);
@@ -113,7 +117,15 @@ watch(logPages, (value) => {
 watch(externalApiPages, (value) => {
   externalApiPage.value = Math.min(externalApiPage.value, Math.max(0, value - 1));
 });
+watch(externalApiPage, () => {
+  externalApiGeneratedKey.value = "";
+  externalApiCopyStatus.value = "";
+});
 watch(section, (value) => {
+  if (value !== "api") {
+    externalApiGeneratedKey.value = "";
+    externalApiCopyStatus.value = "";
+  }
   if (value === "database" && !loading.value) {
     loadBackups();
     refreshActivity();
@@ -205,6 +217,95 @@ async function loadExternalApiDocs() {
 
 function formatExternalApiExample(example) {
   return JSON.stringify(example || {}, null, 2);
+}
+
+function externalApiKeySourceLabel(resource) {
+  if (resource.key_source === "database") return t("管理员生成");
+  if (resource.key_source === "environment") return t("环境变量");
+  return t("未配置");
+}
+
+function externalApiKeyUpdatedLabel(resource) {
+  return resource.key_updated_at ? formatLocalDateTime(resource.key_updated_at) : "";
+}
+
+function updateExternalApiResource(resourceId, changes) {
+  externalApiDocs.value = {
+    ...externalApiDocs.value,
+    resources: externalApiDocs.value.resources.map((resource) =>
+      resource.id === resourceId ? { ...resource, ...changes } : resource,
+    ),
+  };
+}
+
+async function copyExternalApiText(value, target) {
+  if (!value) return;
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+    await navigator.clipboard.writeText(value);
+  } catch {
+    const fallback = document.createElement("textarea");
+    fallback.value = value;
+    fallback.style.position = "fixed";
+    fallback.style.opacity = "0";
+    document.body.appendChild(fallback);
+    fallback.focus();
+    fallback.select();
+    const copied = document.execCommand("copy");
+    fallback.remove();
+    if (!copied) {
+      error.value = t("复制失败");
+      return;
+    }
+  }
+  externalApiCopyStatus.value = target;
+  if (externalApiCopyTimer) window.clearTimeout(externalApiCopyTimer);
+  externalApiCopyTimer = window.setTimeout(() => {
+    externalApiCopyStatus.value = "";
+  }, 1800);
+}
+
+function copyExternalApiExample() {
+  return copyExternalApiText(
+    formatExternalApiExample(externalApiResource.value?.example),
+    "example",
+  );
+}
+
+function copyExternalApiKey() {
+  return copyExternalApiText(externalApiGeneratedKey.value, "key");
+}
+
+async function generateExternalApiKey() {
+  const resource = externalApiResource.value;
+  if (!resource || externalApiKeyGenerating.value) return;
+  if (
+    resource.configured &&
+    !window.confirm(t("轮换将立即使现有密钥失效，继续吗？"))
+  ) {
+    return;
+  }
+  externalApiKeyGenerating.value = true;
+  message.value = "";
+  error.value = "";
+  try {
+    const response = await api(
+      `/api/admin/external-api-keys/${encodeURIComponent(resource.id)}`,
+      { method: "POST" },
+    );
+    externalApiGeneratedKey.value = response.key || "";
+    externalApiCopyStatus.value = "";
+    updateExternalApiResource(resource.id, {
+      configured: true,
+      key_source: "database",
+      key_updated_at: response.updated_at,
+    });
+    message.value = t("密钥已生成，请立即复制");
+  } catch (requestError) {
+    showError(requestError);
+  } finally {
+    externalApiKeyGenerating.value = false;
+  }
 }
 
 async function refreshActivity() {
@@ -966,7 +1067,7 @@ onMounted(loadSettings);
               <p class="muted">
                 {{
                   t(
-                    "供独立的外部更新器使用。四类资源分别使用独立 API Key；真实密钥只从服务器环境变量读取，不会在这里显示。",
+                    "供独立的外部更新器使用。四类资源分别使用独立 API Key；管理员生成的密钥会持久化到数据卷，明文只显示一次。",
                   )
                 }}
               </p>
@@ -1030,9 +1131,46 @@ onMounted(loadSettings);
                   <p class="external-api-description">
                     {{ externalApiResource.description }}
                   </p>
+                  <div class="external-api-key-management">
+                    <div>
+                      <span class="external-api-key-label">{{ t("密钥状态") }}</span>
+                      <strong>{{ externalApiKeySourceLabel(externalApiResource) }}</strong>
+                      <small v-if="externalApiKeyUpdatedLabel(externalApiResource)">
+                        {{ t("最近更新") }}：{{ externalApiKeyUpdatedLabel(externalApiResource) }}
+                      </small>
+                    </div>
+                    <button
+                      type="button"
+                      class="secondary"
+                      :disabled="externalApiKeyGenerating"
+                      @click="generateExternalApiKey"
+                    >
+                      {{
+                        externalApiKeyGenerating
+                          ? t("正在生成……")
+                          : externalApiResource.configured
+                            ? t("轮换密钥")
+                            : t("生成密钥")
+                      }}
+                    </button>
+                  </div>
                   <p class="external-api-key">
                     {{ t("密钥环境变量") }}：<code>{{ externalApiResource.key_env }}</code>
                   </p>
+                  <div v-if="externalApiGeneratedKey" class="external-api-secret">
+                    <div class="external-api-secret-heading">
+                      <strong>{{ t("新密钥（仅显示一次）") }}</strong>
+                      <button
+                        type="button"
+                        class="secondary external-api-copy-key"
+                        @click="copyExternalApiKey"
+                      >
+                        {{ externalApiCopyStatus === "key" ? t("已复制") : t("复制密钥") }}
+                      </button>
+                    </div>
+                    <code>{{ externalApiGeneratedKey }}</code>
+                    <small>{{ t("请立即复制；刷新或切换页面后不能再次读取。") }}</small>
+                  </div>
                   <h3>{{ t("请求字段") }}</h3>
                   <dl class="external-api-fields">
                     <div
@@ -1047,9 +1185,18 @@ onMounted(loadSettings);
                     </div>
                   </dl>
                   <h3>{{ t("请求示例") }}</h3>
-                  <pre class="external-api-example"><code>{{
-                    formatExternalApiExample(externalApiResource.example)
-                  }}</code></pre>
+                  <div class="external-api-code">
+                    <button
+                      type="button"
+                      class="secondary external-api-copy"
+                      @click="copyExternalApiExample"
+                    >
+                      {{ externalApiCopyStatus === "example" ? t("已复制") : t("复制示例") }}
+                    </button>
+                    <pre class="external-api-example"><code>{{
+                      formatExternalApiExample(externalApiResource.example)
+                    }}</code></pre>
+                  </div>
                 </article>
               </template>
             </section>

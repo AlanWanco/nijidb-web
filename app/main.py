@@ -87,6 +87,15 @@ REMOTE_NEWS_INGEST_API_KEY_ENV = "NIJIDB_INGEST_API_KEY"
 REMOTE_MUSIC_INGEST_API_KEY_ENV = "NIJIDB_MUSIC_INGEST_API_KEY"
 REMOTE_PROGRAM_INGEST_API_KEY_ENV = "NIJIDB_PROGRAM_INGEST_API_KEY"
 REMOTE_COLLABO_INGEST_API_KEY_ENV = "NIJIDB_COLLABO_INGEST_API_KEY"
+EXTERNAL_INGEST_KEY_CONFIG = {
+    "music": {"label": "音乐", "env_name": REMOTE_MUSIC_INGEST_API_KEY_ENV},
+    "program": {"label": "节目", "env_name": REMOTE_PROGRAM_INGEST_API_KEY_ENV},
+    "collabo": {"label": "联动立绘", "env_name": REMOTE_COLLABO_INGEST_API_KEY_ENV},
+    "news": {"label": "新闻", "env_name": REMOTE_NEWS_INGEST_API_KEY_ENV},
+}
+EXTERNAL_INGEST_RESOURCE_BY_ENV = {
+    config["env_name"]: resource for resource, config in EXTERNAL_INGEST_KEY_CONFIG.items()
+}
 REMOTE_MUSIC_INGEST_MAX_TRACKS = 2000
 REMOTE_MUSIC_INGEST_MAX_EXTRAS = 256
 REMOTE_PROGRAM_INGEST_MAX_SUBPROGRAMS = 128
@@ -374,6 +383,12 @@ def init_db() -> None:
     with db() as conn:
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS external_api_keys (
+          resource TEXT PRIMARY KEY,
+          key_hash TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS releases (
           id TEXT PRIMARY KEY, title TEXT NOT NULL, subtitle TEXT, artist TEXT,
           release_date TEXT, price TEXT, cover_url TEXT, detail_html TEXT NOT NULL,
@@ -4687,9 +4702,70 @@ async def read_manual_source_request(request: Request) -> tuple[dict[str, Any], 
     return payload, html
 
 
+def external_api_key_digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def external_api_key_config(resource: str) -> dict[str, str]:
+    config = EXTERNAL_INGEST_KEY_CONFIG.get(resource)
+    if not config:
+        raise HTTPException(404, "外部 API 资源不存在")
+    return config
+
+
+def external_api_key_record(resource: str) -> dict[str, str] | None:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT resource, key_hash, created_at, updated_at FROM external_api_keys WHERE resource = ?",
+            (resource,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def external_api_key_status(resource: str) -> dict[str, Any]:
+    config = external_api_key_config(resource)
+    stored = external_api_key_record(resource)
+    if stored:
+        return {"configured": True, "source": "database", "updated_at": stored["updated_at"]}
+    configured = bool(os.getenv(config["env_name"], "").strip())
+    return {
+        "configured": configured,
+        "source": "environment" if configured else "none",
+        "updated_at": None,
+    }
+
+
+def generate_external_api_key(resource: str) -> dict[str, Any]:
+    config = external_api_key_config(resource)
+    value = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        existing = conn.execute(
+            "SELECT created_at FROM external_api_keys WHERE resource = ?", (resource,)
+        ).fetchone()
+        conn.execute(
+            """INSERT INTO external_api_keys(resource, key_hash, created_at, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(resource) DO UPDATE SET
+                 key_hash = excluded.key_hash,
+                 updated_at = excluded.updated_at""",
+            (resource, external_api_key_digest(value), existing["created_at"] if existing else now, now),
+        )
+    log_database_activity("security", f"生成外部{config['label']} API 密钥")
+    return {"key": value, "created_at": existing["created_at"] if existing else now, "updated_at": now}
+
+
 def require_external_ingest_key(request: Request, env_name: str, resource_label: str) -> None:
-    expected = os.getenv(env_name, "").strip()
     supplied = str(request.headers.get("x-nijidb-api-key", "")).strip()
+    resource = EXTERNAL_INGEST_RESOURCE_BY_ENV.get(env_name)
+    stored = external_api_key_record(resource) if resource else None
+    if stored:
+        if len(supplied) <= 256 and supplied and hmac.compare_digest(
+            external_api_key_digest(supplied), stored["key_hash"]
+        ):
+            return
+        raise HTTPException(401, "API Key 无效")
+    expected = os.getenv(env_name, "").strip()
     if not expected:
         raise HTTPException(503, f"远程{resource_label}导入未配置")
     if len(supplied) > 256 or not supplied or not hmac.compare_digest(supplied, expected):
@@ -5218,11 +5294,15 @@ def remote_collabo_record(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def external_ingest_api_docs() -> dict[str, Any]:
+    key_statuses = {
+        resource: external_api_key_status(resource) for resource in EXTERNAL_INGEST_KEY_CONFIG
+    }
     return {
         "header": "X-Nijidb-API-Key",
         "content_type": "application/json",
         "notes": [
-            "每个资源使用独立的环境变量密钥；密钥不会通过网站接口返回。",
+            "每个资源使用独立密钥；管理员生成的密钥哈希保存在数据卷，明文只在生成或轮换时显示一次。",
+            "没有管理员生成的数据库密钥时，接口才使用对应环境变量中的密钥。",
             "请求只允许新增或按资源 ID 更新，不接受数据库文件、数据库路径或管理员 Cookie。",
             "图片应先由外部任务上传到当前实例的 R2，再把 public_url 写入请求；未归档图片可以保留 source_url。",
         ],
@@ -5233,7 +5313,9 @@ def external_ingest_api_docs() -> dict[str, Any]:
                 "method": "POST",
                 "path": "/api/ingest/music",
                 "key_env": REMOTE_MUSIC_INGEST_API_KEY_ENV,
-                "configured": bool(os.getenv(REMOTE_MUSIC_INGEST_API_KEY_ENV, "").strip()),
+                "configured": key_statuses["music"]["configured"],
+                "key_source": key_statuses["music"]["source"],
+                "key_updated_at": key_statuses["music"]["updated_at"],
                 "description": "提交单个音乐发行的完整快照；id 已存在时更新，不存在时新增。",
                 "fields": [
                     {"name": "release.id", "required": True, "description": "稳定的发行 ID，只能使用字母、数字、下划线和连字符。"},
@@ -5268,7 +5350,9 @@ def external_ingest_api_docs() -> dict[str, Any]:
                 "method": "POST",
                 "path": "/api/ingest/program",
                 "key_env": REMOTE_PROGRAM_INGEST_API_KEY_ENV,
-                "configured": bool(os.getenv(REMOTE_PROGRAM_INGEST_API_KEY_ENV, "").strip()),
+                "configured": key_statuses["program"]["configured"],
+                "key_source": key_statuses["program"]["source"],
+                "key_updated_at": key_statuses["program"]["updated_at"],
                 "description": "提交一个主节目组的完整 JSON 快照；主节目及子节目按来源 ID 幂等新增或更新。",
                 "fields": [
                     {"name": "program.id", "required": False, "description": "稳定的主节目来源 ID；存在时更新，不存在时按此 ID 新增。"},
@@ -5301,7 +5385,9 @@ def external_ingest_api_docs() -> dict[str, Any]:
                 "method": "POST",
                 "path": "/api/ingest/collabo",
                 "key_env": REMOTE_COLLABO_INGEST_API_KEY_ENV,
-                "configured": bool(os.getenv(REMOTE_COLLABO_INGEST_API_KEY_ENV, "").strip()),
+                "configured": key_statuses["collabo"]["configured"],
+                "key_source": key_statuses["collabo"]["source"],
+                "key_updated_at": key_statuses["collabo"]["updated_at"],
                 "description": "提交一个联动记录和可选的完整图片数组；推荐使用 source_id 保持外部来源幂等。",
                 "fields": [
                     {"name": "item.id", "required": False, "description": "已有记录的 16–64 位十六进制 ID。"},
@@ -5338,7 +5424,9 @@ def external_ingest_api_docs() -> dict[str, Any]:
                 "method": "POST",
                 "path": "/api/ingest/news",
                 "key_env": REMOTE_NEWS_INGEST_API_KEY_ENV,
-                "configured": bool(os.getenv(REMOTE_NEWS_INGEST_API_KEY_ENV, "").strip()),
+                "configured": key_statuses["news"]["configured"],
+                "key_source": key_statuses["news"]["source"],
+                "key_updated_at": key_statuses["news"]["updated_at"],
                 "description": "提交一篇已经解析的新闻；图片应先归档到 R2，再提交 public_url。",
                 "fields": [
                     {"name": "source / page_name / source_url", "required": True, "description": "来源类型、页面名称和受白名单限制的来源地址。"},
@@ -6248,6 +6336,24 @@ async def api_save_settings(request: Request) -> dict[str, dict[str, str]]:
 async def api_external_ingest_docs(request: Request) -> dict[str, Any]:
     require_admin_role(request)
     return external_ingest_api_docs()
+
+
+@app.post("/api/admin/external-api-keys/{resource}", include_in_schema=False)
+async def api_generate_external_api_key(resource: str, request: Request) -> JSONResponse:
+    require_admin_role(request)
+    config = external_api_key_config(resource)
+    generated = generate_external_api_key(resource)
+    response = JSONResponse(
+        {
+            "resource": resource,
+            "label": config["label"],
+            **generated,
+            "message": "密钥只在本次响应中显示，请立即复制到外部更新器。",
+        }
+    )
+    response.headers["Cache-Control"] = "no-store, no-cache"
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @app.post("/api/ingest/music", include_in_schema=False)

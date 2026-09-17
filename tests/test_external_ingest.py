@@ -181,6 +181,50 @@ class ExternalIngestApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item["title"], "更新后的联动")
         self.assertEqual(image["public_url"], payload["item"]["images"][0]["public_url"])
 
+    async def test_admin_can_generate_and_rotate_persistent_key(self):
+        self.login()
+        with patch.dict(os.environ, {"NIJIDB_MUSIC_INGEST_API_KEY": "legacy-env-key"}):
+            generated = await self.client.post("/api/admin/external-api-keys/music")
+            self.assertEqual(generated.status_code, 200, generated.text)
+            self.assertEqual(generated.headers.get("cache-control"), "no-store, no-cache")
+            first_key = generated.json()["key"]
+            self.assertGreaterEqual(len(first_key), 32)
+            with main.db() as conn:
+                stored = conn.execute(
+                    "SELECT key_hash FROM external_api_keys WHERE resource = 'music'"
+                ).fetchone()
+            self.assertEqual(stored["key_hash"], main.external_api_key_digest(first_key))
+            self.assertNotEqual(stored["key_hash"], first_key)
+
+            docs = await self.client.get("/api/admin/external-api-docs")
+            self.assertEqual(docs.status_code, 200, docs.text)
+            music_docs = next(item for item in docs.json()["resources"] if item["id"] == "music")
+            self.assertTrue(music_docs["configured"])
+            self.assertEqual(music_docs["key_source"], "database")
+            self.assertNotIn(first_key, docs.text)
+
+            accepted = await self.client.post(
+                "/api/ingest/music",
+                json=self.music_payload(),
+                headers={"X-Nijidb-API-Key": first_key},
+            )
+            self.assertEqual(accepted.status_code, 200, accepted.text)
+
+            rotated = await self.client.post("/api/admin/external-api-keys/music")
+            second_key = rotated.json()["key"]
+            rejected = await self.client.post(
+                "/api/ingest/music",
+                json=self.music_payload("旧密钥不应继续有效"),
+                headers={"X-Nijidb-API-Key": first_key},
+            )
+            accepted_new = await self.client.post(
+                "/api/ingest/music",
+                json=self.music_payload("新密钥仍然有效"),
+                headers={"X-Nijidb-API-Key": second_key},
+            )
+        self.assertEqual(rejected.status_code, 401)
+        self.assertEqual(accepted_new.status_code, 200, accepted_new.text)
+
     async def test_api_docs_are_admin_only_and_do_not_return_keys(self):
         self.assertEqual((await self.client.get("/api/admin/external-api-docs")).status_code, 401)
         self.login()

@@ -178,6 +178,62 @@
   font-size: 13px;
   line-height: 1.65;
 }
+.external-api-key-management {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 18px 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 13px 14px;
+  background: var(--surface-alt);
+}
+.external-api-key-management > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.external-api-key-label {
+  color: var(--muted);
+  font-size: 11px;
+}
+.external-api-key-management strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+.external-api-key-management small,
+.external-api-secret small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.external-api-secret {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0 20px;
+  border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--line));
+  border-radius: 12px;
+  padding: 13px 14px;
+  background: var(--accent-soft);
+}
+.external-api-secret-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.external-api-secret-heading strong {
+  color: var(--accent);
+  font-size: 12px;
+}
+.external-api-secret > code {
+  display: block;
+  overflow-wrap: anywhere;
+  user-select: all;
+  color: var(--ink);
+  font: 12px/1.5 var(--mono);
+}
 .external-api-resource h3 {
   margin: 24px 0 12px;
   font-size: 14px;
@@ -219,20 +275,37 @@
 .external-api-fields dd {
   color: var(--muted);
 }
+.external-api-code {
+  position: relative;
+  min-width: 0;
+}
 .external-api-example {
   max-height: 480px;
   overflow: auto;
   margin: 0;
   border: 1px solid var(--line);
   border-radius: 12px;
-  padding: 16px;
-  background: var(--ink);
-  color: var(--surface);
+  padding: 48px 16px 16px;
+  background: var(--surface-alt);
+  color: var(--muted);
   font: 11px/1.6 var(--mono);
   white-space: pre;
 }
 .external-api-example code {
   font: inherit;
+}
+.external-api-copy,
+.external-api-copy-key {
+  min-height: 31px;
+  padding: 6px 10px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.external-api-copy {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
 }
 .settings select,
 .settings textarea {
@@ -330,6 +403,20 @@
   }
   .external-api-status {
     margin-left: 0;
+  }
+  .external-api-key-management {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .external-api-key-management > button {
+    width: 100%;
+  }
+  .external-api-secret-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .external-api-copy-key {
+    width: 100%;
   }
   .external-api-fields > div {
     grid-template-columns: minmax(0, 1fr);

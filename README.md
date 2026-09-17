@@ -41,16 +41,16 @@ docker run --rm --mount source=nijidb-data,target=/data \
 
 ## 外部内容导入 API
 
-管理员设置页的“外部 API”分页提供四类接口的字段说明和 JSON 示例。接口统一使用 `X-Nijidb-API-Key` 请求头，但音乐、节目、联动立绘和新闻分别使用独立密钥环境变量：
+管理员设置页的“外部 API”分页提供四类接口的字段说明、JSON 示例和密钥生成入口。接口统一使用 `X-Nijidb-API-Key` 请求头，但音乐、节目、联动立绘和新闻分别使用独立密钥：
 
 - `POST /api/ingest/music`：`NIJIDB_MUSIC_INGEST_API_KEY`
 - `POST /api/ingest/program`：`NIJIDB_PROGRAM_INGEST_API_KEY`
 - `POST /api/ingest/collabo`：`NIJIDB_COLLABO_INGEST_API_KEY`
 - `POST /api/ingest/news`：`NIJIDB_INGEST_API_KEY`
 
-密钥不会通过网站接口返回。节目 API 接收完整主节目组 JSON，按 `program.id` 进行幂等新增或更新；联动 API 可使用稳定的 `source_id`，新闻 API 的图片需使用来源 URL，并只接受当前实例 R2 公开地址作为 `public_url`。所有接口都拒绝数据库文件、数据库路径和本地图片路径，单次 JSON 请求上限为 8 MB。
+管理员可在外部 API 页面为资源生成或轮换密钥：`POST /api/admin/external-api-keys/{music|program|collabo|news}`。生成响应只显示一次明文，数据卷中只保存哈希；镜像重建不会丢失，轮换会立即使旧密钥失效。没有管理员生成的数据库密钥时，接口才回退到对应环境变量。节目 API 接收完整主节目组 JSON，按 `program.id` 进行幂等新增或更新；联动 API 可使用稳定的 `source_id`，新闻 API 的图片需使用来源 URL，并只接受当前实例 R2 公开地址作为 `public_url`。所有接口都拒绝数据库文件、数据库路径和本地图片路径，单次 JSON 请求上限为 8 MB。
 
-外部更新器应把图片先上传到 R2，再提交对应资源；未归档的图片可以暂时保留原始 `source_url`。部署时将四个密钥分别注入 Web 容器，例如：
+外部更新器应把图片先上传到 R2，再提交对应资源；未归档的图片可以暂时保留原始 `source_url`。如果使用环境变量回退模式，部署时将四个密钥分别注入 Web 容器，例如：
 
 ```bash
 -e NIJIDB_MUSIC_INGEST_API_KEY='独立的音乐 API Key' \
@@ -118,7 +118,7 @@ uv run --locked python scripts/import_official_news.py \
 - 管理员设置页的“手动源代码”支持音乐目录和新闻详情：优先由当前浏览器直接请求官网，再把 HTML 送到 `POST /api/admin/source-html` 解析；服务器不做代理，也不接受任意外部 URL。浏览器受 CORS 限制时可选择保存的 HTML 文件或粘贴源代码，解析失败会保留旧资料。
 - `POST /api/admin/news/{id}/refresh` 手动刷新对应官网页面，支持历史来源。服务端检查管理员权限、官网 HTTPS 白名单、重定向与响应大小；失败保留旧内容，并返回 HTTP 状态、超时、网络或解析原因。
 - 编辑模式可以删除手动、归档和官网图片；来源图片删除会写入抑制记录，后续自动刷新不会悄悄恢复。图片按来源标识更新而非删除重建，保留图片 ID；正文或图片无变化不刷新 `updated_at`。保存新闻可传 `updated_at` 检测并发冲突，返回 409 时重新加载。
-- `/admin?section=music|news|source|bot|api|database|account` 分区设置；桌面左侧目录、手机顶部页签。外部 API 页按资源分页显示字段和示例，真实密钥不会回显。数据库页显示音乐/节目/新闻/联动最近 200 条变化记录，支持分类筛选和每页 15 条分页。`editor` 账号只能进入节目管理、联动管理和数据库下载；设置页其他分页、数据库上传与覆盖均不可用。
+- `/admin?section=music|news|source|bot|api|database|account` 分区设置；桌面左侧目录、手机顶部页签。外部 API 页按资源分页显示字段和示例，已有密钥不会回显；新生成或轮换的明文只显示一次。数据库页显示音乐/节目/新闻/联动最近 200 条变化记录，支持分类筛选和每页 15 条分页。`editor` 账号只能进入节目管理、联动管理和数据库下载；设置页其他分页、数据库上传与覆盖均不可用。
 - 新闻设置提供可选的慢速官方图床刷新队列：开启后按 5–60 秒间隔逐篇重新读取历史新闻，成功解析到官网图片后移除该篇归档图片引用但不删除本地备份文件；403、429、验证页等风控失败会记录页面并使用退避重试，也可以手动重新排队失败页面。默认关闭，避免新部署未经确认就请求官网。
 - 新闻摘要统一限制为 200 字；应用启动和后续导入/编辑时会自动截断超出的旧值。
 

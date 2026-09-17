@@ -1189,9 +1189,17 @@ onMounted(loadSettings);
                     <button
                       type="button"
                       class="secondary external-api-copy"
+                      :aria-label="externalApiCopyStatus === 'example' ? t('已复制') : t('复制示例')"
+                      :title="externalApiCopyStatus === 'example' ? t('已复制') : t('复制示例')"
                       @click="copyExternalApiExample"
                     >
-                      {{ externalApiCopyStatus === "example" ? t("已复制") : t("复制示例") }}
+                      <svg v-if="externalApiCopyStatus === 'example'" viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="m5 12 4 4L19 6"></path>
+                      </svg>
+                      <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+                        <rect x="8" y="8" width="11" height="11" rx="2"></rect>
+                        <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path>
+                      </svg>
                     </button>
                     <pre class="external-api-example"><code>{{
                       formatExternalApiExample(externalApiResource.example)

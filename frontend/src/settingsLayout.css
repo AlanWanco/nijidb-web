@@ -285,7 +285,7 @@
   margin: 0;
   border: 1px solid var(--line);
   border-radius: 12px;
-  padding: 48px 16px 16px;
+  padding: 48px 58px 16px 16px;
   background: var(--surface-alt);
   color: var(--muted);
   font: 11px/1.6 var(--mono);
@@ -304,8 +304,22 @@
 .external-api-copy {
   position: absolute;
   top: 8px;
-  right: 8px;
+  right: 24px;
   z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 32px;
+}
+.external-api-copy svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
 }
 .settings select,
 .settings textarea {

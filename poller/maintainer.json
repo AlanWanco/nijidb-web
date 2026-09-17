@@ -29,7 +29,7 @@
         "MIHOMO_SUB_STATE": "/state/subscription.json",
         "MIHOMO_CONTROLLER": "http://mihomo:9090",
         "MIHOMO_PROXY": "http://mihomo:7890",
-        "MIHOMO_GROUP_TYPE": "fallback",
+        "MIHOMO_GROUP_TYPE": "url-test",
         "MIHOMO_CN_DIRECT": "1",
         "MIHOMO_LISTENERS": "1"
       }

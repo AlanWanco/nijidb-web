@@ -28,6 +28,7 @@ DEFAULT_GROUP = "PROXY"
 DEFAULT_LISTENER_PORT_BASE = 7901
 # 组类型：select（固定选择）/ fallback（节点挂了自动换）/ url-test（自动选最快）
 GROUP_TYPES = ("select", "fallback", "url-test")
+DEFAULT_GROUP_TYPE = "url-test"
 
 
 class ConfigError(RuntimeError):
@@ -118,7 +119,7 @@ def render(
     group: str = DEFAULT_GROUP,
     listener_port_base: int = DEFAULT_LISTENER_PORT_BASE,
     listeners_enabled: bool = True,
-    group_type: str = "select",
+    group_type: str = DEFAULT_GROUP_TYPE,
     cn_direct: bool = False,
 ) -> str:
     """生成配置文本。

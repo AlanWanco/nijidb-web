@@ -23,6 +23,7 @@ from mihomo_config import (  # noqa: E402
     GROUP_TYPES,
     DEFAULT_DNS,
     DEFAULT_GROUP,
+    DEFAULT_GROUP_TYPE,
     DEFAULT_LISTENER_PORT_BASE,
     DEFAULT_PORT,
     ConfigError,
@@ -49,8 +50,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--group-type",
         choices=GROUP_TYPES,
-        default="select",
-        help="出口组类型：select（默认）/ fallback（节点故障自动切换）/ url-test",
+        default=DEFAULT_GROUP_TYPE,
+        help="出口组类型：select / fallback / url-test（默认自动择优）",
     )
     parser.add_argument("--cn-direct", action="store_true", help="国内与内网地址直连，其余走代理（通用客户端用）")
     parser.add_argument("--no-listeners", action="store_true", help="不生成 per-node 入口端口（只保留一个 mixed-port）")

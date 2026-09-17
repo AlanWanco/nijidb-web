@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from mihomo_config import (  # noqa: E402
     DEFAULT_CONTROLLER,
+    DEFAULT_GROUP_TYPE,
     GROUP_TYPES,
     read_node_list,
     select_exact,
@@ -99,10 +100,10 @@ class SubscriptionUpdater:
         self.controller_listen = os.getenv("MIHOMO_CONTROLLER_LISTEN", DEFAULT_CONTROLLER).strip()
         self.group = os.getenv("MIHOMO_GROUP", DEFAULT_GROUP).strip() or DEFAULT_GROUP
         self.dns = tuple(split_list("MIHOMO_DNS", ",".join(DEFAULT_DNS)))
-        self.group_type = os.getenv("MIHOMO_GROUP_TYPE", "select").strip() or "select"
+        self.group_type = os.getenv("MIHOMO_GROUP_TYPE", DEFAULT_GROUP_TYPE).strip() or DEFAULT_GROUP_TYPE
         if self.group_type not in GROUP_TYPES:
-            log(f"MIHOMO_GROUP_TYPE 不支持 {self.group_type}，改用 select")
-            self.group_type = "select"
+            log(f"MIHOMO_GROUP_TYPE 不支持 {self.group_type}，改用 {DEFAULT_GROUP_TYPE}")
+            self.group_type = DEFAULT_GROUP_TYPE
         self.cn_direct = os.getenv("MIHOMO_CN_DIRECT", "").strip().lower() in {"1", "true", "yes", "on"}
         self.listeners_enabled = os.getenv("MIHOMO_LISTENERS", "1").strip().lower() not in {"0", "false", "no", "off"}
 

@@ -100,7 +100,7 @@ docker network connect nijidb-poller_proxy <目标容器>
 #   NO_PROXY=localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.lan,host.docker.internal
 ```
 
-共享端口走规则：国内地址直连，其余经节点（`fallback` 组，节点失效自动切换）。
+共享端口走规则：国内地址直连，其余经节点（`url-test` 组，启动和重载后自动选择探测延迟较低且可用的节点）。
 
 ## 6. 定时任务
 

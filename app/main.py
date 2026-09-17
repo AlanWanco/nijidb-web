@@ -67,6 +67,7 @@ from app.news import (
 )
 from app.news_fetch import (
     NEWS_HEADERS,
+    OFFICIAL_BROWSER_HEADERS,
     describe_news_fetch_error,
     fetch_news_page,
     filter_news_images,
@@ -3321,8 +3322,7 @@ def sync_exception_label(exc: BaseException) -> str:
 async def scrape() -> list[dict[str, str]]:
     print(f"[sync] fetching {SOURCE_URL}", flush=True)
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
-        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+        **OFFICIAL_BROWSER_HEADERS,
         "Referer": "https://www.lovelive-anime.jp/nijigasaki/",
     }
     async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
@@ -4052,7 +4052,8 @@ async def sync_once() -> tuple[int, str | None]:
             refresh_ids = cover_refresh_ids(records)
             refresh_all = not cover_cache_is_current()
             image_headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
+                **OFFICIAL_BROWSER_HEADERS,
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
                 "Referer": SOURCE_URL,
             }
             image_errors = 0
@@ -4096,7 +4097,8 @@ async def refresh_deferred_once() -> tuple[int, str | None]:
                 return 0, None
             site_checked = True
             headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
+                **OFFICIAL_BROWSER_HEADERS,
+                "Accept": "application/json, text/plain, */*",
                 "Referer": SOURCE_URL,
                 "Content-Type": "application/json",
             }
@@ -4129,7 +4131,11 @@ async def refresh_deferred_once() -> tuple[int, str | None]:
             refreshed_cover_ids: set[str] = set()
             refresh_ids = cover_refresh_ids(records)
             refresh_all = not cover_cache_is_current()
-            image_headers = {"User-Agent": headers["User-Agent"], "Referer": SOURCE_URL}
+            image_headers = {
+                **OFFICIAL_BROWSER_HEADERS,
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                "Referer": SOURCE_URL,
+            }
             async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=image_headers) as image_client:
                 for item in records:
                     try:

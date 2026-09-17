@@ -13,6 +13,7 @@ const sections = [
   { id: "news", label: "新闻抓取设置" },
   { id: "source", label: "手动源代码" },
   { id: "bot", label: "Bot 设置" },
+  { id: "api", label: "外部 API" },
   { id: "database", label: "数据库" },
   { id: "account", label: "账号安全" },
 ];
@@ -71,6 +72,9 @@ const syncing = ref(false);
 const newsSyncing = ref(false);
 const newsSlowRefreshing = ref(false);
 const newsSlowRetrying = ref(false);
+const externalApiDocs = ref(null);
+const externalApiLoading = ref(false);
+const externalApiPage = ref(0);
 const activityLogs = ref([]);
 const changingPassword = ref(false);
 const changingEditorPassword = ref(false);
@@ -96,17 +100,25 @@ const logPages = computed(() =>
 const visibleLogs = computed(() =>
   filteredLogs.value.slice((logPage.value - 1) * 15, logPage.value * 15),
 );
+const externalApiPages = computed(() => externalApiDocs.value?.resources?.length || 0);
+const externalApiResource = computed(
+  () => externalApiDocs.value?.resources?.[externalApiPage.value] || null,
+);
 watch(logCategory, () => {
   logPage.value = 1;
 });
 watch(logPages, (value) => {
   logPage.value = Math.min(logPage.value, value);
 });
+watch(externalApiPages, (value) => {
+  externalApiPage.value = Math.min(externalApiPage.value, Math.max(0, value - 1));
+});
 watch(section, (value) => {
   if (value === "database" && !loading.value) {
     loadBackups();
     refreshActivity();
   }
+  if (value === "api" && !loading.value) loadExternalApiDocs();
 });
 const deviceTimeZone =
   Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -171,11 +183,28 @@ async function loadSettings() {
     newsLastSync.value = data.news_last_sync;
     newsSlowRefresh.value = data.news_slow_refresh || null;
     if (section.value === "database") await loadBackups();
+    if (section.value === "api" && !editorMode.value) await loadExternalApiDocs();
   } catch (requestError) {
     showError(requestError);
   } finally {
     loading.value = false;
   }
+}
+
+async function loadExternalApiDocs() {
+  if (externalApiLoading.value || externalApiDocs.value) return;
+  externalApiLoading.value = true;
+  try {
+    externalApiDocs.value = await api("/api/admin/external-api-docs");
+  } catch (requestError) {
+    showError(requestError);
+  } finally {
+    externalApiLoading.value = false;
+  }
+}
+
+function formatExternalApiExample(example) {
+  return JSON.stringify(example || {}, null, 2);
 }
 
 async function refreshActivity() {
@@ -918,6 +947,111 @@ onMounted(loadSettings);
                   {{ t("查看新闻页") }}
                 </button>
               </div>
+            </section>
+            <section
+              v-if="!editorMode"
+              v-show="section === 'api'"
+              class="settings-card external-api-card"
+            >
+              <div class="form-heading">
+                <span class="form-number">07</span>
+                <div>
+                  <p class="form-kicker">EXTERNAL INGEST API</p>
+                  <h2>{{ t("外部 API 文档") }}</h2>
+                </div>
+                <span v-if="externalApiPages" class="section-count"
+                  >{{ externalApiPage + 1 }} / {{ externalApiPages }}</span
+                >
+              </div>
+              <p class="muted">
+                {{
+                  t(
+                    "供独立的外部更新器使用。四类资源分别使用独立 API Key；真实密钥只从服务器环境变量读取，不会在这里显示。",
+                  )
+                }}
+              </p>
+              <p v-if="externalApiDocs" class="external-api-key">
+                {{ t("请求头") }}：<code>{{ externalApiDocs.header }}</code> ·
+                {{ t("内容类型") }}：<code>{{ externalApiDocs.content_type }}</code>
+              </p>
+              <ul v-if="externalApiDocs?.notes?.length" class="external-api-notes">
+                <li v-for="note in externalApiDocs.notes" :key="note">{{ note }}</li>
+              </ul>
+              <p v-if="externalApiLoading" class="state">
+                {{ t("正在读取 API 文档……") }}
+              </p>
+              <template v-else-if="externalApiResource">
+                <nav class="external-api-pagination" :aria-label="t('API 文档分页')">
+                  <button
+                    type="button"
+                    class="secondary"
+                    :disabled="externalApiPage <= 0"
+                    @click="externalApiPage--"
+                  >
+                    ← {{ t("上一页") }}
+                  </button>
+                  <div class="external-api-page-tabs" role="tablist">
+                    <button
+                      v-for="(resource, index) in externalApiDocs.resources"
+                      :key="resource.id"
+                      type="button"
+                      :class="{ selected: externalApiPage === index }"
+                      role="tab"
+                      :aria-selected="externalApiPage === index"
+                      @click="externalApiPage = index"
+                    >
+                      {{ resource.label }}
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    class="secondary"
+                    :disabled="externalApiPage >= externalApiPages - 1"
+                    @click="externalApiPage++"
+                  >
+                    {{ t("下一页") }} →
+                  </button>
+                </nav>
+                <article class="external-api-resource">
+                  <div class="external-api-endpoint">
+                    <span class="external-api-method">{{ externalApiResource.method }}</span>
+                    <code>{{ externalApiResource.path }}</code>
+                    <span
+                      class="external-api-status"
+                      :class="{ configured: externalApiResource.configured }"
+                    >
+                      {{
+                        externalApiResource.configured
+                          ? t("密钥已配置")
+                          : t("密钥未配置")
+                      }}
+                    </span>
+                  </div>
+                  <p class="external-api-description">
+                    {{ externalApiResource.description }}
+                  </p>
+                  <p class="external-api-key">
+                    {{ t("密钥环境变量") }}：<code>{{ externalApiResource.key_env }}</code>
+                  </p>
+                  <h3>{{ t("请求字段") }}</h3>
+                  <dl class="external-api-fields">
+                    <div
+                      v-for="field in externalApiResource.fields"
+                      :key="field.name"
+                    >
+                      <dt>
+                        <code>{{ field.name }}</code>
+                        <strong v-if="field.required">{{ t("必填") }}</strong>
+                      </dt>
+                      <dd>{{ field.description }}</dd>
+                    </div>
+                  </dl>
+                  <h3>{{ t("请求示例") }}</h3>
+                  <pre class="external-api-example"><code>{{
+                    formatExternalApiExample(externalApiResource.example)
+                  }}</code></pre>
+                </article>
+              </template>
             </section>
             <form
               v-if="!editorMode"

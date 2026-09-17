@@ -39,6 +39,26 @@ docker run --rm --mount source=nijidb-data,target=/data \
 
 `--rewrite-db` 会先在数据目录创建 SQLite 备份，再为发行、新闻和联动图片写入公开 R2 URL，同时改写发行详情 HTML。没有公开访问地址时可以省略该参数，仅执行图片上传。上传前会列出目标 prefix 的已有对象，按稳定 key 和文件大小跳过已存在文件，因此 SSH 断线或容器重启后可安全续传，不会从头重复上传；日志最后会报告新上传和跳过数量。确认数据库引用已同步后，可显式追加 `--delete-unused-news` 清理 R2 中未被数据库引用的 `news/` 与 `news-archive/` 对象（默认不会删除任何对象）。长任务应使用 detached 容器并通过 `docker logs -f <container>` 查看。后续同步只配置 Endpoint、Bucket 和 S3 凭证时，会自动把新封面上传到 R2；补充 `R2_PUBLIC_BASE_URL` 后，页面会优先读取 R2。正式迁移前可先运行 `uv run --locked python scripts/prepare_production_database.py --database /data/nijidb.sqlite3` 检查本地路径；确认新闻/联动 R2 URL 和发行 R2 改写都已就绪后，再追加 `--apply`。该脚本只清除 SQLite 本地路径、不删除本地备份文件，并会保留在线数据库备份。
 
+## 外部内容导入 API
+
+管理员设置页的“外部 API”分页提供四类接口的字段说明和 JSON 示例。接口统一使用 `X-Nijidb-API-Key` 请求头，但音乐、节目、联动立绘和新闻分别使用独立密钥环境变量：
+
+- `POST /api/ingest/music`：`NIJIDB_MUSIC_INGEST_API_KEY`
+- `POST /api/ingest/program`：`NIJIDB_PROGRAM_INGEST_API_KEY`
+- `POST /api/ingest/collabo`：`NIJIDB_COLLABO_INGEST_API_KEY`
+- `POST /api/ingest/news`：`NIJIDB_INGEST_API_KEY`
+
+密钥不会通过网站接口返回。节目 API 接收完整主节目组 JSON，按 `program.id` 进行幂等新增或更新；联动 API 可使用稳定的 `source_id`，新闻 API 的图片需使用来源 URL，并只接受当前实例 R2 公开地址作为 `public_url`。所有接口都拒绝数据库文件、数据库路径和本地图片路径，单次 JSON 请求上限为 8 MB。
+
+外部更新器应把图片先上传到 R2，再提交对应资源；未归档的图片可以暂时保留原始 `source_url`。部署时将四个密钥分别注入 Web 容器，例如：
+
+```bash
+-e NIJIDB_MUSIC_INGEST_API_KEY='独立的音乐 API Key' \
+-e NIJIDB_PROGRAM_INGEST_API_KEY='独立的节目 API Key' \
+-e NIJIDB_COLLABO_INGEST_API_KEY='独立的联动 API Key' \
+-e NIJIDB_INGEST_API_KEY='现有的新闻 API Key'
+```
+
 ## 开发调试
 
 后端和前端分开启动，Vue 页面由 Vite 提供热更新，修改前端组件或样式时不需要重启服务：
@@ -98,7 +118,7 @@ uv run --locked python scripts/import_official_news.py \
 - 管理员设置页的“手动源代码”支持音乐目录和新闻详情：优先由当前浏览器直接请求官网，再把 HTML 送到 `POST /api/admin/source-html` 解析；服务器不做代理，也不接受任意外部 URL。浏览器受 CORS 限制时可选择保存的 HTML 文件或粘贴源代码，解析失败会保留旧资料。
 - `POST /api/admin/news/{id}/refresh` 手动刷新对应官网页面，支持历史来源。服务端检查管理员权限、官网 HTTPS 白名单、重定向与响应大小；失败保留旧内容，并返回 HTTP 状态、超时、网络或解析原因。
 - 编辑模式可以删除手动、归档和官网图片；来源图片删除会写入抑制记录，后续自动刷新不会悄悄恢复。图片按来源标识更新而非删除重建，保留图片 ID；正文或图片无变化不刷新 `updated_at`。保存新闻可传 `updated_at` 检测并发冲突，返回 409 时重新加载。
-- `/admin?section=music|news|source|database|account` 分区设置；桌面左侧目录、手机顶部页签。数据库页显示音乐/节目/新闻/联动最近 200 条变化记录，支持分类筛选和每页 15 条分页。`editor` 账号只能进入节目管理、联动管理和数据库下载；设置页其他分页、数据库上传与覆盖均不可用。
+- `/admin?section=music|news|source|bot|api|database|account` 分区设置；桌面左侧目录、手机顶部页签。外部 API 页按资源分页显示字段和示例，真实密钥不会回显。数据库页显示音乐/节目/新闻/联动最近 200 条变化记录，支持分类筛选和每页 15 条分页。`editor` 账号只能进入节目管理、联动管理和数据库下载；设置页其他分页、数据库上传与覆盖均不可用。
 - 新闻设置提供可选的慢速官方图床刷新队列：开启后按 5–60 秒间隔逐篇重新读取历史新闻，成功解析到官网图片后移除该篇归档图片引用但不删除本地备份文件；403、429、验证页等风控失败会记录页面并使用退避重试，也可以手动重新排队失败页面。默认关闭，避免新部署未经确认就请求官网。
 - 新闻摘要统一限制为 200 字；应用启动和后续导入/编辑时会自动截断超出的旧值。
 

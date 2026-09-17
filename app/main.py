@@ -84,6 +84,14 @@ REMOTE_NEWS_INGEST_MAX_BYTES = 8 * 1024 * 1024
 REMOTE_NEWS_INGEST_MAX_IMAGES = 128
 REMOTE_NEWS_INGEST_MAX_IMAGE_BYTES = 20 * 1024 * 1024
 REMOTE_NEWS_INGEST_API_KEY_ENV = "NIJIDB_INGEST_API_KEY"
+REMOTE_MUSIC_INGEST_API_KEY_ENV = "NIJIDB_MUSIC_INGEST_API_KEY"
+REMOTE_PROGRAM_INGEST_API_KEY_ENV = "NIJIDB_PROGRAM_INGEST_API_KEY"
+REMOTE_COLLABO_INGEST_API_KEY_ENV = "NIJIDB_COLLABO_INGEST_API_KEY"
+REMOTE_MUSIC_INGEST_MAX_TRACKS = 2000
+REMOTE_MUSIC_INGEST_MAX_EXTRAS = 256
+REMOTE_PROGRAM_INGEST_MAX_SUBPROGRAMS = 128
+REMOTE_COLLABO_INGEST_MAX_IMAGES = 256
+REMOTE_INGEST_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 REMOTE_NEWS_SOURCE_HOSTS = {
     "niji_topics": {"www.lovelive-anime.jp", "lovelive-anime.jp"},
     "niji_news": {"www.lovelive-anime.jp", "lovelive-anime.jp"},
@@ -4679,20 +4687,25 @@ async def read_manual_source_request(request: Request) -> tuple[dict[str, Any], 
     return payload, html
 
 
-def require_remote_news_ingest_key(request: Request) -> None:
-    expected = os.getenv(REMOTE_NEWS_INGEST_API_KEY_ENV, "").strip()
+def require_external_ingest_key(request: Request, env_name: str, resource_label: str) -> None:
+    expected = os.getenv(env_name, "").strip()
     supplied = str(request.headers.get("x-nijidb-api-key", "")).strip()
     if not expected:
-        raise HTTPException(503, "远程新闻导入未配置")
+        raise HTTPException(503, f"远程{resource_label}导入未配置")
     if len(supplied) > 256 or not supplied or not hmac.compare_digest(supplied, expected):
         raise HTTPException(401, "API Key 无效")
 
 
-async def read_remote_news_request(request: Request) -> dict[str, Any]:
+def require_remote_news_ingest_key(request: Request) -> None:
+    # Keep the original helper and error text for the existing news worker.
+    require_external_ingest_key(request, REMOTE_NEWS_INGEST_API_KEY_ENV, "新闻")
+
+
+async def read_external_ingest_request(request: Request, resource_label: str) -> dict[str, Any]:
     content_length = request.headers.get("content-length", "")
     try:
         if content_length and int(content_length) > REMOTE_NEWS_INGEST_MAX_BYTES:
-            raise HTTPException(413, "远程新闻导入请求过大")
+            raise HTTPException(413, f"远程{resource_label}导入请求过大")
     except ValueError:
         pass
     try:
@@ -4700,7 +4713,7 @@ async def read_remote_news_request(request: Request) -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(400, "请求格式无效") from exc
     if len(body) > REMOTE_NEWS_INGEST_MAX_BYTES:
-        raise HTTPException(413, "远程新闻导入请求不能超过 8 MB")
+        raise HTTPException(413, f"远程{resource_label}导入请求不能超过 8 MB")
     try:
         payload = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -4708,6 +4721,10 @@ async def read_remote_news_request(request: Request) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise HTTPException(400, "请求格式无效")
     return payload
+
+
+async def read_remote_news_request(request: Request) -> dict[str, Any]:
+    return await read_external_ingest_request(request, "新闻")
 
 
 def remote_news_integer(value: Any, field: str, maximum: int) -> int:
@@ -4730,8 +4747,14 @@ def remote_news_image(value: Any) -> dict[str, Any]:
     kind = str(value.get("kind") or "remote").strip().lower()
     if kind != "remote":
         raise HTTPException(400, "远程导入只能写入 remote 新闻图片")
-    if str(value.get("local_path") or "").strip():
-        raise HTTPException(400, "远程导入不接受本地图片路径")
+    for field in ("path", "asset_path", "local_path", "thumbnail_path"):
+        if str(value.get(field) or "").strip():
+            message = (
+                "远程导入不接受本地图片路径"
+                if field == "local_path"
+                else f"远程导入不接受本地图片路径（{field}）"
+            )
+            raise HTTPException(400, message)
     source_url = str(value.get("source_url") or "").strip()
     if len(source_url) > 2000:
         raise HTTPException(400, "新闻图片来源地址过长")
@@ -4858,6 +4881,489 @@ def remote_news_record(payload: dict[str, Any]) -> dict[str, Any]:
             raise HTTPException(400, "新闻图片来源地址不能重复")
         record["images"] = normalized_images
     return record
+
+
+def remote_ingest_text(value: Any, field: str, maximum: int, *, strip: bool = True) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list, tuple, set)):
+        raise HTTPException(400, f"{field}格式无效")
+    result = str(value)
+    if strip:
+        result = result.strip()
+    if len(result.encode("utf-8")) > maximum:
+        raise HTTPException(400, f"{field}过长")
+    return result
+
+
+def remote_ingest_url(value: Any, field: str, maximum: int = 2000) -> str:
+    result = remote_ingest_text(value, field, maximum)
+    if result and not valid_external_url(result):
+        raise HTTPException(400, f"{field}必须是无凭据的 HTTP/HTTPS 地址")
+    return result
+
+
+def remote_ingest_json_value(value: Any, field: str, expected_type: type, default: Any) -> Any:
+    if value in (None, ""):
+        return default
+    parsed = value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(400, f"{field}格式无效") from exc
+    if not isinstance(parsed, expected_type):
+        raise HTTPException(400, f"{field}格式无效")
+    return parsed
+
+
+def remote_music_tracks(article: dict[str, Any]) -> list[dict[str, Any]]:
+    value = article.get("tracks", article.get("tracklist", article.get("tracks_json", [])))
+    source = remote_ingest_json_value(value, "曲目", list, [])
+    if len(source) > REMOTE_MUSIC_INGEST_MAX_TRACKS:
+        raise HTTPException(400, f"曲目数量不能超过 {REMOTE_MUSIC_INGEST_MAX_TRACKS} 条")
+    tracks: list[dict[str, Any]] = []
+    for index, item in enumerate(source, start=1):
+        if not isinstance(item, dict):
+            raise HTTPException(400, f"第 {index} 条曲目格式无效")
+        credits_value = remote_ingest_json_value(item.get("credits", {}), f"第 {index} 条曲目作词作曲信息", dict, {})
+        credits: dict[str, str] = {}
+        for key, value in credits_value.items():
+            credit_key = remote_ingest_text(key, f"第 {index} 条曲目作词作曲字段", 200)
+            credit_value = remote_ingest_text(value, f"第 {index} 条曲目作词作曲内容", 1000)
+            if credit_key:
+                credits[credit_key] = credit_value
+        number = item.get("number", index)
+        if isinstance(number, bool):
+            raise HTTPException(400, f"第 {index} 条曲目编号格式无效")
+        try:
+            number = int(number)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, f"第 {index} 条曲目编号格式无效") from exc
+        if not 0 <= number <= 9999:
+            raise HTTPException(400, f"第 {index} 条曲目编号超出范围")
+        tracks.append(
+            {
+                "disc": remote_ingest_text(item.get("disc"), f"第 {index} 条曲目碟片名称", 200),
+                "number": number,
+                "title": remote_ingest_text(item.get("title"), f"第 {index} 条曲目标题", 1000),
+                "credits": credits,
+            }
+        )
+    return tracks
+
+
+def remote_music_specs(article: dict[str, Any]) -> dict[str, str]:
+    value = article.get("specs", article.get("spec", article.get("spec_json", {})))
+    source = remote_ingest_json_value(value, "规格", dict, {})
+    specs: dict[str, str] = {}
+    for key, value in source.items():
+        spec_key = remote_ingest_text(key, "规格字段", 200)
+        spec_value = remote_ingest_text(value, "规格内容", 4000)
+        if spec_key:
+            specs[spec_key] = spec_value
+    return specs
+
+
+def remote_music_extras(article: dict[str, Any]) -> list[dict[str, Any]]:
+    value = article.get("extras", article.get("extras_json", []))
+    source = remote_ingest_json_value(value, "特典信息", list, [])
+    if len(source) > REMOTE_MUSIC_INGEST_MAX_EXTRAS:
+        raise HTTPException(400, f"特典信息数量不能超过 {REMOTE_MUSIC_INGEST_MAX_EXTRAS} 条")
+    extras: list[dict[str, Any]] = []
+    for index, item in enumerate(source, start=1):
+        if not isinstance(item, dict):
+            raise HTTPException(400, f"第 {index} 条特典信息格式无效")
+        extra_type = remote_ingest_text(item.get("type"), f"第 {index} 条特典信息类型", 50) or "notice"
+        if extra_type not in {"bonus", "notice", "link"}:
+            raise HTTPException(400, f"第 {index} 条特典信息类型无效")
+        entry_value = item.get("entries", [])
+        entries = remote_ingest_json_value(entry_value, f"第 {index} 条特典信息条目", list, [])
+        if len(entries) > 256:
+            raise HTTPException(400, f"第 {index} 条特典信息条目过多")
+        normalized_entries = [remote_ingest_text(entry, f"第 {index} 条特典信息条目", 2000) for entry in entries]
+        extra: dict[str, Any] = {
+            "type": extra_type,
+            "title": remote_ingest_text(item.get("title"), f"第 {index} 条特典信息标题", 500),
+            "entries": normalized_entries,
+        }
+        if extra_type == "link":
+            extra["url"] = remote_ingest_url(item.get("url"), f"第 {index} 条特典信息链接")
+            if not extra["url"]:
+                raise HTTPException(400, f"第 {index} 条特典信息链接不能为空")
+        extras.append(extra)
+    return extras
+
+
+def remote_music_record(payload: dict[str, Any]) -> dict[str, Any]:
+    release = payload.get("release", payload)
+    if not isinstance(release, dict):
+        raise HTTPException(400, "音乐发行内容格式无效")
+    release_id = remote_ingest_text(release.get("id"), "音乐发行 ID", 128)
+    if not release_id or not REMOTE_INGEST_ID_PATTERN.fullmatch(release_id):
+        raise HTTPException(400, "音乐发行 ID 格式无效")
+    title = remote_ingest_text(release.get("title"), "音乐发行标题", 1000)
+    if not title:
+        raise HTTPException(400, "音乐发行标题不能为空")
+    detail_html = remote_ingest_text(release.get("detail_html"), "音乐发行详情 HTML", 2 * 1024 * 1024, strip=False)
+    record: dict[str, Any] = {
+        "id": release_id,
+        "title": title,
+        "subtitle": remote_ingest_text(release.get("subtitle"), "音乐发行副标题", 1000),
+        "artist": remote_ingest_text(release.get("artist"), "音乐发行艺术家", 1000),
+        "release_date": remote_ingest_text(release.get("release_date"), "音乐发行日期", 200),
+        "price": remote_ingest_text(release.get("price"), "音乐发行价格", 500),
+        "cover_url": remote_ingest_url(release.get("cover_url"), "音乐发行封面地址"),
+        "detail_html": detail_html,
+        "source_url": remote_ingest_url(release.get("source_url"), "音乐发行来源地址"),
+        "tracks_json": json.dumps(remote_music_tracks(release), ensure_ascii=False),
+        "spec_json": json.dumps(remote_music_specs(release), ensure_ascii=False),
+        "extras_json": json.dumps(remote_music_extras(release), ensure_ascii=False),
+        "position": 999999,
+    }
+    position = release.get("position")
+    if position not in (None, ""):
+        if isinstance(position, bool):
+            raise HTTPException(400, "音乐发行排序格式无效")
+        try:
+            position = int(position)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, "音乐发行排序格式无效") from exc
+        if not 0 <= position <= 1_000_000_000:
+            raise HTTPException(400, "音乐发行排序超出范围")
+        record["position"] = position
+    record["fingerprint"] = release_fingerprint(record)
+    return record
+
+
+def external_program_id(value: Any, field: str) -> str:
+    if value in (None, ""):
+        return ""
+    result = remote_ingest_text(value, field, 128)
+    if not REMOTE_INGEST_ID_PATTERN.fullmatch(result):
+        raise HTTPException(400, f"{field}格式无效")
+    return result
+
+
+def remote_program_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_program = payload.get("program") if isinstance(payload.get("program"), dict) else payload
+    if not isinstance(raw_program, dict):
+        raise HTTPException(400, "节目内容格式无效")
+    scope = str(payload.get("_program_scope") or "").strip().lower()
+    if scope not in {"", "main", "主节目", "主节目组"}:
+        raise HTTPException(400, "外部节目导入只接受主节目组 JSON")
+    raw_options = payload.get("import_options", {})
+    if raw_options is None:
+        raw_options = {}
+    if not isinstance(raw_options, dict):
+        raise HTTPException(400, "import_options 必须是对象")
+    # The external API deliberately ignores target IDs supplied by the caller.
+    # Existing records are selected only by the source IDs in the payload.
+    normalized: dict[str, Any] = dict(payload)
+    normalized["_program_scope"] = "main"
+    normalized["import_options"] = {
+        "schedule_mode": raw_options.get("schedule_mode", "individual"),
+        "target_mode": "new",
+        "target_program_id": "",
+        "target_parent_program_id": "",
+    }
+    program = dict(raw_program)
+    if "id" in program:
+        external_program_id(program.get("id"), "主节目 ID")
+    normalized["program"] = program
+    subprograms = normalized.get("subprograms", [])
+    if subprograms is None:
+        subprograms = []
+    if not isinstance(subprograms, list) or len(subprograms) > REMOTE_PROGRAM_INGEST_MAX_SUBPROGRAMS:
+        raise HTTPException(400, "子节目数量超出限制")
+    normalized_subprograms: list[dict[str, Any]] = []
+    for index, raw_subprogram in enumerate(subprograms, start=1):
+        if not isinstance(raw_subprogram, dict):
+            raise HTTPException(400, f"第 {index} 个子节目格式无效")
+        child = dict(raw_subprogram)
+        child_program = child.get("program") if isinstance(child.get("program"), dict) else child
+        if not isinstance(child_program, dict):
+            raise HTTPException(400, f"第 {index} 个子节目缺少 program 对象")
+        child_program = dict(child_program)
+        if "id" in child_program:
+            external_program_id(child_program.get("id"), f"第 {index} 个子节目 ID")
+        child["program"] = child_program
+        normalized_subprograms.append(child)
+    normalized["subprograms"] = normalized_subprograms
+    return normalized
+
+
+def reject_external_program_local_images(payload: dict[str, Any]) -> None:
+    raw_program = payload.get("program") if isinstance(payload.get("program"), dict) else payload
+    entries: list[tuple[dict[str, Any], Any]] = []
+    root_occurrences = payload.get("occurrences")
+    if root_occurrences is None:
+        root_occurrences = payload.get("episodes", raw_program.get("occurrences", []))
+    entries.append((raw_program, root_occurrences))
+    for raw_subprogram in payload.get("subprograms", []):
+        if not isinstance(raw_subprogram, dict):
+            continue
+        child_program = raw_subprogram.get("program") if isinstance(raw_subprogram.get("program"), dict) else raw_subprogram
+        child_occurrences = raw_subprogram.get("occurrences")
+        if child_occurrences is None:
+            child_occurrences = child_program.get("episodes", child_program.get("occurrences", []))
+        if isinstance(child_program, dict):
+            entries.append((child_program, child_occurrences))
+    for _, occurrences in entries:
+        if not isinstance(occurrences, list):
+            continue
+        for occurrence in occurrences:
+            if not isinstance(occurrence, dict) or not isinstance(occurrence.get("images"), list):
+                continue
+            for image in occurrence["images"]:
+                if not isinstance(image, dict):
+                    continue
+                for field in ("path", "asset_path", "local_path", "thumbnail_path"):
+                    if str(image.get(field) or "").strip():
+                        raise HTTPException(400, f"外部节目 API 不接受本地图片路径（{field}）")
+
+
+def apply_external_program_ids(
+    conn: sqlite3.Connection,
+    entries: list[dict[str, Any]],
+    prepared: list[dict[str, Any]],
+) -> None:
+    """Keep source IDs stable for external upserts without accepting a target override."""
+    if not prepared or len(prepared) != len(entries):
+        raise ValueError("节目导入内容无效")
+    old_root_id = prepared[0]["program"]["id"]
+    root_source_id = entries[0]["source_program_id"]
+    if root_source_id and not prepared[0]["overwrite"]:
+        conflict = conn.execute("SELECT id FROM programs WHERE id = ?", (root_source_id,)).fetchone()
+        if conflict:
+            raise ValueError("主节目 ID 已被其他节目占用")
+        prepared[0]["program"]["id"] = root_source_id
+    root_id = prepared[0]["program"]["id"]
+    seen_ids = {root_id}
+    for index, (entry, prepared_entry) in enumerate(zip(entries[1:], prepared[1:]), start=1):
+        if prepared_entry["program"].get("parent_id") == old_root_id:
+            prepared_entry["program"]["parent_id"] = root_id
+        source_id = entry["source_program_id"]
+        if not source_id or prepared_entry["overwrite"]:
+            seen_ids.add(prepared_entry["program"]["id"])
+            continue
+        if source_id in seen_ids:
+            raise ValueError(f"第 {index} 个子节目 ID 与其他节目重复")
+        conflict = conn.execute("SELECT id FROM programs WHERE id = ?", (source_id,)).fetchone()
+        if conflict:
+            raise ValueError(f"第 {index} 个子节目 ID 已被其他节目占用")
+        prepared_entry["program"]["id"] = source_id
+        seen_ids.add(source_id)
+
+
+def remote_collabo_image(value: Any, index: int) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise HTTPException(400, f"第 {index} 张联动立绘格式无效")
+    for field in ("path", "asset_path", "local_path", "thumbnail_path"):
+        if str(value.get(field) or "").strip():
+            raise HTTPException(400, f"外部联动 API 不接受本地图片路径（{field}）")
+    source_url = remote_ingest_url(value.get("source_url"), f"第 {index} 张联动立绘来源地址")
+    public_url = remote_ingest_url(value.get("public_url"), f"第 {index} 张联动立绘 R2 地址")
+    if public_url and not valid_r2_public_image_url(public_url):
+        raise HTTPException(400, f"第 {index} 张联动立绘 R2 地址必须位于当前实例的图片地址下")
+    url = remote_ingest_url(value.get("url") or public_url or source_url, f"第 {index} 张联动立绘地址")
+    if not url:
+        raise HTTPException(400, f"第 {index} 张联动立绘需要填写图片地址")
+    sha256 = remote_ingest_text(value.get("sha256"), f"第 {index} 张联动立绘 SHA-256", 64).lower()
+    if sha256 and not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        raise HTTPException(400, f"第 {index} 张联动立绘 SHA-256 格式无效")
+    result: dict[str, Any] = {
+        "url": url,
+        "source_url": source_url,
+        "public_url": public_url,
+        "source_page": remote_ingest_url(value.get("source_page"), f"第 {index} 张联动立绘来源页面地址"),
+        "source_title": remote_ingest_text(value.get("source_title"), f"第 {index} 张联动立绘来源标题", 500),
+        "caption": remote_ingest_text(value.get("caption"), f"第 {index} 张联动立绘说明", 2000),
+        "alt": remote_ingest_text(value.get("alt"), f"第 {index} 张联动立绘替代文本", 500),
+        "width": remote_news_integer(value.get("width"), f"第 {index} 张联动立绘宽度", 100000),
+        "height": remote_news_integer(value.get("height"), f"第 {index} 张联动立绘高度", 100000),
+        "bytes": remote_news_integer(value.get("bytes"), f"第 {index} 张联动立绘大小", REMOTE_NEWS_INGEST_MAX_IMAGE_BYTES),
+        "sha256": sha256,
+        "kind": remote_ingest_text(value.get("kind"), f"第 {index} 张联动立绘类型", 50) or "remote",
+    }
+    if value.get("id") not in (None, ""):
+        result["id"] = remote_ingest_text(value.get("id"), f"第 {index} 张联动立绘 ID", 128)
+    return result
+
+
+def remote_collabo_id(value: Any) -> str:
+    result = remote_ingest_text(value, "联动记录 ID", 64)
+    if not re.fullmatch(r"[a-fA-F0-9]{16,64}", result):
+        raise HTTPException(400, "联动记录 ID 格式无效")
+    return result.lower()
+
+
+def remote_collabo_record(payload: dict[str, Any]) -> dict[str, Any]:
+    item = payload.get("item", payload.get("collabo", payload))
+    if not isinstance(item, dict):
+        raise HTTPException(400, "联动立绘内容格式无效")
+    record = dict(item)
+    requested_id = remote_collabo_id(record.get("id")) if record.get("id") not in (None, "") else ""
+    source_id = remote_ingest_text(record.get("source_id"), "联动来源 ID", 256)
+    if requested_id:
+        record["id"] = requested_id.lower()
+    elif source_id:
+        record["id"] = hashlib.sha256(f"nijidb-collabo:{source_id}".encode("utf-8")).hexdigest()[:16]
+    if "images" in record:
+        images = record.get("images")
+        if not isinstance(images, list) or len(images) > REMOTE_COLLABO_INGEST_MAX_IMAGES:
+            raise HTTPException(400, "联动立绘图片数量超出限制")
+        record["images"] = [remote_collabo_image(image, index) for index, image in enumerate(images, start=1)]
+    return record
+
+
+def external_ingest_api_docs() -> dict[str, Any]:
+    return {
+        "header": "X-Nijidb-API-Key",
+        "content_type": "application/json",
+        "notes": [
+            "每个资源使用独立的环境变量密钥；密钥不会通过网站接口返回。",
+            "请求只允许新增或按资源 ID 更新，不接受数据库文件、数据库路径或管理员 Cookie。",
+            "图片应先由外部任务上传到当前实例的 R2，再把 public_url 写入请求；未归档图片可以保留 source_url。",
+        ],
+        "resources": [
+            {
+                "id": "music",
+                "label": "音乐档案",
+                "method": "POST",
+                "path": "/api/ingest/music",
+                "key_env": REMOTE_MUSIC_INGEST_API_KEY_ENV,
+                "configured": bool(os.getenv(REMOTE_MUSIC_INGEST_API_KEY_ENV, "").strip()),
+                "description": "提交单个音乐发行的完整快照；id 已存在时更新，不存在时新增。",
+                "fields": [
+                    {"name": "release.id", "required": True, "description": "稳定的发行 ID，只能使用字母、数字、下划线和连字符。"},
+                    {"name": "release.title", "required": True, "description": "发行标题。"},
+                    {"name": "release.subtitle / artist / release_date / price", "required": False, "description": "发行基本资料。"},
+                    {"name": "release.cover_url", "required": False, "description": "封面 HTTP/HTTPS 地址，推荐使用 R2 公开地址。"},
+                    {"name": "release.detail_html", "required": False, "description": "详情 HTML；前端显示时会再次清理。"},
+                    {"name": "release.source_url", "required": False, "description": "来源页面 HTTP/HTTPS 地址。"},
+                    {"name": "release.tracks / specs / extras", "required": False, "description": "曲目数组、规格对象和特典数组。"},
+                    {"name": "release.position", "required": False, "description": "可选排序值；省略时保留原值或追加到末尾。"},
+                ],
+                "example": {
+                    "release": {
+                        "id": "cd_external_001",
+                        "title": "外部同步的音乐发行",
+                        "subtitle": "初回限定版",
+                        "artist": "虹ヶ咲学園スクールアイドル同好会",
+                        "release_date": "2026-09-20",
+                        "price": "¥3,300",
+                        "cover_url": "https://images.example.com/images/music/cd_external_001.jpg",
+                        "detail_html": "<p>发行详情。</p>",
+                        "source_url": "https://www.example.com/music/cd_external_001",
+                        "tracks": [{"disc": "", "number": 1, "title": "曲目标题", "credits": {}}],
+                        "specs": {"规格": "CD"},
+                        "extras": [],
+                    }
+                },
+            },
+            {
+                "id": "program",
+                "label": "节目档案",
+                "method": "POST",
+                "path": "/api/ingest/program",
+                "key_env": REMOTE_PROGRAM_INGEST_API_KEY_ENV,
+                "configured": bool(os.getenv(REMOTE_PROGRAM_INGEST_API_KEY_ENV, "").strip()),
+                "description": "提交一个主节目组的完整 JSON 快照；主节目及子节目按来源 ID 幂等新增或更新。",
+                "fields": [
+                    {"name": "program.id", "required": False, "description": "稳定的主节目来源 ID；存在时更新，不存在时按此 ID 新增。"},
+                    {"name": "program.title / category / format / platform / delivery", "required": True, "description": "节目基本资料；category 为 official 或 personal。"},
+                    {"name": "program.periods", "required": True, "description": "排期时期数组，至少包含一段 start_date。"},
+                    {"name": "occurrences", "required": False, "description": "完整的单集数组；更新时会替换该节目的现有单集。"},
+                    {"name": "subprograms", "required": False, "description": "子节目数组，每项包含 program 和 occurrences。"},
+                    {"name": "import_options.schedule_mode", "required": False, "description": "individual（默认）、generated 或 current。目标 ID 等覆盖选项会被忽略。"},
+                ],
+                "example": {
+                    "program": {
+                        "id": "program_external_001",
+                        "title": "外部同步节目",
+                        "category": "personal",
+                        "format": "video",
+                        "platform": "network",
+                        "delivery": "recorded",
+                        "periods": [{"start_date": "2026-09-20", "end_date": "", "frequency": "individual", "timezone": "Asia/Tokyo"}],
+                        "people": ["成员姓名"],
+                        "official_url": "https://www.example.com/program",
+                        "description": "节目简介。",
+                    },
+                    "occurrences": [{"original_date": "2026-09-20", "original_time": "20:00", "status": "scheduled", "images": []}],
+                    "subprograms": [],
+                },
+            },
+            {
+                "id": "collabo",
+                "label": "联动立绘",
+                "method": "POST",
+                "path": "/api/ingest/collabo",
+                "key_env": REMOTE_COLLABO_INGEST_API_KEY_ENV,
+                "configured": bool(os.getenv(REMOTE_COLLABO_INGEST_API_KEY_ENV, "").strip()),
+                "description": "提交一个联动记录和可选的完整图片数组；推荐使用 source_id 保持外部来源幂等。",
+                "fields": [
+                    {"name": "item.id", "required": False, "description": "已有记录的 16–64 位十六进制 ID。"},
+                    {"name": "item.source_id", "required": False, "description": "外部来源稳定 ID；没有 item.id 时会生成稳定记录 ID。"},
+                    {"name": "item.title / date", "required": True, "description": "联动标题和日期（YYYY-MM-DD）。"},
+                    {"name": "item.tags / partners / periods / links", "required": False, "description": "角色标签、合作方、时间段和相关链接。"},
+                    {"name": "item.images[].url", "required": False, "description": "图片 HTTP/HTTPS 地址；不能填写本地路径。"},
+                    {"name": "item.images[].public_url", "required": False, "description": "当前实例 R2 图片公开地址；归档成功后填写。"},
+                ],
+                "example": {
+                    "item": {
+                        "source_id": "campaign_external_001",
+                        "title": "外部同步联动",
+                        "date": "2026-09-20",
+                        "date_kind": "announced",
+                        "partners": ["合作方"],
+                        "tags": ["ayumu"],
+                        "collection_status": "complete",
+                        "review_status": "approved",
+                        "images": [
+                            {
+                                "url": "https://images.example.com/images/collabo/campaign_external_001.jpg",
+                                "source_url": "https://www.example.com/campaign_external_001",
+                                "public_url": "https://images.example.com/images/collabo/campaign_external_001.jpg",
+                                "alt": "联动立绘",
+                            }
+                        ],
+                    }
+                },
+            },
+            {
+                "id": "news",
+                "label": "官网新闻",
+                "method": "POST",
+                "path": "/api/ingest/news",
+                "key_env": REMOTE_NEWS_INGEST_API_KEY_ENV,
+                "configured": bool(os.getenv(REMOTE_NEWS_INGEST_API_KEY_ENV, "").strip()),
+                "description": "提交一篇已经解析的新闻；图片应先归档到 R2，再提交 public_url。",
+                "fields": [
+                    {"name": "source / page_name / source_url", "required": True, "description": "来源类型、页面名称和受白名单限制的来源地址。"},
+                    {"name": "title", "required": True, "description": "新闻标题。"},
+                    {"name": "published_at / category / tags / summary", "required": False, "description": "新闻元数据。"},
+                    {"name": "body_markdown", "required": False, "description": "Markdown 正文，最多 500 KB。"},
+                    {"name": "images[]", "required": False, "description": "remote 图片对象，source_url 必填，public_url 只能是当前实例 R2 地址。"},
+                ],
+                "example": {
+                    "article": {
+                        "source": "niji_topics",
+                        "page_name": "01_123",
+                        "title": "外部同步新闻",
+                        "published_at": "2026-09-20",
+                        "category": "goods",
+                        "tags": ["goods"],
+                        "summary": "新闻摘要。",
+                        "body_markdown": "新闻正文。",
+                        "source_url": "https://www.lovelive-anime.jp/nijigasaki/news/01_123.html",
+                        "images": [{"source_url": "https://www.lovelive-anime.jp/nijigasaki/images/01_123.jpg", "public_url": "https://images.example.com/images/news/01_123.jpg"}],
+                    }
+                },
+            },
+        ],
+    }
 
 
 def news_listing_url(offset: int) -> str:
@@ -5736,6 +6242,161 @@ async def api_save_settings(request: Request) -> dict[str, dict[str, str]]:
         music_settings_event.set()
     news_settings_event.set()
     return {"settings": values}
+
+
+@app.get("/api/admin/external-api-docs", include_in_schema=False)
+async def api_external_ingest_docs(request: Request) -> dict[str, Any]:
+    require_admin_role(request)
+    return external_ingest_api_docs()
+
+
+@app.post("/api/ingest/music", include_in_schema=False)
+async def api_remote_music_ingest(request: Request) -> dict[str, Any]:
+    require_external_ingest_key(request, REMOTE_MUSIC_INGEST_API_KEY_ENV, "音乐")
+    payload = await read_external_ingest_request(request, "音乐")
+    record = remote_music_record(payload)
+    async with sync_lock:
+        with db() as conn:
+            old = conn.execute("SELECT position FROM releases WHERE id = ?", (record["id"],)).fetchone()
+            if record["position"] == 999999:
+                if old:
+                    record["position"] = old["position"]
+                else:
+                    record["position"] = conn.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM releases").fetchone()[0]
+        changed_records = await store_records([record])
+    created = old is None
+    changed = created or bool(changed_records)
+    if changed:
+        log_database_activity("music", f"远程导入音乐：{record['title'][:80]}")
+    return {
+        "id": record["id"],
+        "created": created,
+        "changed": changed,
+        "position": record["position"],
+    }
+
+
+@app.post("/api/ingest/program", include_in_schema=False)
+async def api_remote_program_ingest(request: Request) -> dict[str, Any]:
+    require_external_ingest_key(request, REMOTE_PROGRAM_INGEST_API_KEY_ENV, "节目")
+    payload = await read_external_ingest_request(request, "节目")
+    normalized_payload = remote_program_payload(payload)
+    reject_external_program_local_images(normalized_payload)
+    try:
+        entries, warnings = normalize_import_bundle(normalized_payload)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    image_paths_to_cleanup: list[str] = []
+    now = datetime.now(timezone.utc).isoformat()
+    root_source_id = entries[0]["source_program_id"]
+    existing_root = None
+    prepared: list[dict[str, Any]] = []
+    try:
+        async with sync_lock:
+            with db() as conn:
+                if root_source_id:
+                    existing_root = conn.execute(
+                        "SELECT id, parent_id FROM programs WHERE id = ?", (root_source_id,)
+                    ).fetchone()
+                    if existing_root and existing_root["parent_id"]:
+                        raise ValueError("主节目 ID 指向子节目，不能作为主节目组导入")
+                options = import_payload_options(normalized_payload)
+                options.update(
+                    {
+                        "target_mode": "overwrite" if existing_root else "new",
+                        "target_program_id": root_source_id if existing_root else "",
+                        "target_parent_program_id": "",
+                    }
+                )
+                prepared = prepare_import_bundle(conn, entries, options)
+                apply_external_program_ids(conn, entries, prepared)
+                for entry in prepared:
+                    validate_program_occurrence_slots({**entry["program"], "occurrences": entry["occurrences"]})
+                for entry in prepared:
+                    program_values = {
+                        **entry["program"],
+                        "created_at": entry["created_at"] or now,
+                        "updated_at": now,
+                    }
+                    target_id = program_values["id"]
+                    if entry["overwrite"]:
+                        image_paths_to_cleanup.extend(
+                            replace_imported_program_row(conn, program_values, target_id, program_values["created_at"], now)
+                        )
+                    else:
+                        insert_program_row(conn, program_values)
+                    for occurrence in entry["occurrences"]:
+                        values = {
+                            **occurrence,
+                            "program_id": target_id,
+                            "created_at": now,
+                            "updated_at": now,
+                        }
+                        cursor = insert_occurrence_row(conn, values)
+                        insert_occurrence_images(conn, cursor.lastrowid, occurrence.get("images"), now)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(409, "导入的节目或单集与现有资料冲突") from exc
+
+    await cleanup_program_image_storage(image_paths_to_cleanup)
+    root_id = prepared[0]["program"]["id"]
+    root_program = next(
+        item for item in program_rows(program_ids={root_id}, include_occurrences=False) if item["id"] == root_id
+    )
+    imported_occurrences = sum(len(entry["occurrences"]) for entry in prepared)
+    log_database_activity("program", f"远程导入节目：{root_program['title'][:80]}")
+    return {
+        "id": root_id,
+        "program": root_program,
+        "created": existing_root is None,
+        "changed": True,
+        "warnings": warnings,
+        "imported_programs": len(prepared),
+        "imported_subprograms": sum(1 for entry in prepared if entry["is_subprogram"]),
+        "imported_occurrences": imported_occurrences,
+    }
+
+
+@app.post("/api/ingest/collaboration", include_in_schema=False)
+@app.post("/api/ingest/collabo", include_in_schema=False)
+async def api_remote_collabo_ingest(request: Request) -> dict[str, Any]:
+    require_external_ingest_key(request, REMOTE_COLLABO_INGEST_API_KEY_ENV, "联动")
+    payload = await read_external_ingest_request(request, "联动")
+    record = remote_collabo_record(payload)
+    async with sync_lock:
+        with db() as conn:
+            existing = None
+            if record.get("id"):
+                existing = conn.execute(
+                    "SELECT * FROM collaboration_items WHERE id = ?", (record["id"],)
+                ).fetchone()
+            if not record.get("id"):
+                slug = str(record.get("slug") or "").strip()
+                if slug:
+                    existing = conn.execute(
+                        "SELECT * FROM collaboration_items WHERE slug = ?", (slug,)
+                    ).fetchone()
+                    if existing:
+                        record["id"] = existing["id"]
+            try:
+                item_id = upsert_collaboration_item(conn, record)
+                row = conn.execute("SELECT * FROM collaboration_items WHERE id = ?", (item_id,)).fetchone()
+                image_count = conn.execute(
+                    "SELECT COUNT(*) FROM collaboration_images WHERE item_id = ?", (item_id,)
+                ).fetchone()[0]
+                result = collaboration_item_payload(conn, row, detail=True, admin=True)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+    log_database_activity("collabo", f"远程导入联动：{result['title'][:80]}")
+    return {
+        "id": item_id,
+        "created": existing is None,
+        "changed": True,
+        "image_count": image_count,
+        "item": result,
+    }
 
 
 @app.post("/api/ingest/news", include_in_schema=False)

@@ -4261,10 +4261,10 @@ def news_image_url(row: sqlite3.Row | dict[str, Any]) -> str:
             return r2_public_image_url(relative)
         image_id = row["id"]
         return f"/api/news/images/{image_id}"
-    # Never hotlink the official site from a visitor's browser. The source URL
-    # remains available as metadata, while the UI uses a placeholder until the
-    # image is archived locally or uploaded to R2.
-    return ""
+    # Keep the original image visible until the worker archives this specific
+    # image. Once archived, the R2 URL above replaces it independently.
+    source_url = str(row.get("source_url", "") if isinstance(row, dict) else row["source_url"] or "").strip()
+    return source_url
 
 
 def news_image_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:

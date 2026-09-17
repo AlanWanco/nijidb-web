@@ -309,12 +309,12 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
     def login(self):
         self.client.cookies.set("nijidb_admin", main.admin_cookie_value(main.settings()["admin_password_hash"]))
 
-    async def test_official_source_url_is_not_used_as_browser_image_url(self):
+    async def test_official_source_url_remains_until_archived(self):
         with main.db() as conn:
             image = conn.execute(
                 "SELECT * FROM news_images WHERE news_id = ?", (news_id("niji_topics", "01_123"),)
             ).fetchone()
-        self.assertEqual(main.news_image_url(image), "")
+        self.assertEqual(main.news_image_url(image), image["source_url"])
         self.assertEqual((await self.client.get(f"/api/news/images/{image['id']}")).status_code, 404)
 
     async def test_remote_ingest_writes_r2_url_without_browser_auth(self):

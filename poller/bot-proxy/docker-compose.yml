@@ -1,0 +1,91 @@
+# bot 专用代理：独立 mihomo（国内直连 + 节点故障自动切换）+ 固定入口兜底
+#
+# 使用前：
+#   1. 生成初始配置：参考 README 的一条命令（写入本目录 config.yaml，权限 600）
+#   2. docker compose up -d --build
+#
+# 与轮询服务完全独立：不同容器、不同端口、不同节点池；轮询的 403 退避或节点切换不影响这里。
+name: nijidb-bot-proxy
+
+services:
+  # 专用出口：单端口、fallback 组（节点挂了自动换）、GEOIP 国内直连
+  bot-mihomo:
+    build:
+      context: ../mihomo
+      args:
+        MIHOMO_VERSION: ${MIHOMO_VERSION:-v1.19.31}
+        MIHOMO_SHA256: ${MIHOMO_SHA256:-9e0f11afbf38426b8bd88fdc594678f8161c57eccb4e1b77acb12b493904f1d4}
+    image: nijidb-mihomo:local
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    command: ["-f", "/config/config.yaml"]
+    environment:
+      SAFE_PATHS: /config
+    volumes:
+      - ./:/config:ro
+    networks:
+      - proxy
+    # 控制台只在本机可见
+    ports:
+      - "127.0.0.1:9199:9090"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9090/version"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # 订阅自动更新：拉订阅 → 按 bot 的形状重新渲染（单端口 + fallback + 国内直连）→ 重载
+  bot-subscription:
+    image: nijidb-news-poller:local
+    command: ["scripts/update_mihomo_subscription.py"]
+    restart: on-failure
+    depends_on:
+      bot-mihomo:
+        condition: service_started
+    # 订阅地址沿用轮询服务的环境文件（缺少该文件时也能启动，只是不会更新订阅）
+    env_file:
+      - path: ../news-poller.env
+        required: false
+    environment:
+      MIHOMO_CONFIG_OUT: /config/config.yaml
+      MIHOMO_CONTROLLER: http://bot-mihomo:9090
+      MIHOMO_PROXY: http://bot-mihomo:7890
+      # 只保留轮询健康检查确认可用的节点（共享同一个状态卷，只读挂载）
+      MIHOMO_HEALTHY_FILE: /poller-state/nodes.json
+      MIHOMO_GROUP_TYPE: fallback
+      MIHOMO_CN_DIRECT: "1"
+      MIHOMO_LISTENERS: "0"
+      MIHOMO_INCLUDE: "${BOT_MIHOMO_INCLUDE:-香港,台湾,日本,新加坡,美国}"
+      MIHOMO_EXCLUDE: "${BOT_MIHOMO_EXCLUDE:-IPv6,将在}"
+      MIHOMO_SUB_INTERVAL_MINUTES: "${BOT_MIHOMO_SUB_INTERVAL_MINUTES:-720}"
+    volumes:
+      - ./:/config
+      - bot-state:/state
+      - poller-state:/poller-state:ro
+    networks:
+      - proxy
+
+  # 固定入口：主上游为专用 mihomo，失败自动切备用上游（默认路由器 Clash，见 nginx.conf）
+  bot-gateway:
+    image: nginx:alpine
+    restart: unless-stopped
+    depends_on:
+      - bot-mihomo
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - proxy
+    # 需要给宿主或其它网络的容器使用时再打开（注意这是无认证的代理端口）
+    # ports:
+    #   - "192.168.10.75:7899:7890"
+
+volumes:
+  bot-state:
+  # 复用轮询服务的健康检查结果（可用节点列表）
+  poller-state:
+    external: true
+    name: nijidb-poller_poller-state
+
+networks:
+  proxy:

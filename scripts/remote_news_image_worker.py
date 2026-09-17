@@ -4,7 +4,9 @@
 The worker reads the public Nijidb news API, downloads only HTTPS image URLs
 from the configured official hosts, uploads each image to R2, and then sends
 that article back to ``POST /api/ingest/news``. It deliberately uses direct
-HTTP connections, a fixed User-Agent, no cookies, and no proxy rotation.
+HTTP connections, a fixed User-Agent, and no cookies. One optional fixed proxy
+(``NEWS_WORKER_PROXY``) may be configured for hosts that cannot reach the
+official site directly; there is never any proxy rotation.
 
 Configuration is supplied through environment variables; see
 ``docs/remote-news-worker.md``. The API key is sent only in the import request
@@ -357,7 +359,17 @@ class NewsImageWorker:
         self.config = config
         self.state = load_state(config.state_file)
         self.stop_requested = False
-        self.opener = build_opener(ProxyHandler({}), NoRedirectHandler())
+        # 可选单条固定代理，用于官网直连被拒的运行环境；不做任何轮换。
+        proxy = os.getenv("NEWS_WORKER_PROXY", "").strip()
+        if proxy:
+            parsed_proxy = urlparse(proxy)
+            if parsed_proxy.scheme not in {"http", "https", "socks5", "socks5h"} or not parsed_proxy.hostname:
+                raise WorkerConfigError("NEWS_WORKER_PROXY 必须是完整的代理地址")
+            handlers: dict[str, str] = {"http": proxy, "https": proxy}
+        else:
+            handlers = {}
+        self.proxy_enabled = bool(proxy)
+        self.opener = build_opener(ProxyHandler(handlers), NoRedirectHandler())
         self.base_parts = urlparse(config.base_url)
         self.s3 = boto3.client(
             "s3",
@@ -880,6 +892,7 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
+    worker.log(f"启动：站点 {config.base_url}，出口 {'固定代理' if worker.proxy_enabled else '直连'}，图片间隔 {config.delay_seconds:g}s")
     try:
         worker.run()
     except KeyboardInterrupt:

@@ -11,8 +11,8 @@
 5. 默认工作 60 分钟、休息 30 分钟；处理图片之间至少间隔 30 秒。状态文件支持中断后继续，
    失败的 403 会进入 6 小时退避。
 
-Worker 不使用生产代理、Cookie、UA 轮换或并发抓取；它只使用固定浏览器式 UA 和直连请求。
-移动网络只作为运行 Worker 的备用网络，不需要在网站服务器上配置代理。网站端官方刷新遇到
+Worker 不使用 Cookie、UA 轮换或并发抓取；默认直连并使用固定浏览器式 UA，运行环境无法直连
+官网时可用 `NEWS_WORKER_PROXY` 指定**单条固定代理**（不做轮换，也不使用生产代理）。网站端官方刷新遇到
 HTTP 403 后会进入约 6 小时退避，外部 Worker 也会对图片 403 单独退避。
 
 ## 网站 API
@@ -73,7 +73,7 @@ X-Nijidb-API-Key: <API Key>
 在 Worker 主机上创建权限为 `600` 的环境文件，以下只是字段示例，不要把真实值提交到 Git：
 
 ```text
-NIJIDB_BASE_URL=https://nijidb.alanwanco.xyz
+NIJIDB_BASE_URL=https://your-site.example
 NIJIDB_INGEST_API_KEY=<与网站端相同的单独随机值>
 
 R2_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
@@ -83,9 +83,11 @@ R2_SECRET_ACCESS_KEY=<专用 R2 Secret Access Key>
 R2_PUBLIC_BASE_URL=https://<R2 公共域名>
 R2_IMAGE_PREFIX=images
 
-NEWS_WORKER_STATE_FILE=/home/yellowdog/.local/state/nijidb-news-worker/state.json
+NEWS_WORKER_STATE_FILE=/home/<user>/.local/state/nijidb-news-worker/state.json
 # 可选：扩展官方 CDN 主机，逗号分隔
 # NEWS_WORKER_IMAGE_HOSTS=img.example.com
+# 可选：官网直连被拒时使用的单条固定代理（不做轮换）
+# NEWS_WORKER_PROXY=http://127.0.0.1:17899
 ```
 
 R2 凭据应使用只允许目标 Bucket 对象读写的专用凭据；Worker 不需要删除对象或替换数据库。
@@ -114,9 +116,9 @@ python scripts/remote_news_image_worker.py
 
 ## systemd 示例
 
-在服务器上把脚本同步到固定目录，例如 `/home/yellowdog/nijidb-news-worker/`，环境文件放在
-`/home/yellowdog/.config/nijidb-news-worker.env`，并将下面的 unit 保存到
-`/home/yellowdog/.config/systemd/user/nijidb-news-worker.service`，再使用：
+在服务器上把脚本同步到固定目录，例如 `/home/<user>/nijidb-news-worker/`，环境文件放在
+`/home/<user>/.config/nijidb-news-worker.env`，并将下面的 unit 保存到
+`/home/<user>/.config/systemd/user/nijidb-news-worker.service`，再使用：
 
 ```ini
 [Unit]
@@ -126,10 +128,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=yellowdog
-WorkingDirectory=/home/yellowdog/nijidb-news-worker
-EnvironmentFile=/home/yellowdog/.config/nijidb-news-worker.env
-ExecStart=/home/yellowdog/nijidb-news-worker/.venv/bin/python /home/yellowdog/nijidb-news-worker/scripts/remote_news_image_worker.py
+User=<user>
+WorkingDirectory=/home/<user>/nijidb-news-worker
+EnvironmentFile=/home/<user>/.config/nijidb-news-worker.env
+ExecStart=/home/<user>/nijidb-news-worker/.venv/bin/python /home/<user>/nijidb-news-worker/scripts/remote_news_image_worker.py
 Restart=on-failure
 RestartSec=60
 NoNewPrivileges=true
@@ -142,7 +144,7 @@ WantedBy=multi-user.target
 安装环境文件后执行：
 
 ```bash
-chmod 600 /home/yellowdog/.config/nijidb-news-worker.env
+chmod 600 /home/<user>/.config/nijidb-news-worker.env
 systemctl --user daemon-reload
 systemctl --user enable --now nijidb-news-worker.service
 journalctl --user -u nijidb-news-worker.service -f

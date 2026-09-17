@@ -1,0 +1,130 @@
+# 轮询服务：独立出口代理（mihomo）+ 节点健康检查 + 订阅自动更新 + 内容轮询
+#
+# 使用前：
+#   1. 生成初始节点配置 poller/mihomo/config.yaml（见 README，权限 600）
+#   2. 生成密钥文件 poller/news-poller.env（权限 600，参考 news-poller.env.example）
+#   3. docker compose up -d --build
+name: nijidb-poller
+
+services:
+  # 独立出口：每个节点一个入口端口（7901 起），供健康检查逐节点探测、轮询每趟挑选
+  mihomo:
+    build:
+      context: ./mihomo
+      args:
+        MIHOMO_VERSION: ${MIHOMO_VERSION:-v1.19.31}
+        MIHOMO_SHA256: ${MIHOMO_SHA256:-9e0f11afbf38426b8bd88fdc594678f8161c57eccb4e1b77acb12b493904f1d4}
+    image: nijidb-mihomo:local
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    # 配置来自只读挂载，工作目录留给 mihomo 自己写缓存；
+    # SAFE_PATHS 允许订阅服务通过控制台按路径重载该配置
+    command: ["-f", "/config/config.yaml"]
+    environment:
+      SAFE_PATHS: /config
+    volumes:
+      - ./mihomo:/config:ro
+    networks:
+      - proxy
+    # 仅本机可访问控制台（便于查看节点状态）
+    ports:
+      - "127.0.0.1:9099:9090"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9090/version"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # 订阅自动更新：定期重新渲染配置并让 mihomo 重载（未配置 MIHOMO_SUB_URL 时自动退出）
+  subscription:
+    image: nijidb-news-poller:local
+    command: ["scripts/update_mihomo_subscription.py"]
+    restart: on-failure
+    depends_on:
+      mihomo:
+        condition: service_started
+    env_file:
+      - ./news-poller.env
+    environment:
+      MIHOMO_CONFIG_OUT: /config/config.yaml
+      MIHOMO_CONTROLLER: http://mihomo:9090
+      MIHOMO_PROXY: http://mihomo:7890
+    volumes:
+      - ./mihomo:/config
+      - poller-state:/state
+    networks:
+      - proxy
+
+  # 节点健康检查：逐个入口端口请求官网，写出「最近一次为 200」的可用节点列表
+  proxy-health:
+    image: nijidb-news-poller:local
+    command: ["scripts/proxy_node_health.py"]
+    restart: unless-stopped
+    depends_on:
+      mihomo:
+        condition: service_started
+    environment:
+      NODE_HEALTH_CONFIG: /config/config.yaml
+      NODE_HEALTH_STATE: /state/nodes.json
+      NODE_HEALTH_HINTS: /state/poller-hints.json
+      NODE_HEALTH_SUBSCRIPTION_STATE: /state/subscription.json
+      NODE_HEALTH_PROXY_HOST: mihomo
+      NODE_HEALTH_INTERVAL_MINUTES: "${NODE_HEALTH_INTERVAL_MINUTES:-30}"
+      NODE_HEALTH_BAD_BATCH: "${NODE_HEALTH_BAD_BATCH:-6}"
+      NODE_HEALTH_PROBE_DELAY_SECONDS: "${NODE_HEALTH_PROBE_DELAY_SECONDS:-0.3}"
+      NODE_HEALTH_CONCURRENCY: "${NODE_HEALTH_CONCURRENCY:-8}"
+    volumes:
+      - ./mihomo:/config:ro
+      - poller-state:/state
+    networks:
+      - proxy
+
+  # 内容轮询：每趟从可用节点里随机挑一个，图片上传 R2，结果提交站点 API
+  news-poller:
+    build:
+      context: ..
+      dockerfile: poller/news/Dockerfile
+    image: nijidb-news-poller:local
+    restart: unless-stopped
+    depends_on:
+      mihomo:
+        condition: service_started
+    env_file:
+      - ./news-poller.env
+    environment:
+      NEWS_POLL_PROXY: http://mihomo:7890
+      NEWS_POLL_NODES_FILE: /state/nodes.json
+      NEWS_POLL_HINTS_FILE: /state/poller-hints.json
+      NEWS_POLL_PROXY_HOST: mihomo
+      NEWS_POLL_STATE_FILE: /state/news-poller.json
+    volumes:
+      - poller-state:/state
+    networks:
+      - proxy
+
+  # 可选：历史新闻图片批量归档（补档）。默认不启动：
+  #   docker compose --profile worker up -d
+  image-worker:
+    profiles: ["worker"]
+    image: nijidb-news-poller:local
+    command: ["scripts/remote_news_image_worker.py"]
+    restart: unless-stopped
+    depends_on:
+      mihomo:
+        condition: service_started
+    env_file:
+      - ./news-poller.env
+    environment:
+      NEWS_WORKER_PROXY: http://mihomo:7890
+      NEWS_WORKER_STATE_FILE: /state/image-worker.json
+    volumes:
+      - poller-state:/state
+    networks:
+      - proxy
+
+volumes:
+  poller-state:
+
+networks:
+  proxy:

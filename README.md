@@ -59,6 +59,72 @@ docker run --rm --mount source=nijidb-data,target=/data \
 -e NIJIDB_INGEST_API_KEY='现有的新闻 API Key'
 ```
 
+## 异地官网轮询（官网 403 环境）
+
+当站点服务器所在出口被官网拦截时（官网返回 HTTP 403，响应体却是官网自己的 404 页），
+服务器自身无法再轮询官网。此时把官网内容的检测与更新放到另一台能直连官网的机器上运行：
+
+| 脚本 | 职责 |
+| --- | --- |
+| `scripts/local_official_news_poller.py` | 官网新闻内容检测与更新：抓列表 → 解析详情 → 图片上传 R2 → `POST /api/ingest/news` |
+| `scripts/remote_news_image_worker.py` | 历史新闻图片的批量归档（补档），按站点新闻索引顺序处理 |
+
+容器化部署（独立出口代理 + 轮询服务）见 [`poller/README.md`](poller/README.md)，支持以后追加音乐等其它轮询服务。
+
+### 轮询行为
+
+- 默认只扫描官网新闻列表第一页（用 `NEWS_POLL_MAX_PAGES` 可调整）。
+- 站点没有该文章 → 归档图片到 R2 后提交新增。
+- 站点已有、官网内容变化 → 重新归档图片并提交更新。
+- 站点已有、内容未变 → 跳过，不写入。
+- 站点已有但图片尚未归档（封面不是当前实例的 R2 地址）→ 补归档后提交。
+- 官网返回 403 → 退避（默认 30 分钟），并可通过控制接口自动切换出口节点。
+- 两趟之间随机等待 30–60 分钟，避免固定节奏。
+
+### 变更判断
+
+官网详情页不返回 `ETag`/`Last-Modified`，且 HTML 含时间相关动态内容（同一篇每次抓取的
+原文哈希都不同）。因此变更判断使用**解析后的内容指纹**（标题、日期、分类、摘要、正文、
+图片来源）；提交给接口的 `source_hash` 只作信息记录。
+
+### 环境变量
+
+| 变量 | 说明 |
+| --- | --- |
+| `NIJIDB_BASE_URL` | 站点地址，必填，无默认值 |
+| `NIJIDB_INGEST_API_KEY` | 新闻资源密钥，必填；已生成数据库密钥时用数据库密钥，否则回退到该环境变量 |
+| `NEWS_POLL_PROXY` | 访问官网使用的**单条固定代理**（如 `http://127.0.0.1:<port>`）；留空则直连 |
+| `R2_ENDPOINT` / `R2_BUCKET` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_PUBLIC_BASE_URL` | R2 凭据与公开地址 |
+| `R2_IMAGE_PREFIX` | 默认 `images`；图片写入 `<prefix>/news-remote/<sha256>.<ext>` |
+| `NEWS_POLL_STATE_FILE` | 状态文件（基线、计数），默认 `~/.local/state/nijidb-news-poller/state.json` |
+| `NEWS_POLL_MAX_PAGES` | 每趟扫描的官网列表页数，默认 1 |
+| `NEWS_POLL_ARTICLE_DELAY_SECONDS` / `NEWS_POLL_IMAGE_DELAY_SECONDS` | 篇间/图间间隔，默认 30 / 10 |
+| `NEWS_POLL_REST_MIN_MINUTES` / `NEWS_POLL_REST_MAX_MINUTES` | 两趟之间的随机间隔区间，默认 30 / 60 |
+| `NEWS_POLL_BACKOFF_MINUTES` | 官网 403 后的退避时长，默认 30 |
+| `NEWS_POLL_NODE_API` / `NEWS_POLL_NODES` | 可选：403 时通过该控制接口切换出口节点（如本机 mihomo 的 `http://127.0.0.1:<port>`） |
+
+站点密钥与 R2 凭据只放在运行机器上权限为 `600` 的环境文件里，不要写进仓库、状态文件或日志；
+状态文件只保存内容指纹与计数。密钥通过 HTTPS 请求头发送，不要放进 URL。
+
+### 运行
+
+```bash
+# 只检查，不下载、不上传、不提交
+uv run --locked python scripts/local_official_news_poller.py --dry-run --once --pages 1 --limit 3
+
+# 跑一趟就退出
+uv run --locked python scripts/local_official_news_poller.py --once
+
+# 常驻：每趟之间随机休息 30–60 分钟
+uv run --locked python scripts/local_official_news_poller.py
+```
+
+其他参数：`--only PAGE_NAME` 只处理指定文章，`--refresh-existing` 忽略跳过条件重新提交
+（对账用），`--limit N` 限制每趟检查篇数。
+
+官网请求保持串行、低频、固定 UA，不使用 Cookie、UA 轮换或并发抓取；代理只允许配置
+**单条固定出口**，不做轮换。
+
 ## 开发调试
 
 后端和前端分开启动，Vue 页面由 Vite 提供热更新，修改前端组件或样式时不需要重启服务：

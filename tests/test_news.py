@@ -91,6 +91,21 @@ class NewsStorageTests(unittest.TestCase):
         self.assertEqual(self.conn.execute("SELECT title FROM news_articles").fetchone()[0], "手動")
         self.assertEqual(self.conn.execute("SELECT kind FROM news_images").fetchone()[0], "manual")
 
+    def test_r2_image_reference_survives_refresh_without_public_url(self):
+        public_url = "https://images.example.test/images/news-remote/image.jpg"
+        with_public_url = record(
+            images=[
+                {
+                    "kind": "remote",
+                    "source_url": "https://example.com/image.jpg",
+                    "public_url": public_url,
+                }
+            ]
+        )
+        upsert_news_record(self.conn, with_public_url)
+        upsert_news_record(self.conn, record())
+        self.assertEqual(self.conn.execute("SELECT public_url FROM news_images").fetchone()[0], public_url)
+
     def test_local_import_stable_and_nested_headings(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "[20260911]niji_topics_0001_01_123.md"
@@ -279,6 +294,7 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "news_run_lock", asyncio.Lock()),
             patch.object(main, "sync_lock", asyncio.Lock()),
             patch.object(main, "official_site_health_lock", asyncio.Lock()),
+            patch.object(main, "official_site_backoff_until", 0.0),
         ]
         for item in self.patches:
             item.start()
@@ -292,6 +308,75 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
 
     def login(self):
         self.client.cookies.set("nijidb_admin", main.admin_cookie_value(main.settings()["admin_password_hash"]))
+
+    async def test_official_source_url_is_not_used_as_browser_image_url(self):
+        with main.db() as conn:
+            image = conn.execute(
+                "SELECT * FROM news_images WHERE news_id = ?", (news_id("niji_topics", "01_123"),)
+            ).fetchone()
+        self.assertEqual(main.news_image_url(image), "")
+        self.assertEqual((await self.client.get(f"/api/news/images/{image['id']}")).status_code, 404)
+
+    async def test_remote_ingest_writes_r2_url_without_browser_auth(self):
+        article_id = news_id("niji_topics", "01_123")
+        payload = {
+            "id": article_id,
+            "source": "niji_topics",
+            "page_name": "01_123",
+            "title": "远程导入标题",
+            "published_at": "2026-09-17",
+            "category": "goods",
+            "tags": ["goods"],
+            "summary": "远程导入摘要",
+            "body_markdown": "远程导入正文",
+            "source_url": URL,
+            "images": [
+                {
+                    "kind": "remote",
+                    "source_url": "https://example.com/remote.jpg",
+                    "public_url": "https://images.example.test/images/news-remote/remote.jpg",
+                    "width": 640,
+                    "height": 360,
+                    "bytes": 1234,
+                    "sha256": "a" * 64,
+                }
+            ],
+        }
+        with patch.dict(os.environ, {"NIJIDB_INGEST_API_KEY": "remote-test-key"}), patch.object(
+            main, "R2_PUBLIC_BASE_URL", "https://images.example.test"
+        ):
+            unauthorized = await self.client.post("/api/ingest/news", json=payload)
+            self.assertEqual(unauthorized.status_code, 401)
+            response = await self.client.post(
+                "/api/ingest/news",
+                json=payload,
+                headers={"X-Nijidb-API-Key": "remote-test-key"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["r2_image_count"], 1)
+        with main.db() as conn:
+            article = conn.execute("SELECT title FROM news_articles WHERE id = ?", (article_id,)).fetchone()
+            image = conn.execute("SELECT public_url FROM news_images WHERE news_id = ?", (article_id,)).fetchone()
+        self.assertEqual(article["title"], "远程导入标题")
+        self.assertEqual(image["public_url"], payload["images"][0]["public_url"])
+
+    async def test_remote_ingest_rejects_public_url_outside_configured_r2(self):
+        payload = {
+            "source": "niji_topics",
+            "page_name": "01_123",
+            "title": "远程导入标题",
+            "source_url": URL,
+            "images": [{"source_url": "https://example.com/remote.jpg", "public_url": "https://evil.test/a.jpg"}],
+        }
+        with patch.dict(os.environ, {"NIJIDB_INGEST_API_KEY": "remote-test-key"}), patch.object(
+            main, "R2_PUBLIC_BASE_URL", "https://images.example.test"
+        ):
+            response = await self.client.post(
+                "/api/ingest/news",
+                json=payload,
+                headers={"X-Nijidb-API-Key": "remote-test-key"},
+            )
+        self.assertEqual(response.status_code, 400)
 
     async def test_official_site_health_notifies_only_on_failure_and_recovery(self):
         config = {"onebot_url": "https://bot.example.test", "onebot_target": "123", "onebot_token": ""}
@@ -308,6 +393,17 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("官网访问失败", send.await_args_list[0].args[0])
         self.assertIn("HTTPStatusError HTTP 403", send.await_args_list[0].args[0])
         self.assertIn("官网访问已恢复", send.await_args_list[1].args[0])
+
+    async def test_news_sync_enters_403_backoff_without_retrying_other_pages(self):
+        request = httpx.Request("GET", URL)
+        response = httpx.Response(403, request=request)
+        error = httpx.HTTPStatusError("blocked", request=request, response=response)
+        with patch.object(main, "fetch_news_page", AsyncMock(side_effect=error)) as fetch:
+            result = await main.news_sync_once()
+        self.assertTrue(result["backoff"])
+        self.assertGreater(result["backoff_seconds"], 0)
+        self.assertEqual(fetch.await_count, 1)
+        self.assertGreater(main.official_site_backoff_remaining(), 0)
 
     async def test_editor_login_is_limited_to_programs_collabo_and_database_downloads(self):
         values = main.settings()

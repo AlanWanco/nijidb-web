@@ -11,6 +11,7 @@ import re
 import os
 import secrets
 import sqlite3
+import time as time_module
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -50,6 +51,7 @@ from app.news import (
     clean_news_markdown,
     clean_tag_values,
     ensure_news_schema,
+    normalize_news_date,
     news_article_tag_ids,
     news_id,
     news_source_group,
@@ -78,6 +80,16 @@ SOURCE_URL = "https://www.lovelive-anime.jp/nijigasaki/cd.php"
 EVENTERNOTE_EVENTS_URL = "https://events.nijigaku.fans/api/events"
 MAX_POLL_INTERVAL_MINUTES = 5 * 60
 MANUAL_SOURCE_MAX_BYTES = 8 * 1024 * 1024
+REMOTE_NEWS_INGEST_MAX_BYTES = 8 * 1024 * 1024
+REMOTE_NEWS_INGEST_MAX_IMAGES = 128
+REMOTE_NEWS_INGEST_MAX_IMAGE_BYTES = 20 * 1024 * 1024
+REMOTE_NEWS_INGEST_API_KEY_ENV = "NIJIDB_INGEST_API_KEY"
+REMOTE_NEWS_SOURCE_HOSTS = {
+    "niji_topics": {"www.lovelive-anime.jp", "lovelive-anime.jp"},
+    "niji_news": {"www.lovelive-anime.jp", "lovelive-anime.jp"},
+    "as_news": {"lovelive-as.bushimo.jp"},
+}
+OFFICIAL_SITE_403_BACKOFF_SECONDS = 6 * 60 * 60
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = Path(os.getenv("DATA_DIR", "/data")) / "nijidb.sqlite3"
 MEDIA_DIR = DB_PATH.parent / "images"
@@ -163,6 +175,7 @@ stop_event = asyncio.Event()
 sync_lock = asyncio.Lock()
 news_run_lock = asyncio.Lock()
 official_site_health_lock = asyncio.Lock()
+official_site_backoff_until = 0.0
 music_settings_event = asyncio.Event()
 news_settings_event = asyncio.Event()
 _r2_client: Any | None = None
@@ -3944,6 +3957,40 @@ def r2_public_image_url(relative_path: str) -> str:
     return f"{R2_PUBLIC_BASE_URL}/{quote(r2_object_key(relative_path), safe='/')}"
 
 
+def valid_r2_public_image_url(value: Any) -> bool:
+    """Accept only image URLs under this instance's configured R2 public base."""
+    raw = str(value or "").strip()
+    if not raw or not R2_PUBLIC_BASE_URL:
+        return False
+    try:
+        base = urlparse(R2_PUBLIC_BASE_URL)
+        candidate = urlparse(raw)
+    except ValueError:
+        return False
+    if (
+        base.scheme not in {"http", "https"}
+        or not base.netloc
+        or candidate.scheme != base.scheme
+        or candidate.netloc != base.netloc
+        or candidate.username
+        or candidate.password
+        or candidate.query
+        or candidate.fragment
+    ):
+        return False
+    base_path = unquote(base.path).rstrip("/")
+    candidate_path = unquote(candidate.path)
+    prefix = R2_IMAGE_PREFIX.strip("/")
+    expected_prefix = f"{base_path}/{prefix}" if prefix else base_path
+    if expected_prefix:
+        expected_prefix = expected_prefix.rstrip("/")
+        if not candidate_path.startswith(f"{expected_prefix}/"):
+            return False
+    elif not candidate_path.strip("/"):
+        return False
+    return all(part not in {"", ".", ".."} for part in candidate_path.split("/") if part)
+
+
 def public_image_url(filename: str) -> str:
     if not r2_is_configured():
         return f"/media/{filename}"
@@ -4202,7 +4249,7 @@ def news_image_target(row: sqlite3.Row | dict[str, Any]) -> Path | None:
 
 def news_image_url(row: sqlite3.Row | dict[str, Any]) -> str:
     stored_public_url = str(row.get("public_url", "") if isinstance(row, dict) else row["public_url"] or "").strip()
-    if stored_public_url and valid_external_url(stored_public_url):
+    if stored_public_url and valid_r2_public_image_url(stored_public_url):
         return stored_public_url
     target = news_image_target(row)
     if target:
@@ -4214,12 +4261,14 @@ def news_image_url(row: sqlite3.Row | dict[str, Any]) -> str:
             return r2_public_image_url(relative)
         image_id = row["id"]
         return f"/api/news/images/{image_id}"
-    source_url = str(row["source_url"] if isinstance(row, dict) else row["source_url"] or "").strip()
-    parsed = urlparse(source_url)
-    return source_url if parsed.scheme in {"http", "https"} and parsed.netloc else ""
+    # Never hotlink the official site from a visitor's browser. The source URL
+    # remains available as metadata, while the UI uses a placeholder until the
+    # image is archived locally or uploaded to R2.
+    return ""
 
 
 def news_image_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    stored_public_url = str(row["public_url"] or "").strip()
     payload = {
         "id": row["id"],
         "position": row["position"],
@@ -4227,7 +4276,7 @@ def news_image_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "url": news_image_url(row),
         "source_url": str(row["source_url"] or ""),
         "local_path": str(row["local_path"] or ""),
-        "public_url": str(row["public_url"] or ""),
+        "public_url": stored_public_url if valid_r2_public_image_url(stored_public_url) else "",
         "alt_text": str(row["alt_text"] or ""),
         "width": row["width"],
         "height": row["height"],
@@ -4430,6 +4479,35 @@ def news_slow_refresh_status(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def official_site_http_status(error: Exception) -> int | None:
+    response = getattr(error, "response", None)
+    status = getattr(response, "status_code", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def official_site_backoff_remaining() -> int:
+    return max(0, int(official_site_backoff_until - time_module.time()))
+
+
+def note_official_site_403(error: Exception) -> int:
+    global official_site_backoff_until
+    if official_site_http_status(error) != 403:
+        return 0
+    official_site_backoff_until = max(
+        official_site_backoff_until,
+        time_module.time() + OFFICIAL_SITE_403_BACKOFF_SECONDS,
+    )
+    return official_site_backoff_remaining()
+
+
+def clear_official_site_backoff() -> None:
+    global official_site_backoff_until
+    official_site_backoff_until = 0.0
+
+
 def news_refresh_error_is_risk(error: Exception, reason: str) -> bool:
     response = getattr(error, "response", None)
     status_code = getattr(response, "status_code", None)
@@ -4454,6 +4532,9 @@ async def news_slow_refresh_once() -> dict[str, Any]:
     """Refresh one archived article using official image URLs, then pause in the scheduler."""
     if news_run_lock.locked():
         return {"processed": False, "busy": True}
+    backoff_seconds = official_site_backoff_remaining()
+    if backoff_seconds:
+        return {"processed": False, "backoff": True, "backoff_seconds": backoff_seconds}
     async with news_run_lock:
         now = datetime.now(timezone.utc).isoformat()
         with db() as conn:
@@ -4506,6 +4587,7 @@ async def news_slow_refresh_once() -> dict[str, Any]:
                 )
         except Exception as exc:
             reason = describe_news_fetch_error(exc)
+            note_official_site_403(exc)
             await record_official_site_health(False, "新闻慢速刷新", reason)
             risk = news_refresh_error_is_risk(exc, reason)
             permanent = news_refresh_error_is_permanent(exc)
@@ -4534,6 +4616,7 @@ async def news_slow_refresh_once() -> dict[str, Any]:
                 "next_attempt_at": next_attempt_at,
             }
 
+        clear_official_site_backoff()
         await record_official_site_health(True, "新闻慢速刷新")
         completed_at = datetime.now(timezone.utc).isoformat()
         with db() as conn:
@@ -4594,6 +4677,187 @@ async def read_manual_source_request(request: Request) -> tuple[dict[str, Any], 
     if len(html.encode("utf-8")) > MANUAL_SOURCE_MAX_BYTES:
         raise HTTPException(413, "网页源代码不能超过 8 MB")
     return payload, html
+
+
+def require_remote_news_ingest_key(request: Request) -> None:
+    expected = os.getenv(REMOTE_NEWS_INGEST_API_KEY_ENV, "").strip()
+    supplied = str(request.headers.get("x-nijidb-api-key", "")).strip()
+    if not expected:
+        raise HTTPException(503, "远程新闻导入未配置")
+    if len(supplied) > 256 or not supplied or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(401, "API Key 无效")
+
+
+async def read_remote_news_request(request: Request) -> dict[str, Any]:
+    content_length = request.headers.get("content-length", "")
+    try:
+        if content_length and int(content_length) > REMOTE_NEWS_INGEST_MAX_BYTES:
+            raise HTTPException(413, "远程新闻导入请求过大")
+    except ValueError:
+        pass
+    try:
+        body = await request.body()
+    except Exception as exc:
+        raise HTTPException(400, "请求格式无效") from exc
+    if len(body) > REMOTE_NEWS_INGEST_MAX_BYTES:
+        raise HTTPException(413, "远程新闻导入请求不能超过 8 MB")
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(400, "请求格式无效") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "请求格式无效")
+    return payload
+
+
+def remote_news_integer(value: Any, field: str, maximum: int) -> int:
+    if value in (None, ""):
+        return 0
+    if isinstance(value, bool):
+        raise HTTPException(400, f"{field}格式无效")
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, f"{field}格式无效") from exc
+    if number < 0 or number > maximum:
+        raise HTTPException(400, f"{field}超出范围")
+    return number
+
+
+def remote_news_image(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise HTTPException(400, "新闻图片格式无效")
+    kind = str(value.get("kind") or "remote").strip().lower()
+    if kind != "remote":
+        raise HTTPException(400, "远程导入只能写入 remote 新闻图片")
+    if str(value.get("local_path") or "").strip():
+        raise HTTPException(400, "远程导入不接受本地图片路径")
+    source_url = str(value.get("source_url") or "").strip()
+    if len(source_url) > 2000:
+        raise HTTPException(400, "新闻图片来源地址过长")
+    try:
+        parsed = urlparse(source_url)
+    except ValueError as exc:
+        raise HTTPException(400, "新闻图片来源地址无效") from exc
+    if (
+        not source_url
+        or parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+        or "\\" in source_url
+    ):
+        raise HTTPException(400, "新闻图片来源地址必须是无凭据的 HTTP/HTTPS 地址")
+    public_url = str(value.get("public_url") or "").strip()
+    if public_url:
+        if not R2_PUBLIC_BASE_URL:
+            raise HTTPException(503, "R2 公开地址未配置")
+        if len(public_url) > 2000 or not valid_r2_public_image_url(public_url):
+            raise HTTPException(400, "新闻图片公开地址必须位于当前实例的 R2 图片地址下")
+    alt_text = str(value.get("alt_text") or "").strip()
+    if len(alt_text) > 500:
+        raise HTTPException(400, "新闻图片说明过长")
+    sha256 = str(value.get("sha256") or "").strip().lower()
+    if sha256 and not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        raise HTTPException(400, "新闻图片 SHA-256 格式无效")
+    return {
+        "kind": "remote",
+        "source_url": source_url,
+        "public_url": public_url,
+        "alt_text": alt_text,
+        "width": remote_news_integer(value.get("width"), "图片宽度", 100000),
+        "height": remote_news_integer(value.get("height"), "图片高度", 100000),
+        "bytes": remote_news_integer(value.get("bytes"), "图片大小", REMOTE_NEWS_INGEST_MAX_IMAGE_BYTES),
+        "sha256": sha256,
+    }
+
+
+def remote_news_record(payload: dict[str, Any]) -> dict[str, Any]:
+    article = payload.get("article", payload)
+    if not isinstance(article, dict):
+        raise HTTPException(400, "新闻内容格式无效")
+    source = str(article.get("source") or "").strip().lower()
+    if source not in NEWS_SOURCES:
+        raise HTTPException(400, "新闻来源类型无效")
+    page_name = str(article.get("page_name") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", page_name):
+        raise HTTPException(400, "新闻页面名称格式无效")
+    source_url = str(article.get("source_url") or "").strip()
+    try:
+        source_url = validate_news_url(source_url)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    try:
+        source_host = urlparse(source_url).hostname
+    except ValueError as exc:
+        raise HTTPException(400, "新闻来源地址无效") from exc
+    if source_host not in REMOTE_NEWS_SOURCE_HOSTS[source]:
+        raise HTTPException(400, "新闻来源地址与来源类型不匹配")
+    expected_id = news_id(source, page_name, source_url)
+    supplied_id = str(article.get("id") or "").strip()
+    record_id = expected_id
+    if supplied_id:
+        if not re.fullmatch(r"[0-9a-f]{16}", supplied_id):
+            raise HTTPException(400, "新闻 ID 格式无效")
+        if supplied_id != expected_id:
+            # source_url is an editable field. Allow a worker to update the
+            # stable existing article ID when an administrator changed only
+            # that field, but never let it overwrite an unrelated article.
+            with db() as conn:
+                existing = conn.execute(
+                    "SELECT source, page_name FROM news_articles WHERE id = ?", (supplied_id,)
+                ).fetchone()
+            if not existing or existing["source"] != source or existing["page_name"] != page_name:
+                raise HTTPException(400, "新闻 ID 与来源信息不匹配")
+            record_id = supplied_id
+
+    title = str(article.get("title") or "").strip()
+    if not title:
+        raise HTTPException(400, "新闻标题不能为空")
+    if len(title) > 500:
+        raise HTTPException(400, "新闻标题过长")
+    published_raw = str(article.get("published_at") or "").strip()
+    published_at = normalize_news_date(published_raw)
+    if published_raw and not published_at:
+        raise HTTPException(400, "发布日期格式无效")
+    category = str(article.get("category") or "").strip()
+    if len(category) > 100:
+        raise HTTPException(400, "新闻分类过长")
+    summary = str(article.get("summary") or "").strip()
+    body_markdown = str(article.get("body_markdown") or "")
+    if len(body_markdown.encode("utf-8")) > 500000:
+        raise HTTPException(400, "新闻正文不能超过 500 KB")
+    tags = article.get("tags", [])
+    if not isinstance(tags, list) or len(tags) > 64 or any(not isinstance(tag, str) for tag in tags):
+        raise HTTPException(400, "新闻标签格式无效")
+    source_hash = str(article.get("source_hash") or "").strip()
+    if len(source_hash) > 256:
+        raise HTTPException(400, "新闻来源摘要过长")
+
+    record: dict[str, Any] = {
+        "id": record_id,
+        "source": source,
+        "page_name": page_name,
+        "title": title,
+        "published_at": published_at,
+        "category": category,
+        "tags": tags,
+        "summary": truncate_news_summary(summary),
+        "body_markdown": body_markdown,
+        "source_url": source_url,
+        "source_file": "",
+        "source_hash": source_hash,
+    }
+    if "images" in article:
+        images = article.get("images")
+        if not isinstance(images, list) or len(images) > REMOTE_NEWS_INGEST_MAX_IMAGES:
+            raise HTTPException(400, "新闻图片数量超出限制")
+        normalized_images = [remote_news_image(image) for image in images]
+        image_sources = [image["source_url"] for image in normalized_images]
+        if len(set(image_sources)) != len(image_sources):
+            raise HTTPException(400, "新闻图片来源地址不能重复")
+        record["images"] = normalized_images
+    return record
 
 
 def news_listing_url(offset: int) -> str:
@@ -4684,6 +4948,15 @@ async def news_sync_once() -> dict[str, Any]:
     """Revalidate recent Topics details, including edits with unchanged listing titles."""
     if news_run_lock.locked():
         raise HTTPException(409, "新闻检查正在进行，请稍后再试")
+    backoff_seconds = official_site_backoff_remaining()
+    if backoff_seconds:
+        return {
+            "discovered_count": 0,
+            "changed_count": 0,
+            "error": f"官网曾返回 HTTP 403，暂停请求中（剩余约 {backoff_seconds // 60} 分钟）",
+            "backoff": True,
+            "backoff_seconds": backoff_seconds,
+        }
     async with news_run_lock:
         print("[news-sync] started", flush=True)
         discovered_count = changed_count = detail_errors = 0
@@ -4698,6 +4971,7 @@ async def news_sync_once() -> dict[str, Any]:
                 for _ in range(4):
                     site_checked = True
                     response = await fetch_news_page(client, news_listing_url(offset))
+                    clear_official_site_backoff()
                     entries = parse_topic_listing(response.text, NEWS_TOPICS_URL)
                     if not entries:
                         raise ValueError("Topics 页面没有解析到新闻条目")
@@ -4729,6 +5003,8 @@ async def news_sync_once() -> dict[str, Any]:
                                 changed_news_ids.append(record_id)
                         except Exception as exc:
                             detail_errors += 1
+                            if note_official_site_403(exc):
+                                raise
                             print(f"[news-sync] detail failed {record_id}: {describe_news_fetch_error(exc)}", flush=True)
                     next_offset = topic_next_offset(response.text, offset)
                     if next_offset is None:
@@ -4740,6 +5016,9 @@ async def news_sync_once() -> dict[str, Any]:
                 error_message = f"{detail_errors} 条详情读取失败，下次检查将重试"
         except Exception as exc:
             reason = describe_news_fetch_error(exc)
+            backoff_seconds = note_official_site_403(exc)
+            if backoff_seconds:
+                reason = f"{reason}，已暂停官网请求约 {backoff_seconds // 60} 分钟"
             error_message = f"{reason}，已保留已有新闻"
             print(f"[news-sync] failed: {reason}", flush=True)
         if site_checked:
@@ -4755,7 +5034,14 @@ async def news_sync_once() -> dict[str, Any]:
             except Exception as exc:
                 print(f"[news-sync] notification failed: {type(exc).__name__}", flush=True)
         print(f"[news-sync] completed: {changed_count} changed, {discovered_count} topics checked", flush=True)
-        return {"discovered_count": discovered_count, "changed_count": changed_count, "error": error_message}
+        backoff_seconds = official_site_backoff_remaining()
+        return {
+            "discovered_count": discovered_count,
+            "changed_count": changed_count,
+            "error": error_message,
+            "backoff": bool(backoff_seconds),
+            "backoff_seconds": backoff_seconds,
+        }
 
 
 async def wait_or_stop(seconds: int) -> None:
@@ -4853,6 +5139,8 @@ async def news_slow_refresh_scheduler() -> None:
                 result = await news_slow_refresh_once()
                 if result.get("busy"):
                     delay = min(delay, 5)
+                elif result.get("backoff"):
+                    delay = max(30, int(result.get("backoff_seconds") or 300))
                 elif not result.get("processed"):
                     delay = 30
             except Exception as exc:
@@ -5154,10 +5442,11 @@ async def api_news_image(image_id: int):
     target = news_image_target(image)
     if target:
         return FileResponse(target, media_type=mimetypes.guess_type(target.name)[0])
-    source_url = str(image["source_url"] or "").strip()
-    parsed = urlparse(source_url)
-    if parsed.scheme in {"http", "https"} and parsed.netloc:
-        return RedirectResponse(source_url)
+    public_url = str(image["public_url"] or "").strip()
+    if public_url and valid_r2_public_image_url(public_url):
+        return RedirectResponse(public_url)
+    # Do not turn this endpoint into a proxy or redirect to an official image.
+    # The external worker must archive it locally or to R2 first.
     raise HTTPException(404, "新闻图片资源不存在")
 
 
@@ -5449,6 +5738,38 @@ async def api_save_settings(request: Request) -> dict[str, dict[str, str]]:
     return {"settings": values}
 
 
+@app.post("/api/ingest/news", include_in_schema=False)
+async def api_remote_news_ingest(request: Request) -> dict[str, Any]:
+    """Accept validated news content after an external worker archives images to R2."""
+    require_remote_news_ingest_key(request)
+    payload = await read_remote_news_request(request)
+    record = remote_news_record(payload)
+    if news_run_lock.locked():
+        raise HTTPException(409, "新闻检查正在进行，请稍后再试")
+    async with news_run_lock:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        async with sync_lock:
+            with db() as conn:
+                changed, created = upsert_news_record(conn, record, timestamp)
+                article = conn.execute("SELECT * FROM news_articles WHERE id = ?", (record["id"],)).fetchone()
+                image_count = conn.execute(
+                    "SELECT COUNT(*) FROM news_images WHERE news_id = ?", (record["id"],)
+                ).fetchone()[0]
+                r2_image_count = conn.execute(
+                    "SELECT COUNT(*) FROM news_images WHERE news_id = ? AND public_url != ''", (record["id"],)
+                ).fetchone()[0]
+    if changed:
+        log_database_activity("news", f"远程导入新闻：{str(article['title'] or '')[:80]}")
+    return {
+        "id": record["id"],
+        "source": record["source"],
+        "created": created,
+        "changed": changed,
+        "image_count": image_count,
+        "r2_image_count": r2_image_count,
+    }
+
+
 @app.post("/api/admin/source-html")
 async def api_admin_source_html(request: Request) -> dict[str, Any]:
     """Parse HTML obtained by an administrator's browser without proxying it."""
@@ -5557,6 +5878,9 @@ async def api_admin_news_sync(request: Request) -> dict[str, Any]:
 @app.post("/api/admin/news/{news_id}/refresh")
 async def api_admin_news_refresh(news_id: str, request: Request) -> dict[str, Any]:
     require_api_admin(request)
+    backoff_seconds = official_site_backoff_remaining()
+    if backoff_seconds:
+        raise HTTPException(429, f"官网刚返回 HTTP 403，暂缓刷新（剩余约 {backoff_seconds // 60} 分钟）")
     if news_run_lock.locked():
         raise HTTPException(409, "新闻检查正在进行，请稍后再试")
     async with news_run_lock:
@@ -5573,6 +5897,7 @@ async def api_admin_news_refresh(news_id: str, request: Request) -> dict[str, An
             await record_official_site_health(True, "新闻手动刷新")
         except Exception as exc:
             reason = describe_news_fetch_error(exc)
+            note_official_site_403(exc)
             if site_checked:
                 await record_official_site_health(False, "新闻手动刷新", reason)
             print(f"[news-refresh] failed {news_id}: {reason}", flush=True)

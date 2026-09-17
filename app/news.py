@@ -1160,6 +1160,7 @@ def upsert_news_record(conn, record: dict[str, Any], now: str | None = None) -> 
                 "position": position,
                 "local_path": local_path,
                 "source_url": source_url,
+                "public_url": str(image.get("public_url") or "").strip(),
                 "alt_text": str(image.get("alt_text") or "").strip(),
                 "width": int(image.get("width") or 0),
                 "height": int(image.get("height") or 0),
@@ -1171,6 +1172,11 @@ def upsert_news_record(conn, record: dict[str, Any], now: str | None = None) -> 
             )
             if duplicate:
                 remaining.pop(duplicate["id"], None)
+                # A later official refresh may not know about a URL uploaded by
+                # the remote worker. Keep the R2 reference until a new one is
+                # explicitly supplied.
+                if not values["public_url"]:
+                    values["public_url"] = str(duplicate["public_url"] or "")
                 if any(duplicate[key] != value for key, value in values.items()):
                     assignments = ", ".join(f"{key} = ?" for key in values)
                     conn.execute(

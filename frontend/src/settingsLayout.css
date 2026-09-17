@@ -95,6 +95,67 @@
   white-space: normal;
   overflow-wrap: anywhere;
 }
+.settings select,
+.settings textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 13px 14px;
+  background: var(--paper);
+  color: var(--ink);
+  outline: 0;
+}
+.settings select:focus,
+.settings textarea:focus {
+  border-color: var(--accent);
+  background: var(--surface);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+.settings textarea.manual-source-textarea {
+  min-height: 280px;
+  resize: vertical;
+  font: 11px/1.5 var(--mono);
+  tab-size: 2;
+}
+.manual-source-card > p {
+  margin: -7px 0 22px;
+  font-size: 12px;
+  line-height: 1.65;
+}
+.manual-source-file-button {
+  display: inline-flex !important;
+  align-items: center;
+  margin: 0 !important;
+  color: var(--accent) !important;
+  cursor: pointer;
+}
+.manual-source-file-button span,
+.manual-source-open {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  border: 1px solid var(--accent);
+  border-radius: 9px;
+  padding: 12px 20px;
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+.manual-source-file-button input {
+  position: absolute;
+  width: 1px !important;
+  height: 1px !important;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+@media (min-width: 900px) {
+  .settings-stack > .manual-source-card {
+    grid-column: 1 / -1;
+  }
+}
 @media (max-width: 760px) {
   .settings-workspace {
     grid-template-columns: minmax(0, 1fr);

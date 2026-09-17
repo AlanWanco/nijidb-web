@@ -11,6 +11,7 @@ const route = useRoute();
 const sections = [
   { id: "music", label: "音乐抓取设置" },
   { id: "news", label: "新闻抓取设置" },
+  { id: "source", label: "手动源代码" },
   { id: "bot", label: "Bot 设置" },
   { id: "database", label: "数据库" },
   { id: "account", label: "账号安全" },
@@ -31,6 +32,15 @@ const logPage = ref(1);
 const newsLastSync = ref(null);
 const newsSlowRefresh = ref(null);
 const refreshingLogs = ref(false);
+const sourceUrls = reactive({
+  music: "https://www.lovelive-anime.jp/nijigasaki/cd.php",
+  news: "https://www.lovelive-anime.jp/nijigasaki/topics.php",
+});
+const manualSourceType = ref("music");
+const manualSourceUrl = ref("");
+const manualSourceHtml = ref("");
+const queryingSource = ref(false);
+const submittingSource = ref(false);
 const settings = reactive({
   interval_minutes: "10",
   detail_interval_minutes: "5",
@@ -116,6 +126,25 @@ function setSettings(values) {
   Object.assign(settings, values);
 }
 
+const manualSourceTargetUrl = computed(() =>
+  manualSourceType.value === "music"
+    ? sourceUrls.music
+    : manualSourceUrl.value.trim() || sourceUrls.news,
+);
+
+function officialSourceUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return (
+      parsed.protocol === "https:" &&
+      ["www.lovelive-anime.jp", "lovelive-anime.jp"].includes(parsed.hostname) &&
+      (!parsed.port || parsed.port === "443")
+    );
+  } catch {
+    return false;
+  }
+}
+
 function activityLogSummary(log) {
   if (log.error)
     return log.category === "news"
@@ -137,6 +166,7 @@ async function loadSettings() {
     const data = await api("/api/admin/settings");
     userRole.value = data.role || "admin";
     setSettings(data.settings);
+    Object.assign(sourceUrls, data.source_urls || {});
     activityLogs.value = data.activity_logs || [];
     newsLastSync.value = data.news_last_sync;
     newsSlowRefresh.value = data.news_slow_refresh || null;
@@ -280,6 +310,100 @@ async function changeEditorPassword() {
     else editorPasswordError.value = requestError.message || t("编辑者密码修改失败");
   } finally {
     changingEditorPassword.value = false;
+  }
+}
+
+async function fetchManualSourceFromBrowser() {
+  message.value = "";
+  error.value = "";
+  const sourceUrl =
+    manualSourceType.value === "news"
+      ? manualSourceUrl.value.trim()
+      : sourceUrls.music;
+  if (!sourceUrl) {
+    error.value = t("请输入具体新闻详情地址");
+    return;
+  }
+  if (!officialSourceUrl(sourceUrl)) {
+    error.value = t("请输入官网 HTTPS 地址");
+    return;
+  }
+  queryingSource.value = true;
+  try {
+    const response = await fetch(sourceUrl, {
+      credentials: "include",
+      redirect: "follow",
+      headers: { Accept: "text/html,application/xhtml+xml" },
+    });
+    if (!response.ok) throw new Error(t("官网返回 HTTP {status}", { status: response.status }));
+    const html = await response.text();
+    if (!html.trim()) throw new Error(t("官网没有返回网页源代码"));
+    if (new Blob([html]).size > 8 * 1024 * 1024) {
+      throw new Error(t("网页源代码不能超过 8 MB"));
+    }
+    manualSourceHtml.value = html;
+    message.value = t("已从浏览器读取官网源代码");
+  } catch (requestError) {
+    error.value =
+      requestError instanceof TypeError
+        ? t("浏览器无法读取官网源代码，可能是跨域 CORS 限制；请改用 HTML 文件或粘贴。")
+        : requestError.message || t("浏览器读取官网源代码失败");
+  } finally {
+    queryingSource.value = false;
+  }
+}
+
+async function loadManualSourceFile(event) {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file) return;
+  message.value = "";
+  error.value = "";
+  try {
+    if (file.size > 8 * 1024 * 1024) throw new Error(t("网页源代码不能超过 8 MB"));
+    manualSourceHtml.value = await file.text();
+    if (!manualSourceHtml.value.trim()) throw new Error(t("网页源代码不能为空"));
+    message.value = t("已载入 HTML 源代码");
+  } catch (requestError) {
+    error.value = requestError.message || t("读取 HTML 文件失败");
+  }
+}
+
+async function submitManualSource() {
+  message.value = "";
+  error.value = "";
+  if (!manualSourceHtml.value.trim()) {
+    error.value = t("网页源代码不能为空");
+    return;
+  }
+  const sourceUrl = manualSourceType.value === "news" ? manualSourceUrl.value.trim() : "";
+  if (manualSourceType.value === "news" && !sourceUrl) {
+    error.value = t("请输入具体新闻详情地址");
+    return;
+  }
+  if (manualSourceType.value === "news" && !officialSourceUrl(sourceUrl)) {
+    error.value = t("请输入官网 HTTPS 地址");
+    return;
+  }
+  submittingSource.value = true;
+  try {
+    const data = await api("/api/admin/source-html", {
+      method: "POST",
+      body: {
+        source: manualSourceType.value,
+        source_url: sourceUrl,
+        html: manualSourceHtml.value,
+      },
+    });
+    activityLogs.value = data.activity_logs || activityLogs.value;
+    message.value = t("源代码解析完成：{parsed} 项，发现 {changed} 项变化", {
+      parsed: data.parsed_count || 0,
+      changed: data.changed_count || 0,
+    });
+  } catch (requestError) {
+    showError(requestError);
+  } finally {
+    submittingSource.value = false;
   }
 }
 
@@ -492,9 +616,9 @@ onMounted(loadSettings);
                   v-model="settings.interval_minutes"
                   type="number"
                   min="5"
-                  max="60"
+                  max="300"
                 /><small>{{
-                  t("检查目录顺序、新专辑和封面，范围 5–60 分钟。")
+                  t("检查目录顺序、新专辑和封面，范围 5–300 分钟（最多 5 小时）。")
                 }}</small></label
               >
               <label
@@ -503,9 +627,9 @@ onMounted(loadSettings);
                   v-model="settings.detail_interval_minutes"
                   type="number"
                   min="1"
-                  max="30"
+                  max="300"
                 /><small>{{
-                  t("检查 cd_detail.php 中的最新专辑详情，范围 1–30 分钟。")
+                  t("检查 cd_detail.php 中的最新专辑详情，范围 1–300 分钟（最多 5 小时）。")
                 }}</small></label
               >
               <div class="actions">
@@ -519,6 +643,76 @@ onMounted(loadSettings);
                   @click="syncNow"
                 >
                   {{ syncing ? t("同步中……") : t("立即检查") }}
+                </button>
+              </div>
+            </form>
+            <form
+              v-if="!editorMode"
+              v-show="section === 'source'"
+              class="settings-card manual-source-card"
+              @submit.prevent="submitManualSource"
+            >
+              <div class="form-heading">
+                <span class="form-number">03</span>
+                <div>
+                  <p class="form-kicker">BROWSER SOURCE BRIDGE</p>
+                  <h2>{{ t("手动提交官网源代码") }}</h2>
+                </div>
+              </div>
+              <p class="muted">
+                {{
+                  t(
+                    "优先由当前浏览器直接读取官网，再把源代码提交给服务器解析；服务器不会代理官网请求。",
+                  )
+                }}
+              </p>
+              <p class="muted">
+                {{
+                  t(
+                    "若浏览器提示跨域 CORS，说明官网允许打开但不允许管理页读取，请保存或复制 HTML 后在这里导入。",
+                  )
+                }}
+              </p>
+              <label
+                >{{ t("源代码类型") }}<select v-model="manualSourceType">
+                  <option value="music">{{ t("音乐目录") }}</option>
+                  <option value="news">{{ t("新闻详情") }}</option>
+                </select></label
+              >
+              <label v-if="manualSourceType === 'news'"
+                >{{ t("官网新闻地址") }}<input
+                  v-model="manualSourceUrl"
+                  type="url"
+                  :placeholder="sourceUrls.news"
+                  autocomplete="off"
+                /><small>{{ t("必须是 lovelive-anime.jp 的 HTTPS 新闻地址。") }}</small></label
+              >
+              <label
+                >{{ t("网页源代码") }}<textarea
+                  v-model="manualSourceHtml"
+                  class="manual-source-textarea"
+                  rows="16"
+                  spellcheck="false"
+                  :placeholder="t('可粘贴 view-source 或保存的 HTML 文件内容。')"
+                ></textarea><small>{{ t("单次最多 8 MB；解析失败不会覆盖已有资料。") }}</small></label
+              >
+              <div class="actions">
+                <button type="button" :disabled="queryingSource" @click="fetchManualSourceFromBrowser">
+                  {{ queryingSource ? t("读取中……") : t("当前浏览器读取官网") }}
+                </button>
+                <label class="manual-source-file-button">
+                  <span class="secondary">{{ t("选择 HTML 文件") }}</span>
+                  <input type="file" accept=".html,.htm,text/html" @change="loadManualSourceFile" />
+                </label>
+                <a
+                  class="manual-source-open"
+                  :href="manualSourceTargetUrl"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >{{ t("打开官网页面") }}</a
+                >
+                <button type="submit" class="secondary" :disabled="submittingSource">
+                  {{ submittingSource ? t("解析中……") : t("提交并解析") }}
                 </button>
               </div>
             </form>
@@ -622,9 +816,9 @@ onMounted(loadSettings);
                   v-model="settings.news_interval_minutes"
                   type="number"
                   min="10"
-                  max="1440"
+                  max="300"
                 /><small>{{
-                  t("范围 10–1440 分钟；图片可在页面内后续补录。")
+                  t("范围 10–300 分钟（最多 5 小时）；图片可在页面内后续补录。")
                 }}</small></label
               >
               <label class="settings-checkbox"

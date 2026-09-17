@@ -75,6 +75,8 @@ from app.news_fetch import (
 
 SOURCE_URL = "https://www.lovelive-anime.jp/nijigasaki/cd.php"
 EVENTERNOTE_EVENTS_URL = "https://events.nijigaku.fans/api/events"
+MAX_POLL_INTERVAL_MINUTES = 5 * 60
+MANUAL_SOURCE_MAX_BYTES = 8 * 1024 * 1024
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = Path(os.getenv("DATA_DIR", "/data")) / "nijidb.sqlite3"
 MEDIA_DIR = DB_PATH.parent / "images"
@@ -3139,15 +3141,15 @@ def set_admin_cookie(response: JSONResponse) -> None:
 
 def normalized_settings(values: dict[str, Any]) -> dict[str, str]:
     try:
-        interval = max(5, min(60, int(str(values.get("interval_minutes", "10")))))
+        interval = max(5, min(MAX_POLL_INTERVAL_MINUTES, int(str(values.get("interval_minutes", "10")))))
     except ValueError:
         interval = 10
     try:
-        detail_interval = max(1, min(30, int(str(values.get("detail_interval_minutes", "5")))))
+        detail_interval = max(1, min(MAX_POLL_INTERVAL_MINUTES, int(str(values.get("detail_interval_minutes", "5")))))
     except ValueError:
         detail_interval = 5
     try:
-        news_interval = max(10, min(1440, int(str(values.get("news_interval_minutes", "30")))))
+        news_interval = max(10, min(MAX_POLL_INTERVAL_MINUTES, int(str(values.get("news_interval_minutes", "30")))))
     except ValueError:
         news_interval = 30
     try:
@@ -3293,8 +3295,20 @@ def parse_release(release_id: str, content, entry_image=None) -> dict[str, str]:
         "spec_json": json.dumps(fields, ensure_ascii=False),
         "extras_json": json.dumps(extras, ensure_ascii=False),
     }
-    record["fingerprint"] = hashlib.sha256((record["title"] + record["detail_html"] + record["cover_url"] + record["tracks_json"] + record["extras_json"]).encode()).hexdigest()
+    record["fingerprint"] = release_fingerprint(record)
     return record
+
+
+def release_fingerprint(record: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        (
+            str(record.get("title") or "")
+            + str(record.get("detail_html") or "")
+            + str(record.get("cover_url") or "")
+            + str(record.get("tracks_json") or "[]")
+            + str(record.get("extras_json") or "[]")
+        ).encode()
+    ).hexdigest()
 
 
 def sync_exception_label(exc: BaseException) -> str:
@@ -3373,6 +3387,68 @@ async def scrape() -> list[dict[str, str]]:
         result.append(parse_release(release_id, content, entry_image))
     print(f"[sync] parsed {len(result)} releases", flush=True)
     return result
+
+
+def parse_music_source_html(html: str) -> list[dict[str, str]]:
+    """Parse a browser-supplied music catalog without making follow-up requests."""
+    soup = BeautifulSoup(html, "html.parser")
+    source_list = soup.select_one("ul.list")
+    if not source_list:
+        raise ValueError("手动源代码中没有找到官网音乐目录")
+    boxes = {box.get("id"): box for box in soup.select(".box[id]")}
+    entries: list[tuple[str, Any, Any]] = []
+    for entry in source_list.find_all("li", recursive=False):
+        link = entry.find("a", href=True)
+        href = str(link.get("href") or "") if link else ""
+        if not link or not href.startswith("#") or len(href) <= 1:
+            continue
+        release_id = href[1:].strip()
+        if release_id:
+            entries.append((release_id, boxes.get(release_id), entry.find("img", src=True)))
+    if not entries:
+        raise ValueError("手动源代码中没有解析到音乐发行条目")
+
+    previous_records: dict[str, dict[str, Any]] = {}
+    release_ids = list(dict.fromkeys(release_id for release_id, _, _ in entries))
+    placeholders = ", ".join("?" for _ in release_ids)
+    with db() as conn:
+        previous_records = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(f"SELECT * FROM releases WHERE id IN ({placeholders})", release_ids).fetchall()
+        }
+
+    result: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+    for release_id, box, entry_image in entries:
+        if release_id in seen_ids:
+            continue
+        seen_ids.add(release_id)
+        if not box or not box.select_one(".title"):
+            previous = previous_records.get(release_id)
+            if previous:
+                result.append(previous)
+            continue
+        result.append(parse_release(release_id, box, entry_image))
+    if not result:
+        raise ValueError("手动源代码中没有可保存的完整音乐发行资料")
+    return result
+
+
+def preserve_cached_music_covers(records: list[dict[str, Any]]) -> None:
+    """Do not replace a cached cover when HTML contains only its source URL."""
+    if not records:
+        return
+    with db() as conn:
+        for item in records:
+            previous = conn.execute("SELECT cover_url FROM releases WHERE id = ?", (item["id"],)).fetchone()
+            previous_cover = str(previous["cover_url"] or "") if previous else ""
+            source_cover = str(item.get("cover_url") or "")
+            if not previous_cover or previous_cover == source_cover:
+                continue
+            item["cover_url"] = previous_cover
+            if source_cover:
+                item["detail_html"] = str(item.get("detail_html") or "").replace(source_cover, previous_cover)
+            item["fingerprint"] = release_fingerprint(item)
 
 
 async def send_onebot(message: str, config: dict[str, str]) -> None:
@@ -4469,6 +4545,27 @@ def normalized_news_edit_value(field: str, value: Any) -> str:
     return result
 
 
+async def read_manual_source_request(request: Request) -> tuple[dict[str, Any], str]:
+    content_length = request.headers.get("content-length", "")
+    try:
+        if content_length and int(content_length) > MANUAL_SOURCE_MAX_BYTES * 2:
+            raise HTTPException(413, "网页源代码请求过大")
+    except ValueError:
+        pass
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "请求格式无效") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "请求格式无效")
+    html = payload.get("html")
+    if not isinstance(html, str) or not html.strip():
+        raise HTTPException(400, "网页源代码不能为空")
+    if len(html.encode("utf-8")) > MANUAL_SOURCE_MAX_BYTES:
+        raise HTTPException(413, "网页源代码不能超过 8 MB")
+    return payload, html
+
+
 def news_listing_url(offset: int) -> str:
     separator = "&" if "?" in NEWS_TOPICS_URL else "?"
     return f"{NEWS_TOPICS_URL}{separator}offset={offset}"
@@ -4663,7 +4760,7 @@ async def source_scheduler() -> None:
         config = normalized_settings(settings())
         music_settings_event.clear()
         try:
-            seconds = max(300, min(3600, int(float(config.get("interval_minutes", "10")) * 60)))
+            seconds = max(300, min(MAX_POLL_INTERVAL_MINUTES * 60, int(float(config.get("interval_minutes", "10")) * 60)))
         except (TypeError, ValueError):
             seconds = 600
         await wait_for_setting_or_stop(seconds, music_settings_event)
@@ -4680,7 +4777,7 @@ async def detail_scheduler() -> None:
         config = normalized_settings(settings())
         music_settings_event.clear()
         try:
-            seconds = max(60, min(1800, int(float(config.get("detail_interval_minutes", "5")) * 60)))
+            seconds = max(60, min(MAX_POLL_INTERVAL_MINUTES * 60, int(float(config.get("detail_interval_minutes", "5")) * 60)))
         except (TypeError, ValueError):
             seconds = 300
         await wait_for_setting_or_stop(seconds, music_settings_event)
@@ -5284,6 +5381,7 @@ async def api_get_settings(request: Request) -> dict[str, Any]:
             "news_last_sync": None,
             "news_syncing": False,
             "news_slow_refresh": None,
+            "source_urls": {"music": SOURCE_URL, "news": NEWS_TOPICS_URL},
         }
     with db() as conn:
         news_last = news_sync_status(conn)
@@ -5295,11 +5393,12 @@ async def api_get_settings(request: Request) -> dict[str, Any]:
     )
     return {
         "role": role,
-        "settings": public_settings(),
+        "settings": normalized_settings(public_settings()),
         "activity_logs": recent_database_logs(200),
         "news_last_sync": news_last,
         "news_syncing": news_run_lock.locked(),
         "news_slow_refresh": slow_refresh,
+        "source_urls": {"music": SOURCE_URL, "news": NEWS_TOPICS_URL},
     }
 
 
@@ -5318,6 +5417,73 @@ async def api_save_settings(request: Request) -> dict[str, dict[str, str]]:
         music_settings_event.set()
     news_settings_event.set()
     return {"settings": values}
+
+
+@app.post("/api/admin/source-html")
+async def api_admin_source_html(request: Request) -> dict[str, Any]:
+    """Parse HTML obtained by an administrator's browser without proxying it."""
+    require_api_admin(request)
+    payload, html = await read_manual_source_request(request)
+    source = str(payload.get("source") or "").strip().lower()
+
+    if source == "music":
+        if sync_lock.locked():
+            raise HTTPException(409, "音乐检查正在进行，请稍后再试")
+        async with sync_lock:
+            try:
+                records = parse_music_source_html(html)
+                preserve_cached_music_covers(records)
+            except ValueError as exc:
+                raise HTTPException(400, f"音乐源代码解析失败：{exc}") from exc
+            changed = await store_records(records, assign_positions=True)
+        if changed:
+            log_database_activity("music", f"浏览器源代码解析：{len(changed)} 项变化")
+        return {
+            "source": source,
+            "parsed_count": len(records),
+            "changed_count": len(changed),
+            "activity_logs": recent_database_logs(),
+        }
+
+    if source != "news":
+        raise HTTPException(400, "网页源代码类型无效")
+    source_url = str(payload.get("source_url") or "").strip()
+    try:
+        source_url = validate_news_url(source_url)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if news_run_lock.locked():
+        raise HTTPException(409, "新闻检查正在进行，请稍后再试")
+    async with news_run_lock:
+        try:
+            record = parse_topic_detail(html, source_url)
+        except ValueError as exc:
+            raise HTTPException(400, f"新闻源代码解析失败：{exc}") from exc
+        if not str(record.get("page_name") or "").strip():
+            raise HTTPException(400, "新闻源代码解析失败：请提供具体新闻详情页地址")
+        timestamp = datetime.now(timezone.utc).isoformat()
+        record_id = str(record["id"])
+        with db() as conn:
+            changed, created = upsert_news_record(conn, record, timestamp)
+            conn.execute(
+                """INSERT INTO news_fetch_state (news_id, source_url, etag, last_modified, checked_at)
+                   VALUES (?, ?, '', '', ?)
+                   ON CONFLICT(news_id) DO UPDATE SET source_url=excluded.source_url,
+                   etag='', last_modified='', checked_at=excluded.checked_at""",
+                (record_id, record["source_url"], timestamp),
+            )
+            updated = conn.execute("SELECT * FROM news_articles WHERE id = ?", (record_id,)).fetchone()
+            result = news_article_payload(conn, updated, detail=True)
+    if changed:
+        log_database_activity("news", f"浏览器源代码解析：{result['title'][:80]}")
+    return {
+        "source": source,
+        "parsed_count": 1,
+        "changed_count": int(changed),
+        "created": created,
+        "article": result,
+        "activity_logs": recent_database_logs(),
+    }
 
 
 @app.post("/api/admin/news/slow-refresh/run")

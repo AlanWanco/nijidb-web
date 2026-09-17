@@ -331,6 +331,7 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.get("/api/admin/backups")).status_code, 200)
         self.assertEqual((await self.client.get("/api/admin/backup")).status_code, 200)
         self.assertEqual((await self.client.patch("/api/admin/settings", json={"news_auto_sync": "0"})).status_code, 403)
+        self.assertEqual((await self.client.post("/api/admin/source-html", json={"source": "music", "html": "<html/>"})).status_code, 403)
         self.assertEqual((await self.client.post("/api/admin/news/sync")).status_code, 403)
         self.assertEqual((await self.client.patch("/api/admin/password", json={})).status_code, 403)
         self.assertEqual((await self.client.post("/api/admin/backup/restore", content=b"not-a-database")).status_code, 403)
@@ -417,6 +418,74 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["settings"]["music_auto_sync"], "0")
         data = (await self.client.get("/api/admin/settings")).json()
         self.assertEqual(data["settings"]["music_auto_sync"], "0")
+
+    async def test_poll_intervals_are_limited_to_five_hours(self):
+        values = main.normalized_settings(
+            {"interval_minutes": "999", "detail_interval_minutes": "999", "news_interval_minutes": "999"}
+        )
+        self.assertEqual(values["interval_minutes"], "300")
+        self.assertEqual(values["detail_interval_minutes"], "300")
+        self.assertEqual(values["news_interval_minutes"], "300")
+
+        self.login()
+        response = await self.client.patch(
+            "/api/admin/settings",
+            json={"interval_minutes": "999", "detail_interval_minutes": "999", "news_interval_minutes": "999"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["settings"]["interval_minutes"], "300")
+        self.assertEqual(response.json()["settings"]["detail_interval_minutes"], "300")
+        self.assertEqual(response.json()["settings"]["news_interval_minutes"], "300")
+
+    async def test_admin_can_parse_browser_supplied_music_source(self):
+        self.login()
+        html = """
+        <ul class="list">
+          <li><a href="#cd01_9999"><img src="/img/cover.jpg" alt="测试发行"></a></li>
+        </ul>
+        <div class="box" id="cd01_9999">
+          <h3 class="title">测试发行</h3>
+          <div class="spec"><dl><dt>アーティスト</dt><dd>虹ヶ咲学園スクールアイドル同好会</dd></dl></div>
+        </div>
+        """
+        response = await self.client.post(
+            "/api/admin/source-html", json={"source": "music", "html": html}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["parsed_count"], 1)
+        with main.db() as conn:
+            row = conn.execute("SELECT title, cover_url FROM releases WHERE id = ?", ("cd01_9999",)).fetchone()
+        self.assertEqual(row["title"], "测试发行")
+        self.assertEqual(row["cover_url"], "https://www.lovelive-anime.jp/img/cover.jpg")
+
+    async def test_admin_can_parse_browser_supplied_news_source_without_network_fetch(self):
+        self.login()
+        source_url = "https://www.lovelive-anime.jp/nijigasaki/news/01_999.html"
+        html = """
+        <main>
+          <h2>浏览器提交的新闻</h2>
+          <p>2026/09/17</p>
+          <p>这是通过管理员浏览器提交的网页源代码，正文长度足够用于验证离线解析。</p>
+        </main>
+        """
+        response = await self.client.post(
+            "/api/admin/source-html",
+            json={"source": "news", "source_url": source_url, "html": html},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["parsed_count"], 1)
+        self.assertTrue(data["created"])
+        self.assertEqual(data["article"]["title"], "浏览器提交的新闻")
+
+        failed = await self.client.post(
+            "/api/admin/source-html",
+            json={"source": "news", "source_url": source_url, "html": "<main>Access denied</main>"},
+        )
+        self.assertEqual(failed.status_code, 400)
+        article_id = news_id("niji_topics", "01_999")
+        article = (await self.client.get(f"/api/news/{article_id}")).json()["article"]
+        self.assertEqual(article["title"], "浏览器提交的新闻")
 
     async def test_database_backup_contains_program_news_and_collabo_tables(self):
         self.login()

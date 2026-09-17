@@ -8,15 +8,20 @@
 
 ```text
 poller/
-├── docker-compose.yml          # mihomo + subscription + proxy-health + news-poller（+ 可选 image-worker）
+├── docker-compose.yml          # 5 个容器：mihomo + maintainer + news-poller + bot-mihomo + bot-gateway
+├── maintainer.json             # 维护容器里托管的定时任务定义
 ├── news-poller.env.example     # 密钥与节奏模板 → 复制为 news-poller.env（600）
 ├── mihomo/                     # 出口代理镜像（配置在运行时只读挂载）
 │   └── Dockerfile
-└── news/                       # 新闻轮询镜像（内容轮询与补档共用）
-    └── Dockerfile
+├── news/                       # 新闻轮询镜像（内容轮询与补档共用）
+│   └── Dockerfile
+└── bot-proxy/                  # bot 专用出口的配置模板与说明（服务定义在上面那个 compose 里）
+    ├── nginx.conf.template
+    └── README.md
 
 scripts/                        # 容器内实际执行的脚本
 ├── render_mihomo_config.py     # 从订阅配置渲染节点配置（每个节点一个入口端口）
+├── proxy_maintainer.py         # 把多个定时任务收进同一个容器托管
 ├── mihomo_config.py            # 渲染与读取逻辑
 ├── update_mihomo_subscription.py   # 订阅自动更新 + 让 mihomo 重载
 ├── proxy_node_health.py        # 逐节点探测官网，产出可用节点列表
@@ -32,10 +37,14 @@ service，共用同一个 `mihomo` 出口；不同轮询服务使用各自的 `*
 | 服务 | 作用 |
 | --- | --- |
 | `mihomo` | 独立出口代理。配置里为**每个节点开一个入口端口**（7901 起），不做节点轮换、不做热更新 |
-| `proxy-health` | 每 `NODE_HEALTH_INTERVAL_MINUTES`（默认 30）分钟逐端口并发请求官网，写出「最近一次为 200」的可用节点列表 |
-| `subscription` | 每 `MIHOMO_SUB_INTERVAL_MINUTES`（默认 720）分钟重新拉取订阅、渲染配置并让 mihomo 重载；未配置订阅地址时自行退出 |
+| `maintainer` | 定时维护（一个容器、三个独立进程）：节点健康检查 + 轮询订阅更新 + bot 订阅更新 |
 | `news-poller` | 内容轮询：**每趟从可用节点里随机挑一个**，抓官网列表 → 解析详情 → 图片上传 R2 → 提交站点 API |
+| `bot-mihomo` / `bot-gateway` | bot 专用出口与固定入口兜底，见 [`bot-proxy/README.md`](bot-proxy/README.md) |
 | `image-worker` | 可选，历史新闻图片批量归档（补档），`--profile worker` 启用 |
+
+健康检查每 `NODE_HEALTH_INTERVAL_MINUTES`（默认 30）分钟逐端口并发请求官网，写出
+「最近一次为 200」的可用节点列表；订阅更新每 `MIHOMO_SUB_INTERVAL_MINUTES`（默认 720）分钟
+重新拉取并让对应 mihomo 重载。两者都在 `maintainer` 容器里，各自独立进程、可单独重启。
 
 代理端口不发布到宿主，只在 compose 网络内可见；只有 `127.0.0.1:9099` 暴露 mihomo 控制台。
 

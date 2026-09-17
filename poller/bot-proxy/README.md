@@ -56,15 +56,21 @@ rules:
 
 ## 2. 启动
 
+服务定义在 `poller/docker-compose.yml`（与轮询同一个 compose 项目，共 5 个容器）：
+
 ```bash
-cd poller/bot-proxy
+cd poller
 docker compose up -d --build
 docker compose ps
 ```
 
-订阅地址沿用 `poller/news-poller.env`（同一个 `MIHOMO_SUB_URL`）；未配置时 `bot-subscription`
-会正常退出，配置只由第 1 步命令维护。`bot-subscription` 会按 **fallback + 国内直连 + 单端口**
-的形状重新渲染，不会覆盖成轮询用的 per-node 端口配置。
+其中 bot 相关的是 `bot-mihomo`（专用出口）、`bot-gateway`（固定入口）；
+配置渲染与订阅更新由同一项目里的 `maintainer` 容器负责（三个独立进程：节点健康检查、
+轮询订阅更新、bot 订阅更新）。
+
+订阅地址沿用 `poller/news-poller.env`（同一个 `MIHOMO_SUB_URL`）；未配置时订阅更新脚本会正常
+退出（`maintainer` 不会反复重启它）。bot 的配置按 **fallback + 国内直连 + 单端口** 渲染，
+与轮询那份（per-node 端口 + select）互不影响。
 
 ## 3. 验证
 
@@ -128,7 +134,7 @@ NO_PROXY=localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.lan,ho
 | 3 | mihomo 进程/容器挂掉 | `restart: unless-stopped` + healthcheck，Docker 秒级重启 |
 | 4 | 整个主上游不可用 | `bot-gateway`（nginx stream）自动切备用上游（默认路由器 Clash） |
 
-要换备用上游：在 `poller/bot-proxy/.env`（600，不提交）里设置 `BOT_BACKUP_PROXY=路由器地址:端口`，
+要换备用上游：在 `poller/.env`（600，不提交）里设置 `BOT_BACKUP_PROXY=路由器地址:端口`，
 然后 `docker compose up -d bot-gateway`。
 
 **关于「干脆直连」**：环境变量形式的代理无法在失败时自动降级为直连——那需要在 bot 的 HTTP 客户端

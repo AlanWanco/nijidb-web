@@ -1,0 +1,45 @@
+{
+  "tasks": [
+    {
+      "name": "news-node-health",
+      "script": "proxy_node_health.py",
+      "env": {
+        "NODE_HEALTH_CONFIG": "/config/news/config.yaml",
+        "NODE_HEALTH_STATE": "/state/nodes.json",
+        "NODE_HEALTH_HINTS": "/state/poller-hints.json",
+        "NODE_HEALTH_SUBSCRIPTION_STATE": "/state/subscription-news.json",
+        "NODE_HEALTH_PROXY_HOST": "mihomo"
+      }
+    },
+    {
+      "name": "news-subscription",
+      "script": "update_mihomo_subscription.py",
+      "env": {
+        "MIHOMO_CONFIG_OUT": "/config/news/config.yaml",
+        "MIHOMO_CONFIG_REMOTE": "/config/config.yaml",
+        "MIHOMO_SUB_STATE": "/state/subscription-news.json",
+        "MIHOMO_CONTROLLER": "http://mihomo:9090",
+        "MIHOMO_PROXY": "http://mihomo:7890",
+        "MIHOMO_GROUP_TYPE": "select",
+        "MIHOMO_LISTENERS": "1"
+      }
+    },
+    {
+      "name": "bot-subscription",
+      "script": "update_mihomo_subscription.py",
+      "env": {
+        "MIHOMO_CONFIG_OUT": "/config/bot/config.yaml",
+        "MIHOMO_CONFIG_REMOTE": "/config/config.yaml",
+        "MIHOMO_SUB_STATE": "/state/subscription-bot.json",
+        "MIHOMO_CONTROLLER": "http://bot-mihomo:9090",
+        "MIHOMO_PROXY": "http://bot-mihomo:7890",
+        "MIHOMO_GROUP_TYPE": "fallback",
+        "MIHOMO_CN_DIRECT": "1",
+        "MIHOMO_LISTENERS": "0",
+        "MIHOMO_INCLUDE": "香港,台湾,日本,新加坡,美国",
+        "MIHOMO_EXCLUDE": "IPv6,将在",
+        "MIHOMO_HEALTHY_FILE": "/state/nodes.json"
+      }
+    }
+  ]
+}

@@ -1,13 +1,21 @@
-# 轮询服务：独立出口代理（mihomo）+ 节点健康检查 + 订阅自动更新 + 内容轮询
+# 官网轮询 + bot 专用代理（单项目、5 个容器）
+#
+#   mihomo        轮询出口（每节点一个入口端口）
+#   maintainer    定时维护：节点健康检查 + 两个栈的订阅更新（三个独立进程）
+#   news-poller   官网新闻内容轮询
+#   bot-mihomo    bot 专用出口（fallback 组 + 国内直连）
+#   bot-gateway   bot 的固定入口（主上游失败自动切备用）
 #
 # 使用前：
-#   1. 生成初始节点配置 poller/mihomo/config.yaml（见 README，权限 600）
-#   2. 生成密钥文件 poller/news-poller.env（权限 600，参考 news-poller.env.example）
-#   3. docker compose up -d --build
+#   1. 生成初始节点配置：poller/mihomo/config.yaml、poller/bot-proxy/config.yaml（见 README，权限 600）
+#   2. 生成密钥文件 poller/news-poller.env（600，参考 news-poller.env.example）
+#   3. 需要兜底上游时，在 poller/.env（600，不提交）里设置 BOT_BACKUP_PROXY
+#   4. docker compose up -d --build
 name: nijidb-poller
 
 services:
-  # 独立出口：每个节点一个入口端口（7901 起），供健康检查逐节点探测、轮询每趟挑选
+  # ---------- 轮询出口 ----------
+
   mihomo:
     build:
       context: ./mihomo
@@ -17,8 +25,6 @@ services:
     image: nijidb-mihomo:local
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
-    # 配置来自只读挂载，工作目录留给 mihomo 自己写缓存；
-    # SAFE_PATHS 允许订阅服务通过控制台按路径重载该配置
     command: ["-f", "/config/config.yaml"]
     environment:
       SAFE_PATHS: /config
@@ -26,7 +32,6 @@ services:
       - ./mihomo:/config:ro
     networks:
       - proxy
-    # 仅本机可访问控制台（便于查看节点状态）
     ports:
       - "127.0.0.1:9099:9090"
     healthcheck:
@@ -36,51 +41,33 @@ services:
       retries: 3
       start_period: 20s
 
-  # 订阅自动更新：定期重新渲染配置并让 mihomo 重载（未配置 MIHOMO_SUB_URL 时自动退出）
-  subscription:
-    image: nijidb-news-poller:local
-    command: ["scripts/update_mihomo_subscription.py"]
-    restart: on-failure
-    depends_on:
-      mihomo:
-        condition: service_started
-    env_file:
-      - ./news-poller.env
-    environment:
-      MIHOMO_CONFIG_OUT: /config/config.yaml
-      MIHOMO_CONTROLLER: http://mihomo:9090
-      MIHOMO_PROXY: http://mihomo:7890
-    volumes:
-      - ./mihomo:/config
-      - poller-state:/state
-    networks:
-      - proxy
+  # ---------- 定时维护（健康检查 + 订阅更新） ----------
 
-  # 节点健康检查：逐个入口端口请求官网，写出「最近一次为 200」的可用节点列表
-  proxy-health:
+  maintainer:
     image: nijidb-news-poller:local
-    command: ["scripts/proxy_node_health.py"]
+    command: ["scripts/proxy_maintainer.py"]
     restart: unless-stopped
     depends_on:
       mihomo:
         condition: service_started
+      bot-mihomo:
+        condition: service_started
+    env_file:
+      - path: ./news-poller.env
+        required: false
     environment:
-      NODE_HEALTH_CONFIG: /config/config.yaml
-      NODE_HEALTH_STATE: /state/nodes.json
-      NODE_HEALTH_HINTS: /state/poller-hints.json
-      NODE_HEALTH_SUBSCRIPTION_STATE: /state/subscription.json
-      NODE_HEALTH_PROXY_HOST: mihomo
-      NODE_HEALTH_INTERVAL_MINUTES: "${NODE_HEALTH_INTERVAL_MINUTES:-30}"
-      NODE_HEALTH_BAD_BATCH: "${NODE_HEALTH_BAD_BATCH:-6}"
-      NODE_HEALTH_PROBE_DELAY_SECONDS: "${NODE_HEALTH_PROBE_DELAY_SECONDS:-0.3}"
-      NODE_HEALTH_CONCURRENCY: "${NODE_HEALTH_CONCURRENCY:-8}"
+      MAINTAINER_CONFIG: /app/maintainer.json
     volumes:
-      - ./mihomo:/config:ro
+      # 两份配置都要能写：订阅更新会重新渲染并让对应 mihomo 重载
+      - ./mihomo:/config/news
+      - ./bot-proxy:/config/bot
       - poller-state:/state
+      - ./maintainer.json:/app/maintainer.json:ro
     networks:
       - proxy
 
-  # 内容轮询：每趟从可用节点里随机挑一个，图片上传 R2，结果提交站点 API
+  # ---------- 内容轮询 ----------
+
   news-poller:
     build:
       context: ..
@@ -103,8 +90,53 @@ services:
     networks:
       - proxy
 
-  # 可选：历史新闻图片批量归档（补档）。默认不启动：
-  #   docker compose --profile worker up -d
+  # ---------- bot 专用出口 ----------
+
+  bot-mihomo:
+    image: nijidb-mihomo:local
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    command: ["-f", "/config/config.yaml"]
+    environment:
+      SAFE_PATHS: /config
+    volumes:
+      - ./bot-proxy:/config:ro
+    networks:
+      - proxy
+    ports:
+      - "127.0.0.1:9199:9090"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9090/version"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # bot 的固定入口：主上游为 bot-mihomo，失败自动切备用上游（BOT_BACKUP_PROXY）
+  bot-gateway:
+    image: nginx:alpine
+    restart: unless-stopped
+    depends_on:
+      - bot-mihomo
+    environment:
+      BACKUP_PROXY: "${BOT_BACKUP_PROXY:-192.168.1.1:7890}"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        envsubst '$${BACKUP_PROXY}' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
+        && exec nginx -g 'daemon off;'
+    volumes:
+      - ./bot-proxy/nginx.conf.template:/etc/nginx/nginx.conf.template:ro
+    networks:
+      - proxy
+    # 需要给宿主或其它网络的容器使用时再打开（注意这是无认证的代理端口）
+    # ports:
+    #   - "192.168.1.10:7899:7890"
+
+  # ---------- 可选：历史图片补档 ----------
+  # profile 启用：docker compose --profile worker up -d
+
   image-worker:
     profiles: ["worker"]
     image: nijidb-news-poller:local

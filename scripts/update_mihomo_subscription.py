@@ -85,6 +85,8 @@ class SubscriptionUpdater:
         self.user_agent = os.getenv("MIHOMO_SUB_UA", DEFAULT_SUBSCRIPTION_UA).strip() or DEFAULT_SUBSCRIPTION_UA
         self.proxy = os.getenv("MIHOMO_PROXY", "").strip()
         self.controller = os.getenv("MIHOMO_CONTROLLER", "http://mihomo:9090").strip().rstrip("/")
+        # 重载时传给 mihomo 的路径是「mihomo 容器里看到的路径」，与本地写入路径可能不同
+        self.remote_config = os.getenv("MIHOMO_CONFIG_REMOTE", str(config_path)).strip() or str(config_path)
         self.interval_seconds = env_number("MIHOMO_SUB_INTERVAL_MINUTES", 720) * 60
         self.includes = split_list("MIHOMO_INCLUDE", "")
         self.excludes = split_list("MIHOMO_EXCLUDE", "将在")
@@ -129,7 +131,7 @@ class SubscriptionUpdater:
         response = httpx.put(
             f"{self.controller}/configs",
             params={"force": "true"},
-            json={"path": str(self.config_path)},
+            json={"path": self.remote_config},
             timeout=30,
         )
         response.raise_for_status()

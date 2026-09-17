@@ -85,6 +85,30 @@ BACKUP_DIR = Path(os.getenv("DATABASE_BACKUP_DIR", str(DB_PATH.parent / "backups
 COVER_CACHE_VERSION = "source-url-refresh-v1"
 COVER_CACHE_VERSION_PATH = DB_PATH.parent / ".cover-cache-version"
 FRONTEND_DIST = ROOT / "frontend" / "dist"
+# Keep the server-side fallback in sync with the Vue routes. Unknown paths must
+# not receive index.html, otherwise scanners can mistake the SPA shell for a
+# real endpoint (for example, /phpinfo.php or /wp-admin).
+FRONTEND_ROUTE_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"^$",
+        r"^music$",
+        r"^news$",
+        r"^news/[^/]+$",
+        r"^release/[^/]+$",
+        r"^programs$",
+        r"^programs/\d{6}$",
+        r"^programs/archive$",
+        r"^programs/archive/[^/]+$",
+        r"^illustrations$",
+        r"^collabo$",
+        r"^collabo/\d{8}-[a-f0-9]{6}$",
+        r"^admin/login$",
+        r"^admin$",
+        r"^admin/programs$",
+        r"^admin/collabo(?:/[^/]+)?$",
+    )
+)
 ILLUSTRATION_LOCAL_DIR = ROOT / "data" / "images" / "illustrations"
 ILLUSTRATION_RUNTIME_DIR = MEDIA_DIR / "illustrations"
 ILLUSTRATION_DIR = Path(os.getenv(
@@ -6876,8 +6900,24 @@ async def rainbow_favicon():
     return FileResponse(FRONTEND_DIST / "rainbow.svg", media_type="image/svg+xml")
 
 
-@app.get("/{path:path}")
+def is_frontend_route(path: str) -> bool:
+    """Return whether *path* is a known Vue history-mode route.
+
+    Static files are mounted separately above this fallback. A single trailing
+    slash is accepted like Vue Router's default non-strict matching, but file
+    names and arbitrary paths are never treated as SPA routes.
+    """
+    if path.endswith("/"):
+        path = path[:-1]
+    if any("." in segment for segment in path.split("/")):
+        return False
+    return any(pattern.fullmatch(path) for pattern in FRONTEND_ROUTE_PATTERNS)
+
+
+@app.get("/{path:path}", include_in_schema=False)
 async def frontend(path: str):
+    if not is_frontend_route(path):
+        raise HTTPException(404, "页面不存在")
     index = FRONTEND_DIST / "index.html"
     if not index.is_file():
         raise HTTPException(503, "Vue 前端尚未构建，请运行 npm install && npm run build")

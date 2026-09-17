@@ -21,4 +21,3 @@ data/
 poller/mihomo/config.yaml
 poller/news-poller.env
 poller/*.env
-poller/bot-proxy/config.yaml

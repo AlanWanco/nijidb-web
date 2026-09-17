@@ -21,6 +21,8 @@ from typing import Any
 
 import httpx
 
+from logfmt import format_message  # noqa: E402
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from mihomo_config import (  # noqa: E402
@@ -41,10 +43,12 @@ from mihomo_config import (  # noqa: E402
 # 订阅商通常按 UA 决定返回格式，用 Clash 系 UA 更稳妥（可用 MIHOMO_SUB_UA 覆盖）
 DEFAULT_SUBSCRIPTION_UA = "clash-verge/v1.7.7"
 FETCH_TIMEOUT = 60.0
+# 128 个监听端口热重载在树莓派上约 30 秒，留足余量
+RELOAD_TIMEOUT = 180.0
 
 
 def log(message: str) -> None:
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}", flush=True)
+    print(format_message(message), flush=True)
 
 
 def env_number(name: str, default: float, minimum: float = 1) -> float:
@@ -128,14 +132,26 @@ class SubscriptionUpdater:
         raise ConfigError(f"订阅拉取失败：{last_error}")
 
     def reload_mihomo(self) -> None:
-        response = httpx.put(
-            f"{self.controller}/configs",
-            params={"force": "true"},
-            json={"path": self.remote_config},
-            timeout=30,
-        )
-        response.raise_for_status()
-        log("已通知 mihomo 重载配置")
+        """让 mihomo 重载配置。端口多时热重载较慢（Pi 上 128 个监听约 30 秒），所以放宽超时并重试。"""
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                response = httpx.put(
+                    f"{self.controller}/configs",
+                    params={"force": "true"},
+                    json={"path": self.remote_config},
+                    timeout=RELOAD_TIMEOUT,
+                )
+                response.raise_for_status()
+                log("已通知 mihomo 重载配置")
+                return
+            except (httpx.HTTPError, OSError) as exc:
+                last_error = exc
+                detail = f"HTTP {exc.response.status_code}" if isinstance(exc, httpx.HTTPStatusError) else type(exc).__name__
+                log(f"重载失败（第 {attempt}/3 次）：{detail}")
+                if attempt < 3:
+                    time.sleep(10)
+        raise ConfigError(f"重载失败：{last_error}")
 
     @staticmethod
     def healthy_names(path: Path) -> set[str]:
@@ -242,7 +258,8 @@ class SubscriptionUpdater:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="定期更新 mihomo 订阅配置")
-    parser.parse_args(argv)
+    parser.add_argument("--once", action="store_true", help="只更新一次就退出（供定时调度使用）")
+    args = parser.parse_args(argv)
     if not os.getenv("MIHOMO_SUB_URL", "").strip():
         log("未配置 MIHOMO_SUB_URL，订阅自动更新未启用")
         return 0
@@ -258,6 +275,13 @@ def main(argv: list[str] | None = None) -> int:
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
+    if args.once:
+        try:
+            updater.update_once()
+        except Exception as exc:  # noqa: BLE001 - 一次性模式把失败交给调度器判断
+            log(f"更新失败：{type(exc).__name__} {exc}")
+            return 1
+        return 0
     try:
         updater.run()
     except KeyboardInterrupt:

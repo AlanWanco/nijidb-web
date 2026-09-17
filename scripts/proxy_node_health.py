@@ -29,13 +29,14 @@ from mihomo_config import ConfigError, read_listeners  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from logfmt import format_message  # noqa: E402
 from app.news_fetch import NEWS_HEADERS  # noqa: E402
 
 OK_STATUSES = {200, 206}
 
 
 def log(message: str) -> None:
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}", flush=True)
+    print(format_message(message), flush=True)
 
 
 def env_number(name: str, default: float, minimum: float = 1) -> float:
@@ -282,7 +283,8 @@ class NodeHealthChecker:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="逐节点探测官网可达性（首次全量，之后增量+轮换）")
-    parser.parse_args(argv)
+    parser.add_argument("--once", action="store_true", help="只探测一轮就退出（供定时调度使用）")
+    args = parser.parse_args(argv)
     checker = NodeHealthChecker(
         config_path=Path(os.getenv("NODE_HEALTH_CONFIG", "/config/config.yaml")),
         state_path=Path(os.getenv("NODE_HEALTH_STATE", "/state/nodes.json")),
@@ -303,6 +305,13 @@ def main(argv: list[str] | None = None) -> int:
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
+    if args.once:
+        try:
+            asyncio.run(checker.check_once())
+        except Exception as exc:  # noqa: BLE001 - 一次性模式把失败交给调度器判断
+            log(f"探测失败：{type(exc).__name__} {exc}")
+            return 1
+        return 0
     try:
         checker.run()
     except KeyboardInterrupt:

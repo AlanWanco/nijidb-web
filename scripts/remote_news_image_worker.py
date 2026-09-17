@@ -30,6 +30,10 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from logfmt import format_message  # noqa: E402
+
 try:
     import boto3
     from botocore.exceptions import ClientError
@@ -380,7 +384,7 @@ class NewsImageWorker:
         )
 
     def log(self, message: str) -> None:
-        print(f"[news-worker] {message}", flush=True)
+        print(format_message(f"[news-worker] {message}"), flush=True)
 
     def request_bytes(
         self,

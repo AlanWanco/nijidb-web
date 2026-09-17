@@ -46,6 +46,7 @@ from app.news import (  # noqa: E402
     parse_topic_listing,
     topic_next_offset,
 )
+from logfmt import format_message  # noqa: E402
 from app.news_fetch import (  # noqa: E402
     NEWS_HEADERS,
     OFFICIAL_HOSTS,
@@ -226,8 +227,7 @@ def build_config(args: argparse.Namespace) -> PollerConfig:
 
 
 def log(message: str) -> None:
-    stamp = datetime.now().strftime("%H:%M:%S")
-    print(f"[{stamp}] {message}", flush=True)
+    print(format_message(message), flush=True)
 
 
 def default_state() -> dict[str, Any]:

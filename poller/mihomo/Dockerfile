@@ -8,7 +8,7 @@ ARG MIHOMO_VERSION=v1.19.31
 ARG MIHOMO_SHA256=9e0f11afbf38426b8bd88fdc594678f8161c57eccb4e1b77acb12b493904f1d4
 ARG TARGETARCH
 
-RUN apk add --no-cache ca-certificates curl \
+RUN apk add --no-cache ca-certificates curl tzdata \
  && curl -fsSL --retry 3 --retry-delay 2 -o /tmp/mihomo.gz \
       "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-${TARGETARCH}-${MIHOMO_VERSION}.gz" \
  && if [ -n "${MIHOMO_SHA256}" ]; then \
@@ -20,9 +20,20 @@ RUN apk add --no-cache ca-certificates curl \
  && chmod 0755 /usr/local/bin/mihomo \
  && rm -f /tmp/mihomo.gz
 
-RUN adduser -D -u 1000 -h /home/mihomo mihomo \
- && mkdir -p /home/mihomo/.config/mihomo \
- && chown -R mihomo:mihomo /home/mihomo
+# 预置 geo 数据（GeoSite / GeoIP），避免运行时下载：容器里的下载会超时，
+# 而且一旦文件损坏，GEOSITE 规则会让整个配置加载失败。
+ARG GEO_RELEASE=latest
+RUN set -eux; \
+    for name in geosite.dat geoip.metadb; do \
+        curl -fsSL --retry 3 --retry-delay 3 --max-time 300 -o "/tmp/${name}" \
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/download/${GEO_RELEASE}/${name}"; \
+    done; \
+    adduser -D -u 1000 -h /home/mihomo mihomo; \
+    mkdir -p /home/mihomo/.config/mihomo; \
+    mv /tmp/geosite.dat /home/mihomo/.config/mihomo/GeoSite.dat; \
+    mv /tmp/geoip.metadb /home/mihomo/.config/mihomo/geoip.metadb; \
+    chown -R mihomo:mihomo /home/mihomo; \
+    ls -l /home/mihomo/.config/mihomo
 
 USER 1000:1000
 WORKDIR /home/mihomo/.config/mihomo

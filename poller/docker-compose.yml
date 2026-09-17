@@ -1,21 +1,17 @@
-# 官网轮询 + bot 专用代理（单项目、5 个容器）
+# 官网轮询 + 代理：2 个容器
 #
-#   mihomo        轮询出口（每节点一个入口端口）
-#   maintainer    定时维护：节点健康检查 + 两个栈的订阅更新（三个独立进程）
-#   news-poller   官网新闻内容轮询
-#   bot-mihomo    bot 专用出口（fallback 组 + 国内直连）
-#   bot-gateway   bot 的固定入口（主上游失败自动切备用）
+#   mihomo   唯一的代理实例：per-node 入口端口（7901 起，供轮询挑节点）
+#            + 共享端口 7890（规则：国内直连、其余走节点）供 bot 等客户端使用
+#   worker   新闻轮询（常驻）+ 定时维护（节点健康检查、订阅更新，跑完即退出）
 #
 # 使用前：
-#   1. 生成初始节点配置：poller/mihomo/config.yaml、poller/bot-proxy/config.yaml（见 README，权限 600）
+#   1. 生成初始节点配置：poller/mihomo/config.yaml（见 README，权限 600）
 #   2. 生成密钥文件 poller/news-poller.env（600，参考 news-poller.env.example）
-#   3. 需要兜底上游时，在 poller/.env（600，不提交）里设置 BOT_BACKUP_PROXY
-#   4. docker compose up -d --build
+#   3. docker compose up -d --build
 name: nijidb-poller
 
 services:
-  # ---------- 轮询出口 ----------
-
+  # 唯一的代理实例：既给轮询按节点端口挑出口，也给其它客户端一个带规则的共享端口
   mihomo:
     build:
       context: ./mihomo
@@ -25,13 +21,17 @@ services:
     image: nijidb-mihomo:local
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
+    # 配置只读挂载；SAFE_PATHS 允许订阅更新通过控制台按路径重载
     command: ["-f", "/config/config.yaml"]
     environment:
       SAFE_PATHS: /config
+      # 容器默认 UTC，显式指定时区让日志与运行环境一致
+      TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - ./mihomo:/config:ro
     networks:
       - proxy
+    # 控制台只在本机可见；共享代理端口不发布到宿主，客户端通过 compose 网络访问 mihomo:7890
     ports:
       - "127.0.0.1:9099:9090"
     healthcheck:
@@ -41,102 +41,39 @@ services:
       retries: 3
       start_period: 20s
 
-  # ---------- 定时维护（健康检查 + 订阅更新） ----------
-
-  maintainer:
+  # 一个容器跑全部业务：新闻轮询常驻，健康检查与订阅更新定时执行（见 maintainer.json）
+  worker:
+    build:
+      context: ..
+      dockerfile: poller/news/Dockerfile
     image: nijidb-news-poller:local
     command: ["scripts/proxy_maintainer.py"]
     restart: unless-stopped
     depends_on:
       mihomo:
         condition: service_started
-      bot-mihomo:
-        condition: service_started
     env_file:
       - path: ./news-poller.env
         required: false
     environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      NIJIDB_LOG_TZ_OFFSET_HOURS: ${NIJIDB_LOG_TZ_OFFSET_HOURS:-8}
       MAINTAINER_CONFIG: /app/maintainer.json
-    volumes:
-      # 两份配置都要能写：订阅更新会重新渲染并让对应 mihomo 重载
-      - ./mihomo:/config/news
-      - ./bot-proxy:/config/bot
-      - poller-state:/state
-      - ./maintainer.json:/app/maintainer.json:ro
-    networks:
-      - proxy
-
-  # ---------- 内容轮询 ----------
-
-  news-poller:
-    build:
-      context: ..
-      dockerfile: poller/news/Dockerfile
-    image: nijidb-news-poller:local
-    restart: unless-stopped
-    depends_on:
-      mihomo:
-        condition: service_started
-    env_file:
-      - ./news-poller.env
-    environment:
       NEWS_POLL_PROXY: http://mihomo:7890
       NEWS_POLL_NODES_FILE: /state/nodes.json
       NEWS_POLL_HINTS_FILE: /state/poller-hints.json
       NEWS_POLL_PROXY_HOST: mihomo
       NEWS_POLL_STATE_FILE: /state/news-poller.json
     volumes:
+      # 订阅更新会重新渲染配置，因此要能写
+      - ./mihomo:/config
       - poller-state:/state
+      - ./maintainer.json:/app/maintainer.json:ro
     networks:
       - proxy
 
-  # ---------- bot 专用出口 ----------
-
-  bot-mihomo:
-    image: nijidb-mihomo:local
-    restart: unless-stopped
-    user: "${PUID:-1000}:${PGID:-1000}"
-    command: ["-f", "/config/config.yaml"]
-    environment:
-      SAFE_PATHS: /config
-    volumes:
-      - ./bot-proxy:/config:ro
-    networks:
-      - proxy
-    ports:
-      - "127.0.0.1:9199:9090"
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9090/version"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
-
-  # bot 的固定入口：主上游为 bot-mihomo，失败自动切备用上游（BOT_BACKUP_PROXY）
-  bot-gateway:
-    image: nginx:alpine
-    restart: unless-stopped
-    depends_on:
-      - bot-mihomo
-    environment:
-      BACKUP_PROXY: "${BOT_BACKUP_PROXY:-192.168.1.1:7890}"
-    entrypoint:
-      - /bin/sh
-      - -c
-      - >-
-        envsubst '$${BACKUP_PROXY}' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
-        && exec nginx -g 'daemon off;'
-    volumes:
-      - ./bot-proxy/nginx.conf.template:/etc/nginx/nginx.conf.template:ro
-    networks:
-      - proxy
-    # 需要给宿主或其它网络的容器使用时再打开（注意这是无认证的代理端口）
-    # ports:
-    #   - "192.168.1.10:7899:7890"
-
-  # ---------- 可选：历史图片补档 ----------
-  # profile 启用：docker compose --profile worker up -d
-
+  # 可选：历史新闻图片批量归档（补档）。默认不启动：
+  #   docker compose --profile worker up -d
   image-worker:
     profiles: ["worker"]
     image: nijidb-news-poller:local

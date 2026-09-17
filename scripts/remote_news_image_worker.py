@@ -212,6 +212,8 @@ def default_state() -> dict[str, Any]:
     return {
         "version": 1,
         "article_ids": [],
+        "index_page": 0,
+        "page_count": 0,
         "article_index": 0,
         "image_index": 0,
         "last_index_refresh": 0.0,
@@ -493,61 +495,67 @@ class NewsImageWorker:
             raise WorkerRequestError("导入 API 返回格式无效")
         return value
 
-    def refresh_index(self) -> None:
+    def load_listing_page(self, page: int) -> bool:
+        data = self.get_json("/api/news", {"page": page, "page_size": 60})
+        items = data.get("items", [])
+        if not isinstance(items, list):
+            raise WorkerRequestError("网站新闻列表格式无效")
+        try:
+            actual_page = max(1, int(data.get("page") or page))
+            page_count = max(1, min(1000, int(data.get("pages") or 1)))
+        except (TypeError, ValueError):
+            actual_page = page
+            page_count = 1
         ids: list[str] = []
         seen: set[str] = set()
-        first = self.get_json("/api/news", {"page": 1, "page_size": 60})
-        pages = first.get("pages", 1)
-        try:
-            page_count = max(1, min(1000, int(pages)))
-        except (TypeError, ValueError):
-            page_count = 1
-        page_values = [first]
-        for page in range(2, page_count + 1):
-            page_values.append(self.get_json("/api/news", {"page": page, "page_size": 60}))
-        for data in page_values:
-            items = data.get("items", [])
-            if not isinstance(items, list):
-                raise WorkerRequestError("网站新闻列表格式无效")
-            for item in items:
-                if not isinstance(item, dict):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            article_id = str(item.get("id") or "").strip()
+            try:
+                if "image_count" in item and int(item.get("image_count") or 0) <= 0:
                     continue
-                article_id = str(item.get("id") or "").strip()
-                try:
-                    if "image_count" in item and int(item.get("image_count") or 0) <= 0:
-                        continue
-                except (TypeError, ValueError):
-                    pass
-                if article_id and article_id not in seen:
-                    ids.append(article_id)
-                    seen.add(article_id)
+            except (TypeError, ValueError):
+                pass
+            if article_id and article_id not in seen:
+                ids.append(article_id)
+                seen.add(article_id)
         self.state["article_ids"] = ids
+        self.state["index_page"] = actual_page
+        self.state["page_count"] = page_count
         self.state["article_index"] = 0
         self.state["image_index"] = 0
+        save_state(self.config.state_file, self.state)
+        self.log(f"读取新闻索引：第 {actual_page}/{page_count} 页，发现 {len(ids)} 篇含图片新闻")
+        return bool(items)
+
+    def refresh_index(self) -> None:
+        self.load_listing_page(1)
         self.state["last_index_refresh"] = time.time()
         self.state["pass_complete_at"] = 0.0
         self.state["next_pass_at"] = 0.0
         save_state(self.config.state_file, self.state)
-        self.log(f"刷新新闻索引：{len(ids)} 篇")
+
+    def advance_page_or_pass(self) -> bool:
+        current_page = int(self.state.get("index_page") or 0)
+        page_count = int(self.state.get("page_count") or 1)
+        if current_page >= page_count:
+            self.complete_pass()
+            return False
+        return self.load_listing_page(current_page + 1)
 
     def prepare_pass(self) -> bool:
         now = time.time()
-        ids = self.state.get("article_ids", [])
-        if not ids:
-            self.refresh_index()
-            ids = self.state.get("article_ids", [])
         if self.state.get("pass_complete_at"):
             if now < float(self.state.get("next_pass_at") or 0):
                 return False
-            if now - float(self.state.get("last_index_refresh") or 0) >= self.config.index_refresh_seconds:
-                self.refresh_index()
-            else:
-                self.state["article_index"] = 0
-                self.state["image_index"] = 0
-                self.state["pass_complete_at"] = 0.0
-                self.state["next_pass_at"] = 0.0
-                save_state(self.config.state_file, self.state)
-        return bool(self.state.get("article_ids"))
+            self.refresh_index()
+        elif not self.state.get("index_page"):
+            self.refresh_index()
+        while not self.state.get("article_ids"):
+            if not self.advance_page_or_pass():
+                return False
+        return True
 
     def complete_article(self) -> None:
         self.state["article_index"] = int(self.state.get("article_index") or 0) + 1
@@ -739,7 +747,7 @@ class NewsImageWorker:
         article_ids = self.state.get("article_ids", [])
         article_index = int(self.state.get("article_index") or 0)
         if article_index >= len(article_ids):
-            self.complete_pass()
+            self.advance_page_or_pass()
             return False
         article_id = str(article_ids[article_index])
         try:

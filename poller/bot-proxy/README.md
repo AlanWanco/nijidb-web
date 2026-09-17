@@ -6,7 +6,7 @@
 ```text
 bot ──HTTP(S)_PROXY──▶ bot-gateway ──▶ bot-mihomo（fallback 组 + GEOIP 国内直连）
   http://bot-gateway:7890   │              └─ 全是可用节点池里的节点
-                            └─备用──▶ 路由器 Clash（默认 192.168.10.1:7890）
+                            └─备用──▶ 路由器 Clash（默认 192.168.1.1:7890，可用 BOT_BACKUP_PROXY 覆盖）
 ```
 
 ## 1. 生成初始配置
@@ -86,11 +86,13 @@ docker compose exec bot-mihomo curl -sS http://127.0.0.1:9090/proxies/PROXY
 ## 3.1 实测结果（供排查参考）
 
 ```text
-经 bot-gateway → https://api.ipify.org   → 202.85.76.136   （节点出口，已代理）
-经 bot-gateway → https://myip.ipip.net   → 39.146.68.253   （中国 安徽 芜湖，家宽直连）
-停掉 bot-mihomo 后同一请求              → 160.191.40.194   （自动切到备用上游，仍 HTTP 200）
-恢复 bot-mihomo 后同一请求              → 202.85.76.136   （自动切回主上游）
+经 bot-gateway → https://api.ipify.org   → 203.0.113.10    （节点出口，已代理）
+经 bot-gateway → https://myip.ipip.net   → 198.51.100.20   （家宽出口，国内直连）
+停掉 bot-mihomo 后同一请求              → 198.51.100.30   （自动切到备用上游，仍 HTTP 200）
+恢复 bot-mihomo 后同一请求              → 203.0.113.10    （自动切回主上游）
 ```
+
+（上面是示例地址，`203.0.113.0/24`、`198.51.100.0/24` 为 RFC 5737 文档专用网段。）
 
 ## 4. bot 侧怎么接
 
@@ -113,8 +115,8 @@ NO_PROXY=localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.lan,ho
 - **`NO_PROXY` 必须包含 NapCat / OneBot 等内网地址**，否则 bot 与 NapCat 的内部通信也会进代理。
 - `httpx` / `requests` 认这些环境变量；`aiohttp` 需要 `trust_env=True`；`websockets` 部分版本不读
   环境变量——只要内网地址在 `NO_PROXY` 里，websocket 直连内网就不受影响。
-- 不想动 bot 的网络时，打开 compose 里的 `ports`（例如 `192.168.10.75:7899:7890`），
-  再让 bot 用 `HTTP_PROXY=http://172.17.0.1:7899`（Docker 网桥网关）或 `http://192.168.10.75:7899`。
+- 不想动 bot 的网络时，打开 compose 里的 `ports`（例如 `192.168.1.10:7899:7890`），
+  再让 bot 用 `HTTP_PROXY=http://172.17.0.1:7899`（Docker 网桥网关）或 `http://192.168.1.10:7899`。
   注意那等于在局域网暴露一个无认证代理，请自行权衡。
 
 ## 5. 失效兜底
@@ -126,8 +128,8 @@ NO_PROXY=localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.lan,ho
 | 3 | mihomo 进程/容器挂掉 | `restart: unless-stopped` + healthcheck，Docker 秒级重启 |
 | 4 | 整个主上游不可用 | `bot-gateway`（nginx stream）自动切备用上游（默认路由器 Clash） |
 
-要换备用上游就改 `nginx.conf` 里的 `server ... backup` 一行，然后
-`docker compose restart bot-gateway`。
+要换备用上游：在 `poller/bot-proxy/.env`（600，不提交）里设置 `BOT_BACKUP_PROXY=路由器地址:端口`，
+然后 `docker compose up -d bot-gateway`。
 
 **关于「干脆直连」**：环境变量形式的代理无法在失败时自动降级为直连——那需要在 bot 的 HTTP 客户端
 里做（例如 httpx 传 `proxy=`，异常时用 `proxy=None` 重试）。若 bot 是自己写的，建议加上这一层；

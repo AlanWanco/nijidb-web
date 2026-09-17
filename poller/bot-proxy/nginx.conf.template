@@ -7,7 +7,7 @@ events {}
 stream {
     upstream bot_proxy {
         server bot-mihomo:7890 max_fails=2 fail_timeout=15s;
-        server 192.168.10.1:7890 backup max_fails=2 fail_timeout=15s;
+        server ${BACKUP_PROXY} backup max_fails=2 fail_timeout=15s;
     }
 
     server {

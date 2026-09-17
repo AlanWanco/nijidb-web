@@ -72,13 +72,22 @@ services:
     restart: unless-stopped
     depends_on:
       - bot-mihomo
+    # 备用上游地址由环境变量注入（写在 600 的 .env 里，不提交）
+    environment:
+      BACKUP_PROXY: "${BOT_BACKUP_PROXY:-192.168.1.1:7890}"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        envsubst '$${BACKUP_PROXY}' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
+        && exec nginx -g 'daemon off;'
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx.conf.template:/etc/nginx/nginx.conf.template:ro
     networks:
       - proxy
     # 需要给宿主或其它网络的容器使用时再打开（注意这是无认证的代理端口）
     # ports:
-    #   - "192.168.10.75:7899:7890"
+    #   - "192.168.1.10:7899:7890"
 
 volumes:
   bot-state:

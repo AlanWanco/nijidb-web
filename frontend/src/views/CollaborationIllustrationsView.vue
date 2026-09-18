@@ -163,7 +163,7 @@ onMounted(loadIllustrationIndex);
         </select>
       </label>
       <label class="collaboration-select">
-        <span class="sr-only">{{ t("审核状态") }}</span>
+        <span class="sr-only">{{ t("收录状态") }}</span>
         <select v-model="statusFilter">
           <option value="all">{{ t("全部状态") }}</option>
           <option value="complete">{{ t("完整收录") }}</option>

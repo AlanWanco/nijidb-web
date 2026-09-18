@@ -248,7 +248,6 @@ class ExternalIngestApiTests(unittest.IsolatedAsyncioTestCase):
                 "date": "2026-09-20",
                 "tags": ["ayumu"],
                 "collection_status": "complete",
-                "review_status": "approved",
                 "images": [
                     {
                         "url": "https://www.example.com/source/campaign.jpg",

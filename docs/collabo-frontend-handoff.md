@@ -16,10 +16,10 @@
 - 返回一览保留搜索/年份/页码和滚动位置；上下联动使用同一筛选上下文和稳定排序。
 - 左右按键与移动端左右滑动切换联动；放大画廊内只切换图片。纵向滚动、双指缩放、边缘返回、表单等不触发翻页。
 - CD 详情页复用手机滑动导航，并增加快速切换时的过期请求防护。
-- `/admin/collabo`：复用现有管理员登录，提供记录列表及整条记录的审核入口。
+- `/admin/collabo`：复用现有管理员登录，提供记录列表及整条记录的管理入口。
 - `/admin/collabo/new`、`/admin/collabo/:id`：资料、日期含义、合作方、角色标签、多个带标题/描述的开始—结束日期时间段、版权、备注、来源链接标题与 URL、多图编辑。
-- 图片可以排序、选择封面、补充说明/来源；图片不再单独审核，审核状态只作用于整条联动记录。
-- 数据库保存、保存并审核下一条、批量图片上传接口已接到适配器；未保存离开提示、导出审核草稿 JSON。
+- 图片可以排序、选择封面、补充说明/来源；所有图片随联动记录直接展示。
+- 数据库保存、保存并进入下一条、批量图片上传接口已接到适配器；未保存离开提示、导出草稿 JSON。
 - 日间/夜间及窄屏适配；卡片、主图切换采用轻量动效，支持 `prefers-reduced-motion`。
 
 ## 当前数据模式（重要）
@@ -29,7 +29,7 @@
    `frontend/src/content/collaborationIllustrations.json` 和 `/api/collaboration-illustrations`。
 3. 数据库/网络/鉴权错误不能伪装成预览或空目录；在页面显示错误。
 4. 预览模式中的图片直接展示，不沿用“至少 3 张 = 完整收录”的自动结论。
-5. 数据库模式支持管理员保存、审核整条记录和上传；预览模式不会写数据库或上传资源。
+5. 数据库模式支持管理员保存和上传；预览模式不会写数据库或上传资源。
 6. 新数据库接口存在时，找不到某条记录就显示不存在，不从旧 JSON 重新带回已删除记录。
 
 ### URL 规则
@@ -85,7 +85,6 @@
     "cover_url": "https://r2-public.example/images/collabo/original.png",
     "thumbnail_url": "",
     "image_count": 1,
-    "review_status": "pending",
     "updated_at": "2026-09-11T00:00:00Z",
     "images": [
       {
@@ -108,17 +107,15 @@
 }
 ```
 
-- `previous` / `following` 与列表排序一致；到边界返回 null。后台可不按公开筛选限制审核队列。
+- `previous` / `following` 与列表排序一致；到边界返回 null。
 - `date_kind`：`announced` / `starts` / `first_seen`。
 - `tags` 使用固定角色 ID；`tags=ayumu,lanzhu` 按任一角色匹配，省略 tags 表示全选。
 - `periods` 是多个 `{ start_date, end_date, title, description }`；每段日期必填且结束日期不能早于开始日期，标题和描述至少填写一项。
-- `review_status` 只属于联动记录：`pending` / `approved`；旧数据库中的图片审核字段仅为兼容保留，不参与公开筛选。
-- 审核状态是人工决定，图片数量不代表完成度。
 - 原 Wiki 完整数据/快照、原始 ID 与采集 provenance 仍由数据库保留；前端不覆盖这些原始字段。
 
 ### 管理接口（必须服务端鉴权）
 
-- `GET /api/admin/collabo`：同列表参数与响应，但包含待审核记录。
+- `GET /api/admin/collabo`：同列表参数与响应。
 - `GET /api/admin/collabo/:id`：同详情响应，包含全部图片，队列相邻项用数据库 ID。
 - `POST /api/admin/collabo`：创建，body 是可编辑 item；正式 ID 与随机 slug 服务端生成。
 - `PATCH /api/admin/collabo/:id`：修改可编辑字段，不删除未传入的原始元数据。

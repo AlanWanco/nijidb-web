@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-COLLABO_REVIEW_STATUSES = {"pending", "approved"}
 COLLABO_COLLECTION_STATUSES = {"complete", "partial", "unavailable"}
 COLLABO_CHARACTER_TAGS = (
     ("ayumu", ("上原歩夢", "上原步梦", "歩夢", "步梦", "Ayumu Uehara")),
@@ -60,8 +59,8 @@ COLLABO_CHARACTER_TAG_ALIASES = {
     for tag_id, aliases in COLLABO_CHARACTER_TAGS
     for alias in (tag_id, *aliases)
 }
-# collaboration_images.review_status remains in the schema for old databases only;
-# image-level review is no longer part of the API or publishing workflow.
+# Legacy review_status columns remain in SQLite for old databases and compatibility;
+# review is no longer part of the collaboration API or publishing workflow.
 COLLABO_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS collaboration_items (
   id TEXT PRIMARY KEY,
@@ -575,7 +574,7 @@ def migrate_collaboration_sources(conn, index_path: Path | None = None, manifest
                     json.dumps(tags, ensure_ascii=False),
                     json.dumps(periods, ensure_ascii=False),
                     collection_status,
-                    str(raw_item.get("review_status") or "").strip() if str(raw_item.get("review_status") or "").strip() in COLLABO_REVIEW_STATUSES else "pending",
+                    "approved",
                     json.dumps(
                         {
                             "source_index": raw_item,
@@ -769,9 +768,6 @@ def normalized_item_payload(payload: dict[str, Any], existing: Any = None) -> di
     date_kind = str(payload.get("date_kind") or (existing["date_kind"] if existing else "first_seen")).strip()
     if date_kind not in {"announced", "starts", "first_seen"}:
         date_kind = "first_seen"
-    review_status = str(payload.get("review_status") or (existing["review_status"] if existing else "pending")).strip()
-    if review_status not in COLLABO_REVIEW_STATUSES:
-        review_status = "pending"
     collection_status = str(payload.get("collection_status") or (existing["collection_status"] if existing else "unavailable")).strip()
     if collection_status not in COLLABO_COLLECTION_STATUSES:
         collection_status = "unavailable"
@@ -809,7 +805,6 @@ def normalized_item_payload(payload: dict[str, Any], existing: Any = None) -> di
         "note": str(note_value or "").strip(),
         "links": links,
         "collection_status": collection_status,
-        "review_status": review_status,
     }
 
 
@@ -941,7 +936,7 @@ def upsert_collaboration_item(conn, payload: dict[str, Any]) -> str:
           date_kind=excluded.date_kind, partners_json=excluded.partners_json, credit=excluded.credit,
           note=excluded.note, links_json=excluded.links_json, tags_json=excluded.tags_json,
           periods_json=excluded.periods_json, collection_status=excluded.collection_status,
-          review_status=excluded.review_status, cover_image_id=excluded.cover_image_id,
+          review_status='approved', cover_image_id=excluded.cover_image_id,
           metadata_json=excluded.metadata_json, updated_at=excluded.updated_at""",
         (
             item_id,
@@ -956,7 +951,7 @@ def upsert_collaboration_item(conn, payload: dict[str, Any]) -> str:
             json.dumps(normalized["tags"], ensure_ascii=False),
             json.dumps(normalized["periods"], ensure_ascii=False),
             normalized["collection_status"],
-            normalized["review_status"],
+            "approved",
             cover_image_id,
             json.dumps(metadata, ensure_ascii=False),
             existing["source_hash"] if existing else "",
@@ -996,7 +991,6 @@ __all__ = [
     "COLLABO_IDOL_TAG_IDS",
     "COLLABO_INITIAL_NINE_TAG_IDS",
     "COLLABO_COLLECTION_STATUSES",
-    "COLLABO_REVIEW_STATUSES",
     "COLLABO_SCHEMA_SQL",
     "collaboration_combination_group",
     "collaboration_combination_matches",

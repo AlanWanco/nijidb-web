@@ -28,14 +28,15 @@ test("source and image URLs reject active schemes and credentials", () => {
   ]) {
     assert.equal(safeUrl(url), "");
   }
-  assert.equal(safeUrl("https://example.com/news?item=1#title"), "https://example.com/news?item=1#title");
+  assert.equal(safeUrl("https://example.com/news?item=1#title"), "");
   assert.equal(safeUrl("/media/image.jpg", true), "/media/image.jpg");
   assert.equal(safeUrl("/admin/secret", true), "");
 });
 
-test("legacy fields and all original links survive normalization without image review state", () => {
+test("legacy fields survive normalization without review state", () => {
   const raw = {
     id: "legacy",
+    review_status: "pending",
     first_seen: "2026-09-11",
     collaboration: ["Partner"],
     note: "line1\nline2",
@@ -49,7 +50,7 @@ test("legacy fields and all original links survive normalization without image r
   assert.equal(item.credit, raw.credit);
   assert.deepEqual(item.links, raw.official_links);
   assert.deepEqual(item.partners, raw.collaboration);
-  assert.equal(item.review_status, "pending");
+  assert.equal(Object.hasOwn(item, "review_status"), false);
   assert.ok(item.images.every((image) => !Object.hasOwn(image, "review_status")));
 });
 
@@ -115,7 +116,7 @@ test("combination filters keep core groups and use exact member sets", () => {
   );
 });
 
-test("legacy rejected flags no longer hide a cover or gallery image", () => {
+test("legacy image flags no longer hide a cover or gallery image", () => {
   const item = normalizeItem({
     id: "one",
     cover_image_id: "a",

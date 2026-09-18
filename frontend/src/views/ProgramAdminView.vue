@@ -127,6 +127,9 @@ function blankPeriod() {
     week_interval: 1,
     week_direction: "first",
     week_number: 1,
+    day_index: 0,
+    day_direction: "first",
+    day_number: 1,
     weekday: 0,
     schedule_time: "",
     timezone: "Asia/Tokyo",
@@ -351,6 +354,12 @@ function periodScheduleLabel(period) {
   const weekday = weekdayNames.value[period.weekday] || "";
   if (period.frequency === "monthly") {
     if (period.monthly_mode === "irregular") return `${t("每月 · 日期不定")}${time}`;
+    if (period.monthly_mode === "day") {
+      const direction = period.day_direction || (period.day_index < 0 ? "last" : "first");
+      const number = period.day_number || Math.abs(period.day_index) || 1;
+      const day = direction === "last" ? t("倒数第{count}天", { count: number }) : t("第{count}天", { count: number });
+      return `${t("每月")}${day}${time}`;
+    }
     const direction = period.week_direction || (period.week_index < 0 ? "last" : "first");
     const number = period.week_number || Math.abs(period.week_index) || 1;
     const week = direction === "last" ? t("倒数第{count}周", { count: number }) : t("第{count}周", { count: number });
@@ -738,11 +747,13 @@ function applyProgram(program) {
         ...blankPeriod(),
         ...period,
         frequency,
-        monthly_mode: monthlyMode === "irregular" ? "irregular" : "week",
+        monthly_mode: ["week", "day", "irregular"].includes(monthlyMode) ? monthlyMode : "week",
         auto_generate: autoGenerate,
         week_interval: Number(period.week_interval) || 1,
         week_direction: weekIndex < 0 ? "last" : "first",
         week_number: Math.abs(weekIndex) || 1,
+        day_direction: Number(period.day_index) < 0 ? "last" : "first",
+        day_number: Math.abs(Number(period.day_index)) || 1,
       };
     }),
   });
@@ -760,6 +771,9 @@ function legacyPeriod(program) {
     auto_generate: frequency === "individual" ? false : frequency === "single" ? true : program.auto_generate !== false,
     week_interval: program.week_interval || 1,
     week_index: legacyIrregular ? 0 : program.week_index || 1,
+    day_index: legacyIrregular ? 0 : program.day_index || 0,
+    day_direction: Number(program.day_index) < 0 ? "last" : "first",
+    day_number: Math.abs(Number(program.day_index)) || 1,
     weekday: legacyIrregular || frequency === "individual" ? 0 : program.weekday || 0,
     schedule_time: legacyIrregular ? "" : program.schedule_time || "",
     timezone: program.timezone || "Asia/Tokyo",
@@ -850,10 +864,12 @@ function setPeriodFrequency(period, value) {
   if (value === "individual") {
     period.auto_generate = false;
     period.monthly_mode = "week";
+    period.day_index = 0;
     period.schedule_time = "";
   } else if (value === "single") {
     period.auto_generate = true;
     period.monthly_mode = "week";
+    period.day_index = 0;
   } else if (value !== previousFrequency && previousFrequency === "individual") {
     period.auto_generate = true;
   }
@@ -861,6 +877,7 @@ function setPeriodFrequency(period, value) {
   if (value === "monthly" && !period.monthly_mode) period.monthly_mode = "week";
   if (value === "monthly" && period.monthly_mode === "irregular") {
     period.week_index = 0;
+    period.day_index = 0;
     period.weekday = 0;
   }
 }
@@ -869,8 +886,16 @@ function setMonthlyMode(period, value) {
   period.monthly_mode = value;
   if (value === "irregular") {
     period.week_index = 0;
+    period.day_index = 0;
     period.weekday = 0;
+  } else if (value === "day") {
+    period.week_index = 0;
+    period.day_index = 0;
+    period.weekday = 0;
+    period.day_direction ||= "first";
+    normalizePeriodDayNumber(period);
   } else {
+    period.day_index = 0;
     period.week_number ||= 1;
     period.week_direction ||= "first";
   }
@@ -878,6 +903,17 @@ function setMonthlyMode(period, value) {
 
 function setPeriodWeekDirection(period, value) {
   period.week_direction = value;
+}
+
+function setPeriodDayDirection(period, value) {
+  period.day_direction = value;
+  normalizePeriodDayNumber(period);
+}
+
+function normalizePeriodDayNumber(period) {
+  const max = period.day_direction === "last" ? 14 : 28;
+  const number = Math.trunc(Number(period.day_number) || 1);
+  period.day_number = Math.min(Math.max(number, 1), max);
 }
 
 function togglePerson(person) {
@@ -1005,13 +1041,18 @@ function programBody() {
     start_date: period.start_date,
     end_date: period.frequency === "single" ? period.start_date : period.end_date,
     frequency: period.frequency,
-    monthly_mode: period.frequency === "monthly" && period.monthly_mode === "irregular" ? "irregular" : "week",
+    monthly_mode: period.frequency === "monthly"
+      ? (period.monthly_mode === "irregular" ? "irregular" : period.monthly_mode === "day" ? "day" : "week")
+      : "week",
     auto_generate: period.frequency === "individual" ? false : period.frequency === "single" ? true : period.auto_generate !== false,
     week_interval: Number(period.week_interval) || 1,
-    week_index: period.frequency === "monthly" && period.monthly_mode !== "irregular"
+    week_index: period.frequency === "monthly" && period.monthly_mode === "week"
       ? (period.week_direction === "last" ? -Number(period.week_number) : Number(period.week_number))
       : 0,
-    weekday: period.frequency === "weekly" || (period.frequency === "monthly" && period.monthly_mode !== "irregular") ? Number(period.weekday) : 0,
+    day_index: period.frequency === "monthly" && period.monthly_mode === "day"
+      ? (period.day_direction === "last" ? -Number(period.day_number) : Number(period.day_number))
+      : 0,
+    weekday: period.frequency === "weekly" || (period.frequency === "monthly" && period.monthly_mode === "week") ? Number(period.weekday) : 0,
     schedule_time: period.schedule_time,
     timezone: period.timezone || "Asia/Tokyo",
   }));
@@ -1037,6 +1078,7 @@ function programBody() {
     frequency: first.frequency || "weekly",
     week_interval: first.week_interval || 1,
     week_index: first.week_index || 0,
+    day_index: first.day_index || 0,
     weekday: first.weekday || 0,
     monthly_mode: first.monthly_mode || "week",
     schedule_time: first.schedule_time || "",
@@ -1873,7 +1915,7 @@ onUnmounted(() => {
                  <button type="button" :class="{ selected: period.frequency === 'individual' }" @click="setPeriodFrequency(period, 'individual')">{{ t("逐期设置") }}</button>
                  <button type="button" :class="{ selected: period.frequency === 'single' }" @click="setPeriodFrequency(period, 'single')">{{ t("单次") }}</button>
               </div>
-               <small v-if="period.frequency === 'monthly' && period.monthly_mode === 'irregular'">{{ t("无规律月更：日期不定；可设置默认播出时间；开启下方自动生成后，每月 1 日会按该时间生成一条占位单集。") }}</small>
+               <small v-if="period.frequency === 'monthly' && period.monthly_mode === 'irregular'">{{ t("按月生成单集：首期使用时期开始日，后续从每月 1 日作为占位；之后可在单集列表中直接修改每期原定日期和时间。") }}</small>
                <small v-else-if="period.frequency === 'individual'">{{ t("逐期设置不代表月更，不自动生成后续单集；保存后会先按时期开始日期和默认时间创建首期，之后可按实际情况跨数月手动添加。") }}</small>
                <small v-else-if="period.frequency === 'single'">{{ t("单次会自动生成一条单集，直接使用这里填写的播出日期和时间。") }}</small>
             </div>
@@ -1889,24 +1931,46 @@ onUnmounted(() => {
                  <button type="button" :class="{ selected: period.monthly_mode === 'irregular' }" @click="setMonthlyMode(period, 'irregular')">{{ t("无规律") }}</button>
               </div>
             </div>
-            <div v-if="period.frequency === 'monthly' && period.monthly_mode !== 'irregular'" class="program-form-field">
+            <div v-if="period.frequency === 'monthly' && period.monthly_mode !== 'irregular'" class="program-form-field program-field-wide">
+               <span class="program-field-label">{{ t("计算方式") }}</span>
+               <div class="choice-tags" role="radiogroup" :aria-label="t('计算方式')">
+                 <button type="button" :class="{ selected: period.monthly_mode === 'week' }" @click="setMonthlyMode(period, 'week')">{{ t("周次计算") }}</button>
+                 <button type="button" :class="{ selected: period.monthly_mode === 'day' }" @click="setMonthlyMode(period, 'day')">{{ t("按日计算") }}</button>
+              </div>
+            </div>
+            <div v-if="period.frequency === 'monthly' && period.monthly_mode === 'week'" class="program-form-field">
                <span class="program-field-label">{{ t("周次方向") }}</span>
                <div class="choice-tags" role="radiogroup" :aria-label="t('周次方向')">
                  <button type="button" :class="{ selected: period.week_direction === 'first' }" @click="setPeriodWeekDirection(period, 'first')">{{ t("顺数") }}</button>
                  <button type="button" :class="{ selected: period.week_direction === 'last' }" @click="setPeriodWeekDirection(period, 'last')">{{ t("倒数") }}</button>
               </div>
             </div>
-            <div v-if="period.frequency === 'monthly' && period.monthly_mode !== 'irregular'" class="program-form-field">
+            <div v-if="period.frequency === 'monthly' && period.monthly_mode === 'week'" class="program-form-field">
                <span class="program-field-label">{{ t("第几周") }}</span>
                <div class="choice-tags week-tags" role="radiogroup" :aria-label="t('第几周')">
                  <button v-for="week in weekOptions" :key="week" type="button" :class="{ selected: period.week_number === week }" @click="period.week_number = week">{{ t("第 {count} 周", { count: week }) }}</button>
               </div>
             </div>
-            <div v-if="period.frequency === 'weekly' || (period.frequency === 'monthly' && period.monthly_mode !== 'irregular')" class="program-form-field program-field-wide">
+            <div v-if="period.frequency === 'monthly' && period.monthly_mode === 'week'" class="program-form-field program-field-wide">
                <span class="program-field-label">{{ t("星期") }}</span>
                <div class="choice-tags weekday-tags" role="radiogroup" :aria-label="t('星期')">
                 <button v-for="(name, weekday) in weekdayNames" :key="name" type="button" :class="{ selected: period.weekday === weekday }" @click="period.weekday = weekday">{{ name }}</button>
               </div>
+            </div>
+            <div v-if="period.frequency === 'monthly' && period.monthly_mode === 'day'" class="program-form-field">
+               <span class="program-field-label">{{ t("日次方向") }}</span>
+               <div class="choice-tags" role="radiogroup" :aria-label="t('日次方向')">
+                 <button type="button" :class="{ selected: period.day_direction === 'first' }" @click="setPeriodDayDirection(period, 'first')">{{ t("顺数") }}</button>
+                 <button type="button" :class="{ selected: period.day_direction === 'last' }" @click="setPeriodDayDirection(period, 'last')">{{ t("倒数") }}</button>
+              </div>
+            </div>
+            <div v-if="period.frequency === 'monthly' && period.monthly_mode === 'day'" class="program-form-field">
+               <span class="program-field-label">{{ t("第几天") }}</span>
+               <div class="inline-number">
+                 <input v-model.number="period.day_number" type="number" min="1" :max="period.day_direction === 'last' ? 14 : 28" step="1" required @change="normalizePeriodDayNumber(period)">
+                 <span>{{ period.day_direction === 'last' ? t("倒数第几天") : t("第几天") }}</span>
+               </div>
+               <small>{{ period.day_direction === 'last' ? t("倒数最多支持 14 天") : t("顺数最多支持 28 天") }}</small>
             </div>
             <div v-if="period.frequency === 'weekly' || period.frequency === 'monthly' || period.frequency === 'individual' || period.frequency === 'single'" class="program-form-field period-time-field">
                <span class="program-field-label">{{ t("播出时间") }}</span>
@@ -1929,9 +1993,9 @@ onUnmounted(() => {
                 <input v-model="period.auto_generate" type="checkbox" :disabled="saving || occurrenceSaving">
                 <span>
                   <strong>{{ t("自动生成后续单集") }}</strong>
-                  <small v-if="period.frequency === 'monthly' && period.monthly_mode === 'irregular'">{{ t("开启后按每月 1 日生成占位单集；实际日期和时间可在单集列表中逐期修改。") }}</small>
+                  <small v-if="period.frequency === 'monthly' && period.monthly_mode === 'irregular'">{{ t("按月生成单集：首期使用时期开始日，后续从每月 1 日作为占位；之后可在单集列表中直接修改每期原定日期和时间。") }}</small>
                   <small v-else-if="period.auto_generate">{{ t("按排期规则生成未来约半年的单集。") }}</small>
-                  <small v-else>{{ t("已关闭自动生成，只保留已播出的单集和手动添加的单集。") }}</small>
+                  <small v-else>{{ t("已关闭后续自动生成；无规律月更、逐期设置和单次仍保留时期开始日的首期，其他单集需手动添加。") }}</small>
                 </span>
               </label>
           </div>
@@ -1958,7 +2022,7 @@ onUnmounted(() => {
         <div class="occurrence-generation-bar">
            <label class="occurrence-auto-toggle">
              <input v-model="form.auto_generate" type="checkbox" :disabled="saving || occurrenceSaving" @change="saveAutoGeneration">
-              <span><strong>{{ t("自动生成后续单集") }}</strong><small>{{ form.auto_generate ? t("按排期规则生成未来约半年的单集。") : t("已关闭自动生成，只保留已播出的单集和手动添加的单集。") }}</small></span>
+              <span><strong>{{ t("自动生成后续单集") }}</strong><small>{{ form.auto_generate ? t("按排期规则生成未来约半年的单集。") : t("已关闭后续自动生成；无规律月更、逐期设置和单次仍保留时期开始日的首期，其他单集需手动添加。") }}</small></span>
           </label>
           <div class="occurrence-bulk-actions">
              <button v-if="form.periods.some(period => period.frequency === 'monthly' && period.monthly_mode !== 'irregular')" type="button" class="secondary program-action-button" :disabled="saving || occurrenceSaving" @click="convertMonthlyToIndividual">{{ t("固定月更 → 逐期设置") }}</button>

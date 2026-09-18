@@ -88,6 +88,8 @@ export function normalizeImage(image, index = 0) {
 }
 
 export function normalizeItem(item) {
+  const normalized = { ...item };
+  delete normalized.review_status;
   const links = (item.links || item.official_links || [])
     .map((link) => ({
       title: String(link.title || ""),
@@ -96,7 +98,7 @@ export function normalizeItem(item) {
     .filter((link) => link.url);
   const images = (item.images || []).map(normalizeImage).filter((image) => image.url);
   return {
-    ...item,
+    ...normalized,
     id: String(item.id),
     slug: SLUG_PATTERN.test(item.slug) ? item.slug : "",
     title: String(item.title || ""),
@@ -113,7 +115,6 @@ export function normalizeItem(item) {
     cover_image_id: String(item.cover_image_id || images[0]?.id || ""),
     cover_url: safeUrl(item.cover_url, true),
     thumbnail_url: safeUrl(item.thumbnail_url, true),
-    review_status: item.review_status || "pending",
   };
 }
 

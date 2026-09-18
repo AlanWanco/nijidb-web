@@ -79,6 +79,11 @@ function periodScheduleLabel(period) {
   const weekday = weekdayNames.value[period.weekday] || "";
   if (period.frequency === "monthly") {
     if (period.monthly_mode === "irregular") return t("每月 · 日期不定");
+    if (period.monthly_mode === "day") {
+      const dayIndex = Number(period.day_index) || 1;
+      const day = dayIndex < 0 ? t("倒数第{count}天", { count: Math.abs(dayIndex) }) : t("第{count}天", { count: dayIndex });
+      return `${t("每月")}${day}${time}`;
+    }
     const direction = period.week_direction || (period.week_index < 0 ? "last" : "first");
     const number = period.week_number || Math.abs(period.week_index) || 1;
     const week = direction === "last" ? t("倒数第{count}周", { count: number }) : t("第{count}周", { count: number });

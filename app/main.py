@@ -180,7 +180,7 @@ ADMIN_ROLE = "admin"
 EDITOR_ROLE = "editor"
 EDITOR_USERNAME = "editor"
 PROGRAM_JSON_FORMAT = "nijidb-program"
-PROGRAM_JSON_VERSION = 5
+PROGRAM_JSON_VERSION = 6
 PROGRAM_IMPORT_MAX_OCCURRENCES = 2000
 PROGRAM_IMPORT_PARENT_MARKER = "__nijidb_import_parent__"
 PROGRAM_IMAGE_MAX_BYTES = 20 * 1024 * 1024
@@ -483,6 +483,7 @@ def init_db() -> None:
           week_interval INTEGER NOT NULL DEFAULT 1,
           monthly_mode TEXT NOT NULL DEFAULT 'week',
           week_index INTEGER NOT NULL DEFAULT 0,
+          day_index INTEGER NOT NULL DEFAULT 0,
           weekday INTEGER NOT NULL DEFAULT 0,
            schedule_time TEXT NOT NULL DEFAULT '',
            start_date TEXT NOT NULL DEFAULT '',
@@ -503,6 +504,7 @@ def init_db() -> None:
            auto_generate INTEGER NOT NULL DEFAULT 1,
            week_interval INTEGER NOT NULL DEFAULT 1,
            week_index INTEGER NOT NULL DEFAULT 0,
+           day_index INTEGER NOT NULL DEFAULT 0,
            weekday INTEGER NOT NULL DEFAULT 0,
            schedule_time TEXT NOT NULL DEFAULT '',
            timezone TEXT NOT NULL DEFAULT 'Asia/Tokyo',
@@ -564,6 +566,7 @@ def init_db() -> None:
             "status": "TEXT NOT NULL DEFAULT 'ongoing'",
             "week_interval": "INTEGER NOT NULL DEFAULT 1",
             "monthly_mode": "TEXT NOT NULL DEFAULT 'week'",
+            "day_index": "INTEGER NOT NULL DEFAULT 0",
             "auto_generate": "INTEGER NOT NULL DEFAULT 1",
             "parent_id": "TEXT NOT NULL DEFAULT ''",
             "subprogram_name": "TEXT NOT NULL DEFAULT '主节目'",
@@ -580,8 +583,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE program_periods ADD COLUMN monthly_mode TEXT NOT NULL DEFAULT 'week'")
         if "auto_generate" not in period_columns:
             conn.execute("ALTER TABLE program_periods ADD COLUMN auto_generate INTEGER NOT NULL DEFAULT 1")
+        if "day_index" not in period_columns:
+            conn.execute("ALTER TABLE program_periods ADD COLUMN day_index INTEGER NOT NULL DEFAULT 0")
         conn.execute(
-            "UPDATE program_periods SET monthly_mode = 'week' WHERE COALESCE(monthly_mode, '') NOT IN ('week', 'irregular')"
+            "UPDATE program_periods SET monthly_mode = 'week' WHERE COALESCE(monthly_mode, '') NOT IN ('week', 'day', 'irregular')"
         )
         conn.execute(
             """UPDATE programs
@@ -846,7 +851,7 @@ PROGRAM_FORMATS = {"video", "radio"}
 PROGRAM_PLATFORMS = {"tv", "network"}
 PROGRAM_DELIVERIES = {"live", "recorded"}
 PROGRAM_FREQUENCIES = {"weekly", "monthly", "individual", "single"}
-PROGRAM_MONTHLY_MODES = {"week", "irregular"}
+PROGRAM_MONTHLY_MODES = {"week", "day", "irregular"}
 OCCURRENCE_STATUSES = {"scheduled", "rescheduled", "cancelled", "deleted"}
 EPISODE_START_MAX = 9999
 PROGRAM_FORECAST_DAYS = 183
@@ -1363,12 +1368,19 @@ def period_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     )
     payload["week_interval"] = int(payload.get("week_interval") or 1)
     payload["week_index"] = int(payload.get("week_index") or 0)
+    payload["day_index"] = int(payload.get("day_index") or 0)
     payload["weekday"] = int(payload.get("weekday") or 0)
     if payload["frequency"] == "individual" or (
         payload["frequency"] == "monthly" and payload["monthly_mode"] == "irregular"
     ):
         payload["week_index"] = 0
+        payload["day_index"] = 0
         payload["weekday"] = 0
+    elif payload["frequency"] == "monthly" and payload["monthly_mode"] == "day":
+        payload["week_index"] = 0
+        payload["weekday"] = 0
+    elif payload["frequency"] != "monthly" or payload["monthly_mode"] == "week":
+        payload["day_index"] = 0
     payload["timezone"] = payload.get("timezone") or "Asia/Tokyo"
     return payload
 
@@ -1385,6 +1397,7 @@ def period_summary(period: dict[str, Any]) -> dict[str, Any]:
             "auto_generate",
             "week_interval",
             "week_index",
+            "day_index",
             "weekday",
             "schedule_time",
             "timezone",
@@ -1409,18 +1422,28 @@ def legacy_period(values: dict[str, Any]) -> dict[str, Any]:
     if frequency != "monthly" or monthly_mode not in PROGRAM_MONTHLY_MODES:
         monthly_mode = "week"
     week_index = int(values.get("week_index") or 0)
+    day_index = int(values.get("day_index") or 0)
     start_date = str(values.get("start_date") or "").strip()
     end_date = str(values.get("end_date") or "").strip()
     if frequency == "single":
         end_date = start_date
         week_index = 0
+        day_index = 0
     if frequency == "monthly" and monthly_mode == "irregular":
         week_index = 0
+        day_index = 0
     if frequency == "individual":
+        week_index = 0
+        day_index = 0
+    if frequency != "monthly" or monthly_mode == "week":
+        day_index = 0
+    if frequency == "monthly" and monthly_mode == "day":
         week_index = 0
     weekday = int(values.get("weekday") or 0)
     schedule_time = str(values.get("schedule_time") or "").strip()
-    if frequency == "individual" or (frequency == "monthly" and monthly_mode == "irregular"):
+    if frequency == "individual" or (
+        frequency == "monthly" and monthly_mode in {"irregular", "day"}
+    ):
         weekday = 0
     return {
         "start_date": start_date,
@@ -1436,6 +1459,7 @@ def legacy_period(values: dict[str, Any]) -> dict[str, Any]:
         ),
         "week_interval": int(values.get("week_interval") or 1),
         "week_index": week_index,
+        "day_index": day_index,
         "weekday": weekday,
         "schedule_time": schedule_time,
         "timezone": str(values.get("timezone") or "Asia/Tokyo").strip(),
@@ -1461,6 +1485,7 @@ def program_payload(
         payload.get("monthly_mode") if payload.get("monthly_mode") in PROGRAM_MONTHLY_MODES else "week"
     )
     payload["week_index"] = int(payload.get("week_index") or 0)
+    payload["day_index"] = int(payload.get("day_index") or 0)
     payload["weekday"] = int(payload.get("weekday") or 0)
     payload["parent_id"] = str(payload.get("parent_id") or "").strip()
     payload["subprogram_name"] = str(payload.get("subprogram_name") or "主节目").strip() or "主节目"
@@ -1528,21 +1553,36 @@ def normalized_period(values: dict[str, Any], program_start: date, program_end: 
     week_interval = integer_value(values.get("week_interval"), "每隔几周", 1, 52)
     week_index = integer_value(values.get("week_index"), "第几周", -5, 5)
     monthly_mode = str(values.get("monthly_mode") or ("irregular" if legacy_irregular else "week")).strip()
+    day_index = (
+        integer_value(values.get("day_index"), "第几天", -28, 28)
+        if frequency == "monthly" and monthly_mode == "day"
+        else 0
+    )
     if frequency == "monthly":
         if monthly_mode not in PROGRAM_MONTHLY_MODES:
             raise ValueError("月更规律设置无效")
         if monthly_mode == "week" and week_index == 0:
-            raise ValueError("有规律的月更需要填写第几周，支持 1–5 或 -1–-5")
-        if monthly_mode == "irregular":
+            raise ValueError("周次计算需要填写第几周，支持 1–5 或 -1–-5")
+        if monthly_mode == "day":
+            if not (1 <= day_index <= 28 or -14 <= day_index <= -1):
+                raise ValueError("按日计算需要填写顺数 1–28 或倒数 -1–-14")
             week_index = 0
+        elif monthly_mode == "irregular":
+            week_index = 0
+            day_index = 0
+        else:
+            day_index = 0
     else:
         monthly_mode = "week"
+        day_index = 0
     if frequency != "weekly":
         week_interval = 1
     if frequency != "monthly":
         week_index = 0
     weekday = integer_value(values.get("weekday"), "星期", 0, 6)
-    if frequency == "individual" or (frequency == "monthly" and monthly_mode == "irregular"):
+    if frequency == "individual" or (
+        frequency == "monthly" and monthly_mode in {"irregular", "day"}
+    ):
         weekday = 0
     schedule_time = str(values.get("schedule_time") or "").strip()
     if schedule_time and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", schedule_time):
@@ -1562,6 +1602,7 @@ def normalized_period(values: dict[str, Any], program_start: date, program_end: 
         "auto_generate": period_auto_generate,
         "week_interval": week_interval,
         "week_index": week_index,
+        "day_index": day_index,
         "weekday": weekday,
         "schedule_time": schedule_time,
         "timezone": timezone,
@@ -1665,6 +1706,7 @@ def normalized_program(values: dict[str, Any]) -> dict[str, Any]:
         "week_interval": first_period["week_interval"],
         "monthly_mode": first_period["monthly_mode"],
         "week_index": first_period["week_index"],
+        "day_index": first_period.get("day_index", 0),
         "weekday": first_period["weekday"],
         "schedule_time": first_period["schedule_time"],
         "start_date": periods[0]["start_date"],
@@ -1757,13 +1799,14 @@ def program_json_metadata() -> dict[str, Any]:
             "program.episode_start": "首集编号支持 0 到 9999，默认是 1；第一个非 EX 单集从该编号开始，之后按规则递增。EX 始终不占期。",
             "program.people": "节目固定参与成员、主持人或常驻嘉宾数组。推荐使用以下 14 个虹咲成员日文原名以启用成员筛选和彩色标记：大西亜玖璃、相良茉優、前田佳織里、久保田未夢、村上奈津実、鬼頭明里、楠木ともり、林鼓子、指出毬亜、田中ちえ美、小泉萌香、内田秀、法元明菜、矢野妃菜喜。其他主持人或嘉宾也可直接填写姓名，会被保存和显示，但不会被识别为虹咲成员。",
             "program.periods[].frequency": "weekly、monthly、individual 或 single。monthly 还需要通过 monthly_mode 区分有规律和无规律。",
-            "program.periods[].monthly_mode": "仅 monthly 使用：week 表示按顺数/倒数第几周和星期更新；irregular 表示每月更新一期但日期未知。",
-            "program.periods[].auto_generate": "是否按本时期的排期规则自动生成后续单集；individual 逐期设置不自动生成，single 单次固定自动生成一条，monthly/irregular 开启后按每月 1 日生成占位单集。节目级 auto_generate 仍是总开关。",
+            "program.periods[].monthly_mode": "仅 monthly 使用：week 表示按周次计算，day 表示按日计算，irregular 表示每月更新一期但日期未知。",
+            "program.periods[].auto_generate": "是否按本时期的排期规则自动生成后续单集；individual 逐期设置不自动生成后续单集，monthly/irregular 的首期始终使用时期开始日期，开启后从下个月 1 日生成占位单集，single 单次始终使用时期开始日期生成一条。节目级 auto_generate 仍是后续单集总开关。",
             "program.periods[].week_interval": "周更间隔；填写 2 表示隔周。",
-            "program.periods[].week_index": "有规律月更的第几周，1–5 表示顺数，-1–-5 表示倒数；无规律月更填 0。",
+            "program.periods[].week_index": "周次计算时的第几周，1–5 表示顺数，-1–-5 表示倒数；按日计算时填 0。",
+            "program.periods[].day_index": "按日计算时的第几天；1–28 表示顺数，-1–-14 表示倒数；周次计算和无规律月更填 0。",
             "program.periods[].start_date": "时期开始日期必填；第一段时期的 start_date 就是节目第一期的原定日期。",
             "program.periods[].end_date": "时期结束日期可空；留空表示该时期或节目仍在连载，不要把最后一条单集日期误填为结束日期。",
-            "program.periods[].schedule_time": "时期默认播出时间，格式 HH:MM；monthly/irregular 可设置默认时间并在单集列表中逐期修改，individual 逐期设置也可作为新增单集的默认时间；所有 period 的日期和时间按 timezone 解释。",
+            "program.periods[].schedule_time": "时期默认播出时间，格式 HH:MM；monthly 时期可设置默认时间并在单集列表中逐期修改，individual 逐期设置也可作为新增单集的默认时间；所有 period 的日期和时间按 timezone 解释。",
             "program.periods[].timezone": "规范 JSON 统一使用 Asia/Tokyo（UTC+09:00）；period 的日期和时间必须与该时区一致。",
             "occurrences[].episode_number（系统推导）": "occurrences 没有显式期数字段；系统按非 EX 单集的原定日期升序、同日按原定时间升序计算运行序号。EX 不占期。",
             "occurrences[].original_date": "单集原定日期，必填；支持 YYYY-MM-DD。同一节目同一天允许多个单集，但播出时间必须不同；按匹配 period 的 timezone 解释。",
@@ -1793,7 +1836,7 @@ def program_json_metadata() -> dict[str, Any]:
             "schedule_mode 缺省为 individual：导入的 occurrences 是准确的最终逐期数据，program.auto_generate 会被关闭，不会凭 periods 生成额外单集。",
             "需要手动指定导入行为时，可将 schedule_mode 设置为 individual 或 generated；current 由导出文件使用，按每个 program 的 auto_generate 还原当前设置。",
             "导出 JSON 会根据当前节目设置保留 auto_generate、periods（包括每个时期的 auto_generate）和当前生效的 occurrences；自动生成节目按系统现有约半年的生成窗口导出。",
-            "逐期设置不代表月更，individual 时期不会按规则自动生成后续单集；保存节目排期时会先创建一条以时期开始日期和默认时间为初始值的首期，之后按实际情况手动维护；monthly/irregular 时期可设置默认播出时间，开启自动生成后以每月 1 日作为占位日期并使用该时间；single 时期默认自动生成一条与播出日期和时间相同的单集；weekly 和规律 monthly 时期默认开启。",
+            "逐期设置不代表月更，individual 时期不会按规则自动生成后续单集；保存节目排期时会先创建一条以时期开始日期和默认时间为初始值的首期，之后按实际情况手动维护；monthly/week 按周次计算，monthly/day 按日计算（顺数 1–28 日或倒数 1–14 日），monthly/irregular 的首期始终使用时期开始日期，开启后续自动生成后从下个月 1 日作为占位日期；single 时期无论节目是否开启后续自动生成，都使用时期开始日期和默认时间生成一条单集；weekly 和规律 monthly 时期默认开启。",
             "target_mode 缺省为 new；覆盖导入必须指定 target_program_id，并在网页导入预览中明确选择覆盖目标。",
             "子节目 JSON 导入必须在预览中选择一个已有的主节目；new 会在该主节目下新建子节目，overwrite 会覆盖该主节目下同名或同 ID 的子节目。",
             "JSON 可以保留这些说明字段；导入器也兼容 // 和 /* */ 注释。",
@@ -1828,6 +1871,7 @@ def program_json_template() -> dict[str, Any]:
                 "auto_generate": True,
                 "week_interval": 2,
                 "week_index": 0,
+                "day_index": 0,
                 "weekday": 2,
                 "schedule_time": "20:00",
                 "timezone": "Asia/Tokyo",
@@ -1840,6 +1884,7 @@ def program_json_template() -> dict[str, Any]:
                 "auto_generate": True,
                 "week_interval": 1,
                 "week_index": 1,
+                "day_index": 0,
                 "weekday": 2,
                 "schedule_time": "20:00",
                 "timezone": "Asia/Tokyo",
@@ -1937,15 +1982,39 @@ def normalize_import_periods(values: dict[str, Any]) -> dict[str, Any]:
     if source["frequency"] == "monthly":
         source["monthly_mode"] = import_choice(source.get("monthly_mode"), {
             "有规律": "week", "规律": "week", "固定": "week", "week": "week", "fixed": "week",
+            "周次计算": "week", "周次": "week",
+            "按日计算": "day", "按日": "day", "day": "day", "date": "day",
             "无规律": "irregular", "不规律": "irregular", "日期未知": "irregular", "irregular": "irregular",
         }) or ("irregular" if raw_frequency == "irregular" else "week")
         if source["monthly_mode"] == "irregular":
             source["week_index"] = 0
-        elif "week_index" not in source:
-            number = integer_value(source.get("week_number") or 1, "第几周", 1, 5)
-            source["week_index"] = -number if str(source.get("week_direction") or "first") in {"last", "倒数"} else number
+            source["day_index"] = 0
+        elif source["monthly_mode"] == "day":
+            source["week_index"] = 0
+            source["weekday"] = 0
+            if "day_index" not in source:
+                raw_day_number = source.get("day_number")
+                number = integer_value(
+                    1 if raw_day_number in (None, "") else raw_day_number,
+                    "第几天",
+                    1,
+                    28,
+                )
+                direction = str(source.get("day_direction") or "first").strip().lower()
+                if direction in {"last", "倒数"}:
+                    if number > 14:
+                        raise ValueError("按日计算倒数最多支持 14 天")
+                    source["day_index"] = -number
+                else:
+                    source["day_index"] = number
+        else:
+            source["day_index"] = 0
+            if "week_index" not in source:
+                number = integer_value(source.get("week_number") or 1, "第几周", 1, 5)
+                source["week_index"] = -number if str(source.get("week_direction") or "first") in {"last", "倒数"} else number
     else:
         source["monthly_mode"] = "week"
+        source["day_index"] = 0
     return source
 
 
@@ -2393,10 +2462,10 @@ def seed_program_periods(conn: sqlite3.Connection) -> None:
         if period["frequency"] not in PROGRAM_FREQUENCIES:
             period["frequency"] = "weekly"
         conn.execute("""INSERT INTO program_periods (
-            program_id, start_date, end_date, frequency, monthly_mode, auto_generate, week_interval, week_index, weekday, schedule_time, timezone, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+            program_id, start_date, end_date, frequency, monthly_mode, auto_generate, week_interval, week_index, day_index, weekday, schedule_time, timezone, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
             row["id"], period["start_date"], period["end_date"], period["frequency"], period["monthly_mode"], period["auto_generate"],
-            period["week_interval"], period["week_index"], period["weekday"], period["schedule_time"], period["timezone"],
+            period["week_interval"], period["week_index"], period["day_index"], period["weekday"], period["schedule_time"], period["timezone"],
             row["created_at"] or now, row["updated_at"] or now,
         ))
 
@@ -2505,6 +2574,12 @@ def monthly_weekday(year: int, month: int, week_index: int, weekday: int) -> dat
     return date(year, month, day) if day >= 1 else None
 
 
+def monthly_day(year: int, month: int, day_index: int) -> date | None:
+    last_day = calendar.monthrange(year, month)[1]
+    day = day_index if day_index > 0 else last_day + day_index + 1
+    return date(year, month, day) if 1 <= day <= last_day else None
+
+
 def period_has_flexible_dates(period: dict[str, Any]) -> bool:
     return period.get("frequency") == "individual" or (
         period.get("frequency") == "monthly" and str(period.get("monthly_mode") or "week") == "irregular"
@@ -2531,20 +2606,26 @@ def period_recurring_dates(period: dict[str, Any], range_end: date) -> list[date
     if period["frequency"] != "monthly":
         return []
     if monthly_mode == "irregular":
-        current = date(period_start.year, period_start.month, 1)
-        if current < period_start:
-            current = date(current.year + (current.month == 12), current.month % 12 + 1, 1)
-        dates = []
+        # The first episode always uses the period start date. Only later
+        # automatically generated placeholders use the first day of each
+        # following month; a mid-month start must not lose its initial episode.
+        dates = [period_start] if period_start <= range_end else []
+        current = date(period_start.year + (period_start.month == 12), period_start.month % 12 + 1, 1)
         while current <= range_end:
             dates.append(current)
             current = date(current.year + (current.month == 12), current.month % 12 + 1, 1)
         return dates
-    if not period.get("week_index"):
+    if monthly_mode == "week" and not period.get("week_index"):
+        return []
+    if monthly_mode == "day" and not period.get("day_index"):
         return []
     dates = []
     current = date(period_start.year, period_start.month, 1)
     while current <= range_end:
-        occurrence = monthly_weekday(current.year, current.month, period["week_index"], period["weekday"])
+        if monthly_mode == "day":
+            occurrence = monthly_day(current.year, current.month, period["day_index"])
+        else:
+            occurrence = monthly_weekday(current.year, current.month, period["week_index"], period["weekday"])
         if occurrence and period_start <= occurrence <= range_end:
             dates.append(occurrence)
         current = date(current.year + (current.month == 12), current.month % 12 + 1, 1)
@@ -2588,7 +2669,7 @@ def occurrence_record(
     special = str(override.get("special") or "").strip().upper()
     record = {
         "id": override.get("id"),
-        "generated": not has_override,
+        "generated": not has_override and not manual,
         "individual": individual,
         "original_date": effective_original_date,
         "title": str(override.get("title") or "").strip() if has_override else "",
@@ -2630,65 +2711,81 @@ def program_occurrence_records(program: dict[str, Any], range_start: date, range
         (str(row.get("generated_date") or row["original_date"]), str(row.get("original_time") or "").strip()): row
         for row in override_rows
     }
-    # Flexible schedules use generated_date as the stable anchor. If an auto-generated
-    # occurrence's original time is edited, its new time no longer matches the period's
-    # schedule_time, so the exact (date, time) lookup must fall back to that anchor.
-    generated_date_overrides: dict[str, list[dict[str, Any]]] = {}
+    # Flexible schedules use generated_date as the stable anchor. Manual initial
+    # anchors have no generated_date, so fall back to their original date too; this
+    # keeps an edited initial time attached to the required start-date episode.
+    flexible_overrides_by_anchor: dict[str, list[dict[str, Any]]] = {}
     for row in override_rows:
         generated_date = str(row.get("generated_date") or "").strip()
-        if generated_date:
-            generated_date_overrides.setdefault(generated_date, []).append(row)
+        anchor = generated_date or str(row.get("original_date") or "").strip()
+        if anchor:
+            flexible_overrides_by_anchor.setdefault(anchor, []).append(row)
     periods = program.get("periods") or ([legacy_period(program)] if program.get("start_date") else [])
     records: list[dict[str, Any]] = []
     base_date_keys: set[tuple[str, str]] = set()
     consumed_override_ids: set[int] = set()
-    if boolean_value(program.get("auto_generate"), True):
-        for period in periods:
-            if not boolean_value(period.get("auto_generate"), True) and period.get("frequency") != "single":
+    program_auto_generate = boolean_value(program.get("auto_generate"), True)
+    for period in periods:
+        period_auto_generate = boolean_value(period.get("auto_generate"), True)
+        frequency = str(period.get("frequency") or "weekly").strip()
+        monthly_irregular = frequency == "monthly" and str(period.get("monthly_mode") or "week") == "irregular"
+        initial_episode_type = frequency in {"individual", "single"} or monthly_irregular
+        period_start = date.fromisoformat(period["start_date"])
+        period_end = date.fromisoformat(period["end_date"]) if period.get("end_date") else program_end
+        period_generation_end = min(generation_end, period_end) if period_end else generation_end
+        future_generation_disabled = frequency == "individual" or not program_auto_generate or (
+            not period_auto_generate and frequency != "single"
+        )
+        if period_generation_end < period_start:
+            continue
+        if future_generation_disabled:
+            # Disabling future generation must still leave the initial anchor
+            # for flexible schedules and one-time programs.
+            if not initial_episode_type:
                 continue
-            period_start = date.fromisoformat(period["start_date"])
-            period_end = date.fromisoformat(period["end_date"]) if period.get("end_date") else program_end
-            period_generation_end = min(generation_end, period_end) if period_end else generation_end
-            if period_generation_end < period_start:
-                continue
+            base_dates = [period_start]
+            initial_manual = True
+        else:
             base_dates = period_recurring_dates(period, period_generation_end)
-            schedule_time = str(period.get("schedule_time") or "").strip()
-            base_date_keys.update((item.isoformat(), schedule_time) for item in base_dates)
-            schedule_shift_days = 0
-            can_shift_following = period.get("frequency") == "weekly" and int(period.get("week_interval") or 1) == 2
-            for original in base_dates:
-                override = None
-                if period_has_flexible_dates(period):
-                    anchored_overrides = generated_date_overrides.get(original.isoformat(), [])
-                    if anchored_overrides:
-                        active_overrides = [row for row in anchored_overrides if row.get("status") != "deleted"]
-                        exact_overrides = [
-                            row for row in active_overrides
-                            if str(row.get("original_time") or "").strip() == schedule_time
-                        ]
-                        if exact_overrides:
-                            override = exact_overrides[-1]
-                        elif len(active_overrides) == 1:
-                            override = active_overrides[0]
-                        elif len(anchored_overrides) == 1:
-                            override = anchored_overrides[0]
-                if override is None:
-                    override = overrides.get((original.isoformat(), schedule_time)) or overrides.get((original.isoformat(), ""))
-                if override is not None:
-                    consumed_override_ids.add(id(override))
-                record = occurrence_record(
-                    program,
-                    original,
-                    override,
-                    schedule_time,
-                    period.get("timezone", "Asia/Tokyo"),
-                    period.get("frequency", "weekly"),
-                    schedule_shift_days=schedule_shift_days,
-                    monthly_mode=period.get("monthly_mode", "week"),
-                )
-                records.append(record)
-                if can_shift_following and record["status"] == "rescheduled":
-                    schedule_shift_days += record.get("shift_following_days", 0)
+            initial_manual = False
+        schedule_time = str(period.get("schedule_time") or "").strip()
+        base_date_keys.update((item.isoformat(), schedule_time) for item in base_dates)
+        schedule_shift_days = 0
+        can_shift_following = period.get("frequency") == "weekly" and int(period.get("week_interval") or 1) == 2
+        for original in base_dates:
+            override = None
+            if period_has_flexible_dates(period):
+                anchored_overrides = flexible_overrides_by_anchor.get(original.isoformat(), [])
+                if anchored_overrides:
+                    active_overrides = [row for row in anchored_overrides if row.get("status") != "deleted"]
+                    exact_overrides = [
+                        row for row in active_overrides
+                        if str(row.get("original_time") or "").strip() == schedule_time
+                    ]
+                    if exact_overrides:
+                        override = exact_overrides[-1]
+                    elif len(active_overrides) == 1:
+                        override = active_overrides[0]
+                    elif len(anchored_overrides) == 1:
+                        override = anchored_overrides[0]
+            if override is None:
+                override = overrides.get((original.isoformat(), schedule_time)) or overrides.get((original.isoformat(), ""))
+            if override is not None:
+                consumed_override_ids.add(id(override))
+            record = occurrence_record(
+                program,
+                original,
+                override,
+                schedule_time,
+                period.get("timezone", "Asia/Tokyo"),
+                period.get("frequency", "weekly"),
+                manual=initial_manual,
+                schedule_shift_days=schedule_shift_days,
+                monthly_mode=period.get("monthly_mode", "week"),
+            )
+            records.append(record)
+            if can_shift_following and record["status"] == "rescheduled":
+                schedule_shift_days += record.get("shift_following_days", 0)
     for row in override_rows:
         stored_generated_date = str(row.get("generated_date") or "").strip()
         generated_date = stored_generated_date or row["original_date"]
@@ -3024,8 +3121,8 @@ def backfill_individual_occurrence_anchors(
 def replace_program_periods(conn: sqlite3.Connection, program_id: str, periods: list[dict[str, Any]], timestamp: str) -> None:
     conn.execute("DELETE FROM program_periods WHERE program_id = ?", (program_id,))
     conn.executemany("""INSERT INTO program_periods (
-        program_id, start_date, end_date, frequency, monthly_mode, auto_generate, week_interval, week_index, weekday, schedule_time, timezone, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", [
+        program_id, start_date, end_date, frequency, monthly_mode, auto_generate, week_interval, week_index, day_index, weekday, schedule_time, timezone, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", [
         (
             program_id,
             period["start_date"],
@@ -3035,6 +3132,7 @@ def replace_program_periods(conn: sqlite3.Connection, program_id: str, periods: 
             period["auto_generate"],
             period["week_interval"],
             period["week_index"],
+            period.get("day_index", 0),
             period["weekday"],
             period["schedule_time"],
             period["timezone"],
@@ -3050,19 +3148,29 @@ def ensure_individual_occurrence_starts(
     program_id: str,
     periods: list[dict[str, Any]],
     timestamp: str,
+    program_auto_generate: bool = True,
 ) -> int:
-    """Create one editable first episode for every individual period.
+    """Create the required initial episode anchors.
 
-    Individual periods deliberately do not generate a recurring series, but
-    their start date is still the initial episode anchor. Keep the row as a
-    normal manual occurrence (no generated_date/materialized marker), so it
-    behaves like an episode added from the editor and can be changed freely.
-    Existing rows, including cancelled or deleted rows, suppress reseeding.
+    ``individual`` periods are always manual, while irregular monthly and
+    one-time periods need a start-date episode whenever future generation is
+    disabled at either the program or period level. Later episodes remain
+    manual in those cases. Existing rows, including cancelled or deleted
+    rows, suppress reseeding.
     """
-    individual_periods = [
-        period for period in periods if str(period.get("frequency") or "") == "individual"
-    ]
-    if not individual_periods:
+    initial_periods = []
+    for period in periods:
+        frequency = str(period.get("frequency") or "").strip()
+        monthly_irregular = frequency == "monthly" and str(period.get("monthly_mode") or "week") == "irregular"
+        period_auto_generate = boolean_value(period.get("auto_generate"), True)
+        needs_initial = frequency == "individual" or (
+            frequency == "monthly"
+            and monthly_irregular
+            and (not program_auto_generate or not period_auto_generate)
+        ) or (frequency == "single" and not program_auto_generate)
+        if needs_initial:
+            initial_periods.append(period)
+    if not initial_periods:
         return 0
 
     existing_dates = {
@@ -3073,7 +3181,7 @@ def ensure_individual_occurrence_starts(
         ).fetchall()
     }
     created = 0
-    for period in individual_periods:
+    for period in initial_periods:
         original_date = str(period.get("start_date") or "").strip()
         if not original_date or original_date in existing_dates:
             continue
@@ -3100,11 +3208,11 @@ def ensure_individual_occurrence_starts(
 def insert_program_row(conn: sqlite3.Connection, values: dict[str, Any]) -> None:
     conn.execute("""INSERT INTO programs (
         id, title, status, category, format, platform, delivery, auto_generate, people, official_url, description,
-        frequency, week_interval, monthly_mode, week_index, weekday, schedule_time,
+        frequency, week_interval, monthly_mode, week_index, day_index, weekday, schedule_time,
         start_date, end_date, parent_id, subprogram_name, episode_start, created_at, updated_at
     ) VALUES (
         :id, :title, :status, :category, :format, :platform, :delivery, :auto_generate, :people, :official_url, :description,
-        :frequency, :week_interval, :monthly_mode, :week_index, :weekday, :schedule_time,
+        :frequency, :week_interval, :monthly_mode, :week_index, :day_index, :weekday, :schedule_time,
         :start_date, :end_date, :parent_id, :subprogram_name, :episode_start, :created_at, :updated_at
     )""", values)
     replace_program_periods(conn, values["id"], values["periods"], values["updated_at"])
@@ -3122,7 +3230,7 @@ def replace_imported_program_row(
         title=:title, status=:status, category=:category, format=:format, platform=:platform, delivery=:delivery, auto_generate=:auto_generate,
         people=:people, official_url=:official_url, description=:description,
         frequency=:frequency, week_interval=:week_interval, monthly_mode=:monthly_mode,
-        week_index=:week_index, weekday=:weekday, schedule_time=:schedule_time,
+        week_index=:week_index, day_index=:day_index, weekday=:weekday, schedule_time=:schedule_time,
         start_date=:start_date, end_date=:end_date, parent_id=:parent_id, subprogram_name=:subprogram_name, episode_start=:episode_start, updated_at=:updated_at
         WHERE id=:id""", values)
     if not values["parent_id"]:
@@ -6227,7 +6335,6 @@ def external_ingest_api_docs() -> dict[str, Any]:
                         "partners": ["合作方"],
                         "tags": ["ayumu"],
                         "collection_status": "complete",
-                        "review_status": "approved",
                         "images": [
                             {
                                 "url": "https://images.example.com/images/collabo/campaign_external_001.jpg",
@@ -6774,7 +6881,6 @@ def collaboration_item_payload(conn: sqlite3.Connection, row: sqlite3.Row, detai
         "note": str(row["note"] or ""),
         "links": normalize_links(row["links_json"]),
         "collection_status": str(row["collection_status"] or "unavailable"),
-        "review_status": str(row["review_status"] or "pending"),
         "cover_image_id": str(row["cover_image_id"] or ""),
         "cover_url": cover_url,
         "thumbnail_url": thumbnail_url,
@@ -6894,7 +7000,6 @@ async def api_collaboration_illustrations() -> dict[str, Any]:
             total_images += len(images)
             items[row["id"]] = {
                 "status": row["collection_status"],
-                "review_status": row["review_status"],
                 "images": images,
             }
         return {
@@ -7427,6 +7532,13 @@ async def api_remote_program_ingest(request: Request) -> dict[str, Any]:
                         }
                         cursor = insert_occurrence_row(conn, values)
                         insert_occurrence_images(conn, cursor.lastrowid, occurrence.get("images"), now)
+                    ensure_individual_occurrence_starts(
+                        conn,
+                        target_id,
+                        program_values["periods"],
+                        now,
+                        program_values["auto_generate"],
+                    )
     except (TypeError, ValueError, OverflowError, RecursionError) as exc:
         raise HTTPException(400, str(exc) or "节目导入内容格式无效") from exc
     except sqlite3.IntegrityError as exc:
@@ -8571,6 +8683,13 @@ async def api_import_program(request: Request) -> dict[str, Any]:
                         }
                         cursor = insert_occurrence_row(conn, values)
                         insert_occurrence_images(conn, cursor.lastrowid, occurrence.get("images"), now)
+                    ensure_individual_occurrence_starts(
+                        conn,
+                        target_id,
+                        program_values["periods"],
+                        now,
+                        program_values["auto_generate"],
+                    )
     except sqlite3.IntegrityError as exc:
         raise HTTPException(409, "导入的单集存在重复播出日期和时间") from exc
 
@@ -8614,7 +8733,9 @@ async def api_create_program(request: Request) -> dict[str, Any]:
     values.update({"id": f"program-{secrets.token_hex(6)}", "created_at": now, "updated_at": now})
     with db() as conn:
         insert_program_row(conn, values)
-        ensure_individual_occurrence_starts(conn, values["id"], values["periods"], now)
+        ensure_individual_occurrence_starts(
+            conn, values["id"], values["periods"], now, values["auto_generate"]
+        )
     log_database_activity("program", f"新增节目：{values['title']}")
     program = next(item for item in program_rows(program_ids={values["id"]}, include_occurrences=False) if item["id"] == values["id"])
     return {"program": program}
@@ -8651,7 +8772,7 @@ async def api_update_program(program_id: str, request: Request) -> dict[str, Any
             title=:title, status=:status, category=:category, format=:format, platform=:platform, delivery=:delivery, auto_generate=:auto_generate,
             people=:people, official_url=:official_url, description=:description,
             frequency=:frequency, week_interval=:week_interval, monthly_mode=:monthly_mode,
-            week_index=:week_index, weekday=:weekday, schedule_time=:schedule_time,
+            week_index=:week_index, day_index=:day_index, weekday=:weekday, schedule_time=:schedule_time,
             start_date=:start_date, end_date=:end_date, parent_id=:parent_id, subprogram_name=:subprogram_name, episode_start=:episode_start, updated_at=:updated_at
             WHERE id=:id""", values)
         if not values["parent_id"]:
@@ -8661,7 +8782,9 @@ async def api_update_program(program_id: str, request: Request) -> dict[str, Any
             )
         backfill_individual_occurrence_anchors(conn, program_id, old_periods, values["periods"])
         replace_program_periods(conn, program_id, values["periods"], values["updated_at"])
-        ensure_individual_occurrence_starts(conn, program_id, values["periods"], values["updated_at"])
+        ensure_individual_occurrence_starts(
+            conn, program_id, values["periods"], values["updated_at"], values["auto_generate"]
+        )
     log_database_activity("program", f"更新节目：{values['title']}")
     program = next(item for item in program_rows(program_ids={program_id}, include_occurrences=False) if item["id"] == program_id)
     return {"program": program}
@@ -8715,10 +8838,14 @@ async def api_update_auto_generation(program_id: str, request: Request) -> dict[
     if not program:
         raise HTTPException(404, "节目不存在")
     with db() as conn:
+        now = datetime.now(timezone.utc).isoformat()
         materialized_count = materialize_generated_occurrences(conn, program) if not auto_generate else 0
         conn.execute(
             "UPDATE programs SET auto_generate = ?, updated_at = ? WHERE id = ?",
-            (int(auto_generate), datetime.now(timezone.utc).isoformat(), program_id),
+            (int(auto_generate), now, program_id),
+        )
+        ensure_individual_occurrence_starts(
+            conn, program_id, program.get("periods") or [], now, auto_generate
         )
     state = "开启" if auto_generate else "关闭"
     suffix = f"，保存 {materialized_count} 期" if materialized_count else ""

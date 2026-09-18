@@ -97,15 +97,19 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
             "periods": [period],
             "occurrences": [],
         }
-        self.assertEqual(main.program_occurrence_records(program, start, range_end), [])
+        initial_records = main.program_occurrence_records(program, start, range_end)
+        self.assertEqual(len(initial_records), 1)
+        self.assertFalse(initial_records[0]["generated"])
+        self.assertTrue(initial_records[0]["manual"])
+        self.assertEqual(initial_records[0]["original_date"], start.isoformat())
 
         program["occurrences"] = [{"original_date": (start + timedelta(days=3)).isoformat(), "original_time": "20:00"}]
         manual_records = main.program_occurrence_records(program, start, range_end)
-        self.assertEqual(len(manual_records), 1)
-        self.assertTrue(manual_records[0]["manual"])
+        self.assertEqual(len(manual_records), 2)
+        self.assertTrue(all(record["manual"] for record in manual_records))
 
-    def test_irregular_monthly_period_uses_first_of_each_month_as_placeholder(self):
-        start = date(2026, 1, 1)
+    def test_irregular_monthly_period_uses_start_then_first_of_following_months(self):
+        start = date(2026, 1, 15)
         end = date(2026, 4, 30)
         period = {
             "start_date": start.isoformat(),
@@ -117,7 +121,7 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
             "timezone": "Asia/Tokyo",
         }
         dates = main.period_recurring_dates(period, end)
-        self.assertEqual(dates, [date(2026, 1, 1), date(2026, 2, 1), date(2026, 3, 1), date(2026, 4, 1)])
+        self.assertEqual(dates, [date(2026, 1, 15), date(2026, 2, 1), date(2026, 3, 1), date(2026, 4, 1)])
         program = {
             "id": "irregular-program-test",
             "title": "无规律月更测试节目",
@@ -130,6 +134,162 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
         }
         records = main.program_occurrence_records(program, start, end)
         self.assertEqual([record["original_time"] for record in records], ["20:00"] * 4)
+
+    def test_regular_monthly_day_calculation_supports_forward_and_reverse(self):
+        start = date(2026, 1, 1)
+        end = date(2026, 4, 30)
+        forward = {
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "frequency": "monthly",
+            "monthly_mode": "day",
+            "day_index": 28,
+            "schedule_time": "20:00",
+            "timezone": "Asia/Tokyo",
+        }
+        reverse = {**forward, "day_index": -14}
+        self.assertEqual(
+            main.period_recurring_dates(forward, end),
+            [date(2026, 1, 28), date(2026, 2, 28), date(2026, 3, 28), date(2026, 4, 28)],
+        )
+        self.assertEqual(
+            main.period_recurring_dates(reverse, end),
+            [date(2026, 1, 18), date(2026, 2, 15), date(2026, 3, 18), date(2026, 4, 17)],
+        )
+
+    def test_regular_monthly_day_limits_are_validated(self):
+        start = date(2026, 1, 1)
+        for day_index in (28, -14):
+            with self.subTest(day_index=day_index):
+                period = main.normalized_period(
+                    {
+                        "start_date": start.isoformat(),
+                        "frequency": "monthly",
+                        "monthly_mode": "day",
+                        "day_index": day_index,
+                    },
+                    start,
+                    None,
+                )
+                self.assertEqual(period["day_index"], day_index)
+                self.assertEqual(period["week_index"], 0)
+                self.assertEqual(period["weekday"], 0)
+        for day_index in (0, 29, -15):
+            with self.subTest(day_index=day_index), self.assertRaises(ValueError):
+                main.normalized_period(
+                    {
+                        "start_date": start.isoformat(),
+                        "frequency": "monthly",
+                        "monthly_mode": "day",
+                        "day_index": day_index,
+                    },
+                    start,
+                    None,
+                )
+
+    def test_initial_episode_anchor_survives_program_auto_generation_switch(self):
+        start = date(2026, 1, 15)
+        end = date(2026, 4, 30)
+        cases = [
+            {
+                "frequency": "monthly",
+                "monthly_mode": "irregular",
+                "auto_generate": True,
+            },
+            {
+                "frequency": "individual",
+                "auto_generate": False,
+            },
+            {
+                "frequency": "single",
+                "auto_generate": True,
+            },
+        ]
+        for index, period in enumerate(cases):
+            with self.subTest(frequency=period["frequency"]):
+                period = {
+                    **period,
+                    "start_date": start.isoformat(),
+                    "end_date": end.isoformat() if period["frequency"] != "single" else start.isoformat(),
+                    "schedule_time": "20:00",
+                    "timezone": "Asia/Tokyo",
+                }
+                program = {
+                    "id": f"initial-anchor-{index}",
+                    "title": "首期锚点测试节目",
+                    "start_date": start.isoformat(),
+                    "end_date": end.isoformat() if period["frequency"] != "single" else "",
+                    "auto_generate": False,
+                    "delivery": "recorded",
+                    "periods": [period],
+                    "occurrences": [],
+                }
+                records = main.program_occurrence_records(program, start, end)
+                self.assertEqual(records[0]["original_date"], start.isoformat())
+                self.assertEqual(records[0]["original_time"], "20:00")
+                self.assertFalse(records[0]["generated"])
+                self.assertTrue(records[0]["manual"])
+                self.assertEqual(len(records), 1)
+
+    def test_initial_flexible_anchor_keeps_an_edited_manual_time(self):
+        start = date(2026, 1, 15)
+        period = {
+            "start_date": start.isoformat(),
+            "end_date": date(2026, 4, 30).isoformat(),
+            "frequency": "monthly",
+            "monthly_mode": "irregular",
+            "auto_generate": False,
+            "schedule_time": "20:00",
+            "timezone": "Asia/Tokyo",
+        }
+        program = {
+            "id": "edited-initial-anchor-test",
+            "title": "修改首期时间测试节目",
+            "start_date": start.isoformat(),
+            "end_date": period["end_date"],
+            "auto_generate": False,
+            "delivery": "recorded",
+            "periods": [period],
+            "occurrences": [{
+                "id": 1,
+                "original_date": start.isoformat(),
+                "original_time": "21:00",
+                "generated_date": "",
+                "status": "scheduled",
+            }],
+        }
+        records = main.program_occurrence_records(program, start, date(2026, 4, 30))
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["original_time"], "21:00")
+        self.assertFalse(records[0]["generated"])
+        self.assertTrue(records[0]["manual"])
+
+    def test_period_auto_generation_off_keeps_irregular_initial_episode(self):
+        start = date(2026, 1, 15)
+        period = {
+            "start_date": start.isoformat(),
+            "end_date": date(2026, 4, 30).isoformat(),
+            "frequency": "monthly",
+            "monthly_mode": "irregular",
+            "auto_generate": False,
+            "schedule_time": "20:00",
+            "timezone": "Asia/Tokyo",
+        }
+        program = {
+            "id": "period-auto-off-test",
+            "title": "时期关闭自动生成测试节目",
+            "start_date": start.isoformat(),
+            "end_date": period["end_date"],
+            "auto_generate": True,
+            "delivery": "recorded",
+            "periods": [period],
+            "occurrences": [],
+        }
+        records = main.program_occurrence_records(program, start, date(2026, 4, 30))
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["original_date"], start.isoformat())
+        self.assertFalse(records[0]["generated"])
+        self.assertTrue(records[0]["manual"])
 
     def test_single_period_generates_start_date_by_default(self):
         today = datetime_today()
@@ -205,6 +365,7 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
                 auto_generate INTEGER NOT NULL DEFAULT 1,
                 week_interval INTEGER NOT NULL DEFAULT 1,
                 week_index INTEGER NOT NULL DEFAULT 0,
+                day_index INTEGER NOT NULL DEFAULT 0,
                 weekday INTEGER NOT NULL DEFAULT 0,
                 schedule_time TEXT NOT NULL DEFAULT '',
                 timezone TEXT NOT NULL DEFAULT 'Asia/Tokyo',
@@ -309,6 +470,108 @@ class IndividualProgramApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(updated.status_code, 200)
             listing_after_update = await self.client.get(f"/api/admin/programs/{program_id}/occurrences")
             self.assertEqual(len(listing_after_update.json()["occurrences"]), 1)
+
+    async def test_monthly_irregular_and_single_seed_first_episode_when_auto_off(self):
+        start = main.datetime.now(main.JAPAN_TZ).date() + timedelta(days=7)
+        cases = [
+            (
+                "无规律月更",
+                {
+                    "start_date": start.isoformat(),
+                    "frequency": "monthly",
+                    "monthly_mode": "irregular",
+                    "schedule_time": "20:00",
+                    "timezone": "Asia/Tokyo",
+                },
+            ),
+            (
+                "单次节目",
+                {
+                    "start_date": start.isoformat(),
+                    "frequency": "single",
+                    "schedule_time": "20:00",
+                    "timezone": "Asia/Tokyo",
+                },
+            ),
+        ]
+        for title, period in cases:
+            with self.subTest(title=title):
+                created = await self.client.post(
+                    "/api/admin/programs",
+                    json={"title": title, "auto_generate": False, "periods": [period]},
+                )
+                self.assertEqual(created.status_code, 200)
+                program_id = created.json()["program"]["id"]
+                listing = await self.client.get(f"/api/admin/programs/{program_id}/occurrences")
+                self.assertEqual(listing.status_code, 200)
+                occurrences = listing.json()["occurrences"]
+                self.assertEqual(len(occurrences), 1)
+                first = occurrences[0]
+                self.assertEqual(first["original_date"], start.isoformat())
+                self.assertEqual(first["original_time"], "20:00")
+                self.assertFalse(first["generated"])
+                self.assertTrue(first["manual"])
+
+    async def test_monthly_day_period_persists_and_generates_fixed_dates(self):
+        start = main.datetime.now(main.JAPAN_TZ).date().replace(day=1)
+        end = start + timedelta(days=100)
+        payload = {
+            "title": "按日月更测试节目",
+            "auto_generate": True,
+            "periods": [{
+                "start_date": start.isoformat(),
+                "end_date": end.isoformat(),
+                "frequency": "monthly",
+                "monthly_mode": "day",
+                "day_index": -14,
+                "schedule_time": "20:00",
+                "timezone": "Asia/Tokyo",
+            }],
+        }
+        created = await self.client.post("/api/admin/programs", json=payload)
+        self.assertEqual(created.status_code, 200)
+        program = created.json()["program"]
+        self.assertEqual(program["day_index"], -14)
+        self.assertEqual(program["periods"][0]["monthly_mode"], "day")
+        self.assertEqual(program["periods"][0]["day_index"], -14)
+
+        listing = await self.client.get(f"/api/admin/programs/{program['id']}/occurrences")
+        self.assertEqual(listing.status_code, 200)
+        occurrences = listing.json()["occurrences"]
+        expected = main.period_recurring_dates(payload["periods"][0], end)
+        self.assertEqual(
+            [item["original_date"] for item in occurrences],
+            [item.isoformat() for item in expected],
+        )
+
+    async def test_turning_off_auto_generation_keeps_initial_irregular_monthly_episode(self):
+        start = main.datetime.now(main.JAPAN_TZ).date() + timedelta(days=7)
+        payload = {
+            "title": "关闭后续生成仍保留首期",
+            "auto_generate": True,
+            "periods": [{
+                "start_date": start.isoformat(),
+                "frequency": "monthly",
+                "monthly_mode": "irregular",
+                "schedule_time": "20:00",
+                "timezone": "Asia/Tokyo",
+            }],
+        }
+        created = await self.client.post("/api/admin/programs", json=payload)
+        self.assertEqual(created.status_code, 200)
+        program_id = created.json()["program"]["id"]
+
+        disabled = await self.client.patch(
+            f"/api/admin/programs/{program_id}/auto-generation",
+            json={"auto_generate": False},
+        )
+        self.assertEqual(disabled.status_code, 200)
+        listing = await self.client.get(f"/api/admin/programs/{program_id}/occurrences")
+        occurrences = listing.json()["occurrences"]
+        self.assertEqual(len(occurrences), 1)
+        self.assertEqual(occurrences[0]["original_date"], start.isoformat())
+        self.assertFalse(occurrences[0]["generated"])
+        self.assertTrue(occurrences[0]["manual"])
 
 
 class MusicSyncTests(unittest.IsolatedAsyncioTestCase):

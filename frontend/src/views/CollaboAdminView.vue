@@ -65,7 +65,6 @@ function emptyForm() {
     links: [],
     images: [],
     cover_image_id: "",
-    review_status: "pending",
   };
 }
 function setForm(item) {
@@ -354,10 +353,6 @@ async function uploadImageUrl() {
           ><CollaboImage :src="coverUrl(item)" alt="" /><span
             ><strong>{{ item.title }}</strong
             ><small>{{ dateLabel(item.date, localeTag()) }} · {{ item.image_count }} IMG</small></span
-          ><em
-            class="cb-review-status"
-            :class="{ 'is-approved': item.review_status === 'approved' }"
-            >{{ c(item.review_status === "approved" ? "已审核" : "待审核") }}</em
           ><b>↗</b></RouterLink
         >
       </div>
@@ -386,31 +381,6 @@ async function uploadImageUrl() {
           <label>{{ c("合作方（每行一项）") }}<textarea v-model="partnersText" rows="3"></textarea></label>
           <label>{{ c("版权标注") }}<input v-model="form.credit" /></label>
           <label>{{ c("备注") }}<textarea v-model="form.note" rows="5"></textarea></label>
-          <div class="cb-status-field">
-            <span class="cb-field-label">{{ c("审核状态") }}</span>
-            <div class="cb-status-pills" role="radiogroup" :aria-label="c('审核状态')">
-              <button
-                type="button"
-                role="radio"
-                class="cb-status-pill"
-                :class="{ selected: form.review_status === 'pending' }"
-                :aria-checked="form.review_status === 'pending'"
-                @click="form.review_status = 'pending'"
-              >
-                {{ c("待审核") }}
-              </button>
-              <button
-                type="button"
-                role="radio"
-                class="cb-status-pill"
-                :class="{ selected: form.review_status === 'approved' }"
-                :aria-checked="form.review_status === 'approved'"
-                @click="form.review_status = 'approved'"
-              >
-                {{ c("已审核") }}
-              </button>
-            </div>
-          </div>
           <div class="cb-status-field">
             <span class="cb-field-label">{{ c("角色标签") }}</span>
             <div class="cb-character-picker" role="group" :aria-label="c('角色标签')">
@@ -552,7 +522,7 @@ async function uploadImageUrl() {
         ><button type="button" class="cb-quiet cb-editor-action-button" @click="exportDraft">{{ c("导出草稿 JSON") }}</button
         ><button class="cb-editor-action-button" type="submit" :disabled="!writable || saving || deleting || uploading">{{ c("保存到数据库") }}</button
         ><button v-if="data.following" class="cb-editor-action-button" type="button" :disabled="!writable || saving || deleting || uploading" @click="save(true)">
-          {{ c("保存并审核下一条") }} →
+          {{ c("保存并进入下一条") }} →
         </button>
       </div>
     </form>

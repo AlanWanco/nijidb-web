@@ -43,7 +43,6 @@ const dbItem = {
       description: "活动说明",
     },
   ],
-  review_status: "pending",
 };
 const browserErrors = [];
 async function configure(context) {
@@ -315,7 +314,6 @@ async function swipe(page, selector, dx, dy = 2) {
     await page.getByLabel("标题", { exact: true }).fill("Database save test");
     assert.equal(await page.getByRole("button", { name: "上原步梦", exact: true }).count(), 1);
     assert.equal(await page.getByText("时间段 1", { exact: true }).count(), 1);
-    await page.getByRole("radio", { name: "已审核", exact: true }).click();
     assert.equal(await page.locator(".cb-image-controls select").count(), 0);
     assert.equal(
       await page.locator(".cb-image-controls .cb-image-remove").first().evaluate((button) => getComputedStyle(button).color),

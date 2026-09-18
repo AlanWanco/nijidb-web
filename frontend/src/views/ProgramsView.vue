@@ -298,6 +298,11 @@ function periodScheduleLabel(period) {
   const weekday = weekdayNames.value[period.weekday] || "";
   if (period.frequency === "monthly") {
     if (period.monthly_mode === "irregular") return t("每月 · 日期不定");
+    if (period.monthly_mode === "day") {
+      const dayIndex = Number(period.day_index) || 1;
+      const day = dayIndex < 0 ? t("倒数第{count}天", { count: Math.abs(dayIndex) }) : t("第{count}天", { count: dayIndex });
+      return `${t("每月")}${day}${time}`;
+    }
     const week = period.week_index > 0 ? t("第{count}周", { count: period.week_index }) : t("倒数第{count}周", { count: Math.abs(period.week_index) });
     return `${t("每月")}${week}${weekday}${time}`;
   }
@@ -633,7 +638,7 @@ function goToToday() {
 async function scrollCalendarToDate(dateValue, requestId) {
   await nextTick();
   await new Promise(resolve => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve)));
-  if (requestId !== calendarScrollRequestId || loading.value) return;
+  if (requestId !== calendarScrollRequestId) return;
   const selector = viewMode.value === "calendar"
     ? `.program-calendar .fc-daygrid-day[data-date="${dateValue}"]`
     : `.program-list-date-group[data-date="${dateValue}"]`;

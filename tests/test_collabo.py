@@ -10,6 +10,7 @@ from app.collabo import (
     collaboration_combination_matches,
     collaboration_rows,
     ensure_collaboration_schema,
+    normalized_item_payload,
     upsert_collaboration_item,
 )
 
@@ -23,32 +24,28 @@ class CollaborationStorageTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.conn.close()
 
-    def test_approved_item_does_not_require_image_review(self) -> None:
+    def test_review_status_is_ignored_and_images_are_published(self) -> None:
         item_id = "a" * 16
-        upsert_collaboration_item(
-            self.conn,
-            {
-                "id": item_id,
-                "title": "测试联动",
-                "date": "2026-09-11",
-                "review_status": "approved",
-                "images": [
-                    {
-                        "id": "pending-image",
-                        "url": "https://example.com/illustration.jpg",
-                        "review_status": "pending",
-                    }
-                ],
-            },
-        )
-        item = self.conn.execute(
-            "SELECT review_status FROM collaboration_items WHERE id = ?", (item_id,)
-        ).fetchone()
-        image = self.conn.execute(
-            "SELECT review_status FROM collaboration_images WHERE item_id = ?", (item_id,)
-        ).fetchone()
-        self.assertEqual(item["review_status"], "approved")
-        self.assertEqual(image["review_status"], "approved")
+        payload = {
+            "id": item_id,
+            "title": "测试联动",
+            "date": "2026-09-11",
+            "review_status": "pending",
+            "images": [
+                {
+                    "id": "pending-image",
+                    "url": "https://example.com/illustration.jpg",
+                    "review_status": "pending",
+                }
+            ],
+        }
+        normalized = normalized_item_payload(payload)
+        self.assertNotIn("review_status", normalized)
+        upsert_collaboration_item(self.conn, payload)
+        image_count = self.conn.execute(
+            "SELECT COUNT(*) FROM collaboration_images WHERE item_id = ?", (item_id,)
+        ).fetchone()[0]
+        self.assertEqual(image_count, 1)
 
     def test_character_tags_and_multiple_periods_are_normalized(self) -> None:
         item_id = "c" * 16

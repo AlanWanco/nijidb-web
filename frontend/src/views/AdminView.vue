@@ -72,6 +72,12 @@ const syncing = ref(false);
 const newsSyncing = ref(false);
 const newsSlowRefreshing = ref(false);
 const newsSlowRetrying = ref(false);
+const musicReleases = ref([]);
+const musicReleasesLoading = ref(false);
+const musicCoverUploading = ref(false);
+const musicCoverUrl = ref("");
+const selectedMusicReleaseId = ref("");
+const musicCoverFileInput = ref(null);
 const externalApiDocs = ref(null);
 const externalApiLoading = ref(false);
 const externalApiPage = ref(0);
@@ -108,6 +114,9 @@ const externalApiPages = computed(() => externalApiDocs.value?.resources?.length
 const externalApiResource = computed(
   () => externalApiDocs.value?.resources?.[externalApiPage.value] || null,
 );
+const selectedMusicRelease = computed(
+  () => musicReleases.value.find((release) => release.id === selectedMusicReleaseId.value) || null,
+);
 watch(logCategory, () => {
   logPage.value = 1;
 });
@@ -131,6 +140,7 @@ watch(section, (value) => {
     refreshActivity();
   }
   if (value === "api" && !loading.value) loadExternalApiDocs();
+  if (value === "music" && !loading.value) loadMusicReleases();
 });
 const deviceTimeZone =
   Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -188,6 +198,94 @@ function activityLogSummary(log) {
   return `${category} · ${log.summary}`;
 }
 
+async function loadMusicReleases() {
+  if (musicReleasesLoading.value) return;
+  musicReleasesLoading.value = true;
+  try {
+    const data = await api("/api/releases");
+    musicReleases.value = data.releases || [];
+    if (!musicReleases.value.some((release) => release.id === selectedMusicReleaseId.value)) {
+      selectedMusicReleaseId.value = musicReleases.value[0]?.id || "";
+    }
+  } catch (requestError) {
+    showError(requestError);
+  } finally {
+    musicReleasesLoading.value = false;
+  }
+}
+
+async function uploadMusicCoverFile(file) {
+  const release = selectedMusicRelease.value;
+  if (!release || !file || musicCoverUploading.value) return;
+  musicCoverUploading.value = true;
+  error.value = "";
+  try {
+    const response = await fetch(`/api/admin/releases/${encodeURIComponent(release.id)}/cover`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": file.type || "application/octet-stream",
+        "X-Filename": encodeURIComponent(file.name || "release-cover"),
+      },
+      body: file,
+      credentials: "same-origin",
+    });
+    const payload = response.headers.get("content-type")?.includes("application/json")
+      ? await response.json()
+      : {};
+    if (!response.ok) {
+      const uploadError = new Error(payload.detail || t("图片上传失败"));
+      uploadError.status = response.status;
+      throw uploadError;
+    }
+    const updated = payload.release;
+    musicReleases.value = musicReleases.value.map((item) => item.id === updated.id ? { ...item, ...updated } : item);
+    message.value = t("音乐封面已上传到 R2");
+  } catch (requestError) {
+    showError(requestError);
+  } finally {
+    musicCoverUploading.value = false;
+  }
+}
+
+async function handleMusicCoverFile(event) {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  await uploadMusicCoverFile(file);
+}
+
+async function handleMusicCoverPaste(event) {
+  if (musicCoverUploading.value) return;
+  const item = Array.from(event.clipboardData?.items || []).find(
+    (candidate) => candidate.kind === "file" && candidate.type.startsWith("image/"),
+  );
+  const file = item?.getAsFile();
+  if (!file) return;
+  event.preventDefault();
+  await uploadMusicCoverFile(file);
+}
+
+async function uploadMusicCoverUrl() {
+  const release = selectedMusicRelease.value;
+  const url = musicCoverUrl.value.trim();
+  if (!release || !url || musicCoverUploading.value) return;
+  musicCoverUploading.value = true;
+  error.value = "";
+  try {
+    const data = await api(`/api/admin/releases/${encodeURIComponent(release.id)}/cover`, {
+      method: "POST",
+      body: { url },
+    });
+    musicReleases.value = musicReleases.value.map((item) => item.id === data.release.id ? { ...item, ...data.release } : item);
+    musicCoverUrl.value = "";
+    message.value = t("音乐封面已上传到 R2");
+  } catch (requestError) {
+    showError(requestError);
+  } finally {
+    musicCoverUploading.value = false;
+  }
+}
+
 async function loadSettings() {
   try {
     const data = await api("/api/admin/settings");
@@ -197,6 +295,7 @@ async function loadSettings() {
     activityLogs.value = data.activity_logs || [];
     newsLastSync.value = data.news_last_sync;
     newsSlowRefresh.value = data.news_slow_refresh || null;
+    if (section.value === "music") await loadMusicReleases();
     if (section.value === "database") await loadBackups();
     if (section.value === "api" && !editorMode.value) await loadExternalApiDocs();
   } catch (requestError) {
@@ -787,6 +886,36 @@ onMounted(loadSettings);
                 </button>
               </div>
             </form>
+            <section
+              v-if="!editorMode"
+              v-show="section === 'music'"
+              class="settings-card music-cover-card"
+              @paste="handleMusicCoverPaste"
+            >
+              <div class="form-heading">
+                <span class="form-number">02</span>
+                <div>
+                  <p class="form-kicker">COVER ARCHIVE / R2</p>
+                  <h2>{{ t("音乐封面补录") }}</h2>
+                </div>
+              </div>
+              <p class="muted">{{ t("选择发行后，可粘贴图片直链或直接粘贴剪贴板图片；图片会校验后上传到 R2。") }}</p>
+              <label>{{ t("选择发行") }}<select v-model="selectedMusicReleaseId" :disabled="musicReleasesLoading || musicCoverUploading">
+                <option value="" disabled>{{ musicReleasesLoading ? t("读取中……") : t("请选择发行") }}</option>
+                <option v-for="release in musicReleases" :key="release.id" :value="release.id">{{ release.title }} · {{ release.id }}</option>
+              </select></label>
+              <div v-if="selectedMusicRelease" class="music-cover-editor">
+                <img v-if="selectedMusicRelease.cover_url" :src="selectedMusicRelease.cover_url" loading="lazy" :alt="selectedMusicRelease.title" />
+                <div v-else class="missing">NO<br />COVER</div>
+                <div class="music-cover-actions">
+                  <input ref="musicCoverFileInput" hidden type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/bmp,image/avif" @change="handleMusicCoverFile" />
+                  <button type="button" class="secondary" :disabled="musicCoverUploading" @click="musicCoverFileInput?.click()">{{ musicCoverUploading ? t("上传图片中……") : t("选择封面图片") }}</button>
+                  <input v-model="musicCoverUrl" type="url" :placeholder="t('粘贴图片直链')" :disabled="musicCoverUploading" @keydown.enter.prevent="uploadMusicCoverUrl" />
+                  <button type="button" class="secondary" :disabled="musicCoverUploading || !musicCoverUrl.trim()" @click="uploadMusicCoverUrl">{{ t("上传直链到 R2") }}</button>
+                </div>
+              </div>
+              <small>{{ t("也可以在此区域直接粘贴剪贴板图片。") }}</small>
+            </section>
             <form
               v-if="!editorMode"
               v-show="section === 'source'"

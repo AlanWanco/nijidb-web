@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
+import socket
 import struct
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import unquote, urljoin, urlparse
 
+import httpcore
 import httpx
 
 from app.news import news_image_dimensions_allowed
@@ -33,6 +36,160 @@ NEWS_HEADERS = {
     **OFFICIAL_BROWSER_HEADERS,
     "Referer": "https://www.lovelive-anime.jp/nijigasaki/topics.php",
 }
+PUBLIC_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+PUBLIC_IMAGE_TIMEOUT_SECONDS = 30
+PUBLIC_IMAGE_DNS_TIMEOUT_SECONDS = 5
+
+
+def is_valid_public_http_url(value: Any) -> bool:
+    raw = str(value or "").strip()
+    if not raw or len(raw) > 2000 or any(ord(character) < 0x20 or ord(character) == 0x7F for character in raw):
+        return False
+    try:
+        parsed = urlparse(raw)
+        port = parsed.port
+        hostname = parsed.hostname or ""
+        decoded_path = unquote(parsed.path)
+    except (TypeError, ValueError):
+        return False
+    return (
+        parsed.scheme in {"http", "https"}
+        and bool(hostname)
+        and not any(character.isspace() for character in hostname)
+        and (port is None or 1 <= port <= 65535)
+        and not parsed.netloc.endswith(":")
+        and not parsed.username
+        and not parsed.password
+        and not parsed.fragment
+        and "#" not in raw
+        and not ("?" in raw and not parsed.query)
+        and "\\" not in raw
+        and not any(ord(character) < 0x20 or ord(character) == 0x7F for character in decoded_path)
+        and "?" not in decoded_path
+        and "#" not in decoded_path
+        and all(part not in {".", ".."} for part in decoded_path.split("/") if part)
+        and all(part for part in decoded_path.split("/")[1:-1])
+    )
+
+
+def resolve_public_image_addresses(url: str) -> list[str]:
+    if not is_valid_public_http_url(url):
+        raise ValueError("图片直链必须是有效的 HTTP/HTTPS 地址")
+    parsed = urlparse(url)
+    hostname = str(parsed.hostname or "")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        literal = ipaddress.ip_address(hostname)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        addresses = [str(literal)]
+    else:
+        try:
+            infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+        except OSError as exc:
+            raise ValueError("图片直链域名无法解析") from exc
+        addresses = list(dict.fromkeys(str(info[4][0]) for info in infos if info[4]))
+    if not addresses:
+        raise ValueError("图片直链必须解析到公网地址")
+    try:
+        all_global = all(ipaddress.ip_address(address).is_global for address in addresses)
+    except ValueError as exc:
+        raise ValueError("图片直链必须解析到公网地址") from exc
+    if not all_global:
+        raise ValueError("图片直链必须解析到公网地址")
+    return addresses
+
+
+class _PinnedAddressBackend(httpcore.AsyncNetworkBackend):
+    def __init__(self, address: str):
+        self.address = address
+        self.backend = httpcore.AnyIOBackend()
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        return await self.backend.connect_tcp(
+            self.address,
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+    async def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        return await self.backend.connect_unix_socket(path, timeout=timeout, socket_options=socket_options)
+
+    async def sleep(self, seconds: float) -> None:
+        await self.backend.sleep(seconds)
+
+
+class _PinnedAddressTransport(httpx.AsyncHTTPTransport):
+    def __init__(self, address: str):
+        super().__init__(trust_env=False, limits=httpx.Limits(max_connections=1, max_keepalive_connections=0))
+        self._pool = httpcore.AsyncConnectionPool(
+            ssl_context=httpcore.default_ssl_context(),
+            max_connections=1,
+            max_keepalive_connections=0,
+            network_backend=_PinnedAddressBackend(address),
+        )
+
+
+async def fetch_public_image_bytes(url: str, max_bytes: int = PUBLIC_IMAGE_MAX_BYTES) -> tuple[bytes, str]:
+    try:
+        addresses = await asyncio.wait_for(
+            asyncio.to_thread(resolve_public_image_addresses, url),
+            timeout=PUBLIC_IMAGE_DNS_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError as exc:
+        raise ValueError("图片直链域名解析超时") from exc
+    last_error: Exception | None = None
+    for address in addresses:
+        try:
+            transport = _PinnedAddressTransport(address)
+            async with httpx.AsyncClient(
+                transport=transport,
+                timeout=PUBLIC_IMAGE_TIMEOUT_SECONDS,
+                follow_redirects=False,
+                headers={"Accept": "image/*,*/*;q=0.8"},
+                trust_env=False,
+            ) as client:
+                async with asyncio.timeout(PUBLIC_IMAGE_TIMEOUT_SECONDS):
+                    async with client.stream("GET", url) as response:
+                        if 300 <= response.status_code < 400:
+                            raise ValueError("图片直链不允许重定向")
+                        response.raise_for_status()
+                        content_length = response.headers.get("content-length", "")
+                        if content_length:
+                            try:
+                                declared_length = int(content_length)
+                            except ValueError as exc:
+                                raise ValueError("图片响应长度无效") from exc
+                            if declared_length < 0:
+                                raise ValueError("图片响应长度无效")
+                            if declared_length > max_bytes:
+                                raise ValueError("图片超过 20 MB 限制")
+                        content = bytearray()
+                        async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                            if len(content) + len(chunk) > max_bytes:
+                                raise ValueError("图片超过 20 MB 限制")
+                            content.extend(chunk)
+                        return bytes(content), response.headers.get("content-type", "")
+        except ValueError:
+            raise
+        except (httpx.HTTPError, OSError, TimeoutError) as exc:
+            last_error = exc
+    raise RuntimeError("图片直链读取失败") from last_error
 
 
 def _safe_url_path(parsed) -> bool:

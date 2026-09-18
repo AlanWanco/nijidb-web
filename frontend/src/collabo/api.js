@@ -127,6 +127,16 @@ export async function deleteCollaboration(identifier) {
   return api(`/api/admin/collabo/${encodeURIComponent(identifier)}`, { method: "DELETE" });
 }
 
+async function parseCollaborationUploadResponse(response) {
+  const payload = await response.json();
+  if (!response.ok || !Array.isArray(payload.images)) {
+    const error = new Error(payload.detail || "图片上传失败");
+    error.status = response.status;
+    throw error;
+  }
+  return payload.images;
+}
+
 export async function uploadCollaborationImages(files) {
   const form = new FormData();
   files.forEach((file) => form.append("files", file));
@@ -135,7 +145,15 @@ export async function uploadCollaborationImages(files) {
     body: form,
     credentials: "same-origin",
   });
-  const payload = await response.json();
-  if (!response.ok || !Array.isArray(payload.images)) throw new Error(payload.detail || "图片上传失败");
-  return payload.images;
+  return parseCollaborationUploadResponse(response);
+}
+
+export async function uploadCollaborationImageUrl(url) {
+  const response = await fetch("/api/admin/collabo/assets", {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ url }),
+    credentials: "same-origin",
+  });
+  return parseCollaborationUploadResponse(response);
 }

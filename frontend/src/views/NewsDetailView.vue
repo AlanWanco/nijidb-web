@@ -41,7 +41,6 @@ const loginPrompt = ref(false);
 const saving = ref(false);
 const uploading = ref(false);
 const removingImage = ref(0);
-const refreshing = ref(false);
 const bodyRef = ref(null);
 const lightboxImages = ref([]);
 const lightboxIndex = ref(-1);
@@ -101,7 +100,6 @@ const busy = computed(
   () =>
     saving.value ||
     uploading.value ||
-    refreshing.value ||
     Boolean(removingImage.value),
 );
 const dirty = computed(
@@ -162,32 +160,6 @@ onBeforeUnmount(() => {
   requestId += 1;
   window.removeEventListener("beforeunload", beforeUnload);
 });
-
-async function refreshArticle() {
-  if (!article.value || busy.value || editMode.value) return;
-  refreshing.value = true;
-  saveMessage.value = "";
-  saveError.value = "";
-  try {
-    const data = await api(
-      `/api/admin/news/${encodeURIComponent(article.value.id)}/refresh`,
-      { method: "POST" },
-    );
-    article.value = data.article;
-    fillEditForm();
-    saveMessage.value = t(
-      data.changed ? "新闻已刷新，手动修改已保留" : "官网内容没有变化",
-    );
-  } catch (requestError) {
-    if (requestError.status === 401) {
-      authenticated.value = false;
-      userRole.value = "";
-    }
-    saveError.value = requestError.message || t("请求失败");
-  } finally {
-    refreshing.value = false;
-  }
-}
 
 function formatDate(value) {
   return value ? value.replace(/-/g, "/") : "—";
@@ -325,34 +297,38 @@ async function deleteImage(image) {
   }
 }
 
+async function uploadImageFile(file) {
+  const response = await fetch(
+    `/api/admin/news/${encodeURIComponent(article.value.id)}/images`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": file.type || "application/octet-stream",
+        "X-Filename": encodeURIComponent(file.name || "clipboard-image"),
+        "X-Alt-Text": encodeURIComponent(article.value.title || ""),
+      },
+      body: file,
+      credentials: "same-origin",
+    },
+  );
+  const contentType = response.headers.get("content-type") || "";
+  const payload = contentType.includes("application/json")
+    ? await response.json()
+    : {};
+  if (!response.ok) {
+    const uploadError = new Error(payload.detail || t("图片上传失败"));
+    uploadError.status = response.status;
+    throw uploadError;
+  }
+  return payload;
+}
+
 async function uploadSelectedImages() {
   if (!article.value || !selectedImages.value.length) return;
   uploading.value = true;
   try {
     for (const file of selectedImages.value) {
-      const response = await fetch(
-        `/api/admin/news/${encodeURIComponent(article.value.id)}/images`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": file.type || "application/octet-stream",
-            "X-Filename": encodeURIComponent(file.name),
-            "X-Alt-Text": encodeURIComponent(article.value.title || ""),
-          },
-          body: file,
-          credentials: "same-origin",
-        },
-      );
-      const contentType = response.headers.get("content-type") || "";
-      const payload = contentType.includes("application/json")
-        ? await response.json()
-        : {};
-      if (!response.ok) {
-        const uploadError = new Error(payload.detail || t("图片上传失败"));
-        uploadError.status = response.status;
-        throw uploadError;
-      }
-      article.value = payload.article;
+      article.value = (await uploadImageFile(file)).article;
     }
   } finally {
     uploading.value = false;
@@ -478,15 +454,6 @@ onMounted(() => {
           </p>
           <div class="news-detail-actions">
             <button
-              v-if="administrator"
-              type="button"
-              class="secondary"
-              :disabled="busy || editMode"
-              @click="refreshArticle"
-            >
-              {{ refreshing ? t("刷新中……") : t("从官网刷新此条") }}
-            </button>
-            <button
               v-if="administrator || !authenticated"
               type="button"
               class="secondary"
@@ -518,7 +485,11 @@ onMounted(() => {
           <p v-if="saveError" class="state error">{{ saveError }}</p>
         </header>
 
-        <form v-if="editMode" class="news-edit-form" @submit.prevent="saveEdit">
+        <form
+          v-if="editMode"
+          class="news-edit-form"
+          @submit.prevent="saveEdit"
+        >
           <fieldset :disabled="busy" class="news-editor-fieldset">
             <div class="news-edit-heading">
               <span class="eyebrow">INLINE EDITOR / ADMIN</span

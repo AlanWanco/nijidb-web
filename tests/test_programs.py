@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
@@ -432,11 +432,6 @@ class ProgramImageApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_direct_and_uploaded_images_are_returned_and_deletable(self):
         endpoint = f"/api/admin/programs/program-image-test/occurrences/{self.occurrence_id}/images"
-        direct = await self.client.post(endpoint, json={"url": "https://cdn.example.com/live.jpg", "alt_text": "直链"})
-        self.assertEqual(direct.status_code, 200)
-        self.assertEqual(direct.json()["image"]["kind"], "external")
-        self.assertEqual(direct.json()["image"]["url"], "https://cdn.example.com/live.jpg")
-
         content = (
             b"\x89PNG\r\n\x1a\n"
             + b"\x00\x00\x00\rIHDR"
@@ -445,6 +440,18 @@ class ProgramImageApiTests(unittest.IsolatedAsyncioTestCase):
             + b"\x08\x02\x00\x00\x00\x00\x00\x00\x00"
             + b"program-photo"
         )
+        with (
+            patch.object(main, "r2_is_configured", return_value=True),
+            patch.object(main, "r2_upload_is_configured", return_value=True),
+            patch.object(main, "R2_PUBLIC_BASE_URL", "https://images.example.test"),
+            patch.object(main, "fetch_public_image_bytes", new_callable=AsyncMock, return_value=(content + b"direct", "image/png")),
+            patch.object(main, "upload_image_to_r2"),
+        ):
+            direct = await self.client.post(endpoint, json={"url": "https://cdn.example.com/live.jpg", "alt_text": "直链"})
+        self.assertEqual(direct.status_code, 200)
+        self.assertEqual(direct.json()["image"]["kind"], "upload")
+        self.assertTrue(direct.json()["image"]["url"].startswith("https://images.example.test/"))
+
         uploaded = await self.client.post(
             endpoint,
             content=content,
@@ -461,7 +468,7 @@ class ProgramImageApiTests(unittest.IsolatedAsyncioTestCase):
         image_occurrence = next(item for item in public_occurrences if item["id"] == self.occurrence_id)
         images = image_occurrence["images"]
         self.assertEqual(len(images), 2)
-        self.assertEqual(images[0]["url"], "https://cdn.example.com/live.jpg")
+        self.assertTrue(images[0]["url"].startswith("https://images.example.test/"))
 
         deleted = await self.client.delete(
             f"{endpoint}/{uploaded_image['id']}"
@@ -470,6 +477,95 @@ class ProgramImageApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(deleted.json()["occurrence"]["images"]), 1)
         self.assertFalse((self.media_directory / uploaded_image["local_path"]).exists())
 
+
+class MusicCoverApiTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.media_directory = Path(self.directory.name) / "images"
+        self.media_directory.mkdir(parents=True)
+        self.illustration_directory = Path(self.directory.name) / "illustrations"
+        self.illustration_directory.mkdir(parents=True)
+        self.patches = [
+            patch.object(main, "DB_PATH", Path(self.directory.name) / "nijidb.sqlite3"),
+            patch.object(main, "MEDIA_DIR", self.media_directory),
+            patch.object(main, "ILLUSTRATION_RUNTIME_DIR", self.illustration_directory),
+            patch.object(main, "R2_ENDPOINT", ""),
+            patch.object(main, "R2_ACCESS_KEY_ID", ""),
+            patch.object(main, "R2_SECRET_ACCESS_KEY", ""),
+            patch.object(main, "R2_PUBLIC_BASE_URL", ""),
+        ]
+        for item in self.patches:
+            item.start()
+            self.addCleanup(item.stop)
+        main.init_db()
+        with main.db() as conn:
+            conn.execute(
+                """INSERT INTO releases
+                   (id, title, detail_html, source_url, fingerprint, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                ("cd01_9998", "测试音乐发行", "", "https://example.com", "old", "2026-01-01T00:00:00+00:00"),
+            )
+        self.client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=main.app), base_url="http://test"
+        )
+        self.addAsyncCleanup(self.client.aclose)
+        self.client.cookies.set("nijidb_admin", main.admin_cookie_value(main.settings()["admin_password_hash"]))
+
+    async def test_collabo_direct_url_upload_archives_to_r2(self):
+        content = (
+            b"\x89PNG\r\n\x1a\n"
+            + b"\x00\x00\x00\rIHDR"
+            + (640).to_bytes(4, "big")
+            + (360).to_bytes(4, "big")
+            + b"\x08\x02\x00\x00\x00\x00\x00\x00\x00"
+            + b"collabo-cover"
+        )
+        with (
+            patch.object(main, "r2_is_configured", return_value=True),
+            patch.object(main, "r2_upload_is_configured", return_value=True),
+            patch.object(main, "R2_PUBLIC_BASE_URL", "https://images.example.test"),
+            patch.object(main, "fetch_public_image_bytes", new_callable=AsyncMock, return_value=(content, "image/png")),
+            patch.object(main, "upload_image_to_r2"),
+        ):
+            response = await self.client.post(
+                "/api/admin/collabo/assets",
+                json={"url": "https://cdn.example.com/collabo.png"},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        image = response.json()["images"][0]
+        self.assertEqual(image["source_url"], "https://cdn.example.com/collabo.png")
+        self.assertTrue(image["url"].startswith("https://images.example.test/"))
+
+    async def test_direct_url_and_binary_cover_upload_update_release(self):
+        content = (
+            b"\x89PNG\r\n\x1a\n"
+            + b"\x00\x00\x00\rIHDR"
+            + (640).to_bytes(4, "big")
+            + (360).to_bytes(4, "big")
+            + b"\x08\x02\x00\x00\x00\x00\x00\x00\x00"
+            + b"release-cover"
+        )
+        with (
+            patch.object(main, "r2_is_configured", return_value=True),
+            patch.object(main, "R2_PUBLIC_BASE_URL", "https://images.example.test"),
+            patch.object(main, "fetch_public_image_bytes", new_callable=AsyncMock, return_value=(content, "image/png")),
+            patch.object(main, "upload_cover_to_r2"),
+        ):
+            direct = await self.client.post(
+                "/api/admin/releases/cd01_9998/cover",
+                json={"url": "https://cdn.example.com/cover.jpg"},
+            )
+            self.assertEqual(direct.status_code, 200)
+            self.assertTrue(direct.json()["release"]["cover_url"].startswith("https://images.example.test/"))
+            binary = await self.client.post(
+                "/api/admin/releases/cd01_9998/cover",
+                content=content,
+                headers={"Content-Type": "image/png", "X-Filename": "cover.png"},
+            )
+        self.assertEqual(binary.status_code, 200)
+        with main.db() as conn:
+            self.assertTrue(conn.execute("SELECT cover_url FROM releases WHERE id = ?", ("cd01_9998",)).fetchone()[0])
 
 
 def datetime_today() -> date:

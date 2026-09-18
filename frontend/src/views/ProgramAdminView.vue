@@ -1240,10 +1240,8 @@ async function uploadOccurrenceImageRequest(path, options) {
   return payload;
 }
 
-async function handleOccurrenceImageFiles(event) {
-  const files = [...(event.target.files || [])];
-  event.target.value = "";
-  if (!files.length || occurrenceImageUploading.value) return;
+async function uploadOccurrenceImageFiles(files) {
+  if (!files.length || occurrenceImageUploading.value || occurrenceSaving.value) return;
   if (!(await ensureOccurrenceSavedForImage())) return;
   occurrenceImageUploading.value = true;
   message.value = "";
@@ -1257,8 +1255,8 @@ async function handleOccurrenceImageFiles(event) {
           method: "POST",
           headers: {
             "Content-Type": file.type || "application/octet-stream",
-            "X-Filename": encodeURIComponent(file.name),
-            "X-Alt-Text": encodeURIComponent(file.name),
+            "X-Filename": encodeURIComponent(file.name || "clipboard-image"),
+            "X-Alt-Text": encodeURIComponent(file.name || "clipboard-image"),
           },
           body: file,
         },
@@ -1273,6 +1271,23 @@ async function handleOccurrenceImageFiles(event) {
   } finally {
     occurrenceImageUploading.value = false;
   }
+}
+
+async function handleOccurrenceImageFiles(event) {
+  const files = [...(event.target.files || [])];
+  event.target.value = "";
+  await uploadOccurrenceImageFiles(files);
+}
+
+async function handleOccurrenceImagePaste(event) {
+  if (occurrenceImageUploading.value || occurrenceSaving.value) return;
+  const item = Array.from(event.clipboardData?.items || []).find(
+    (candidate) => candidate.kind === "file" && candidate.type.startsWith("image/"),
+  );
+  const file = item?.getAsFile();
+  if (!file) return;
+  event.preventDefault();
+  await uploadOccurrenceImageFiles([file]);
 }
 
 async function addOccurrenceImageUrl() {
@@ -2042,7 +2057,7 @@ onUnmounted(() => {
                 <small>{{ t("源地址填写 HTTP/HTTPS 地址；搬运地址和字幕地址支持 BV 号、B 站地址或其他 HTTP/HTTPS 地址。") }}</small>
               </div>
               <label>{{ t("备注") }}<textarea v-model="occurrenceDraft.note" rows="3" :placeholder="t('例如：延期至下周、嘉宾变更……')"></textarea></label>
-              <div class="program-form-field occurrence-images-field">
+              <div class="program-form-field occurrence-images-field" @paste="handleOccurrenceImagePaste">
                 <span class="program-field-label">{{ t("当期节目返图") }}</span>
                 <div v-if="occurrenceImages().length" class="occurrence-admin-image-grid">
                   <div v-for="(image, index) in occurrenceImages()" :key="image.id || `${image.url}-${index}`" class="occurrence-admin-image-item">
@@ -2056,7 +2071,7 @@ onUnmounted(() => {
                   <input v-model="occurrenceImageUrl" type="url" :placeholder="t('粘贴图片直链（HTTP/HTTPS）')" :disabled="occurrenceImageUploading || occurrenceSaving" @keydown.enter.prevent="addOccurrenceImageUrl">
                   <button type="button" class="secondary program-action-button" :disabled="occurrenceImageUploading || occurrenceSaving || !occurrenceImageUrl.trim()" @click="addOccurrenceImageUrl">{{ t("添加直链") }}</button>
                 </div>
-                <small>{{ t("可上传图片到本地（配置 R2 时会同步）或粘贴图片直链；点击缩略图可预览大图。") }}</small>
+                <small>{{ t("可上传图片到本地（配置 R2 时会同步）、粘贴图片直链，或直接粘贴剪贴板图片；点击缩略图可预览大图。") }}</small>
               </div>
            <div class="actions">
                <span v-if="occurrenceAutoSaveEnabled && occurrenceAutoSaveState" class="occurrence-auto-save-status" :class="`is-${occurrenceAutoSaveState}`" role="status" aria-live="polite">{{ occurrenceAutoSaveState === 'saved' ? t("已自动保存") : occurrenceAutoSaveState === 'error' ? t("自动保存失败，请检查输入") : t("自动保存中……") }}</span>

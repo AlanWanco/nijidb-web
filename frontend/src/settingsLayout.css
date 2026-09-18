@@ -377,6 +377,63 @@
   clip-path: inset(50%);
   white-space: nowrap;
 }
+.music-cover-card > .muted {
+  margin: -7px 0 22px;
+  font-size: 12px;
+  line-height: 1.65;
+}
+.music-cover-editor {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-top: 22px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.music-cover-editor > img,
+.music-cover-editor > .missing {
+  width: 112px;
+  height: 112px;
+  flex: 0 0 112px;
+  object-fit: cover;
+  border-radius: 8px;
+  background: var(--surface-muted);
+}
+.music-cover-editor > .missing {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font: 11px/1.2 var(--mono);
+  text-align: center;
+}
+.music-cover-actions {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+.music-cover-actions input[type="url"] {
+  min-width: 220px;
+  flex: 1 1 280px;
+}
+.music-cover-card > small {
+  display: block;
+  margin-top: 10px;
+}
+@media (max-width: 560px) {
+  .music-cover-editor {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .music-cover-editor > img,
+  .music-cover-editor > .missing {
+    width: 100%;
+    height: auto;
+    aspect-ratio: 1;
+    max-width: 180px;
+  }
+}
 @media (min-width: 900px) {
   .settings-stack > .manual-source-card {
     grid-column: 1 / -1;

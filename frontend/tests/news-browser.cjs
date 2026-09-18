@@ -47,7 +47,6 @@ const article = {
   ],
   updated_at: "v1",
 };
-let refreshes = 0;
 const deletedImageIds = new Set();
 async function setup(context) {
   await context.addInitScript(() => {
@@ -109,10 +108,7 @@ async function setup(context) {
         },
       });
     }
-    if (p.endsWith("/refresh")) {
-      refreshes++;
-      return json({ article, changed: true });
-    }
+    if (p === "/api/admin/news/one/images") return json({ article });
     if (p === "/api/admin/news/one")
       return json({
         article: { ...article, ...route.request().postDataJSON() },
@@ -259,9 +255,10 @@ async function swipe(page, dx) {
     await page.keyboard.press("ArrowLeft");
     await page.waitForURL("**/news/one?*");
     await page.locator(".news-detail-copy h6").waitFor();
-    await page.getByRole("button", { name: "从官网刷新此条" }).click();
-    await page.getByText("新闻已刷新，手动修改已保留").waitFor();
-    assert.equal(refreshes, 1);
+    assert.equal(
+      await page.getByRole("button", { name: "从官网刷新此条" }).count(),
+      0,
+    );
     await page.getByRole("button", { name: "编辑该页" }).click();
     assert.equal(await page.locator(".news-edit-tag").count(), 34);
     const goodsTag = page.locator(".news-edit-tag").filter({ hasText: "#周边" });

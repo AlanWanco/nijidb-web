@@ -18,6 +18,7 @@ const sample = rawItems.find((i) => images(i.id).length > 1);
 const slug = (i) => `${i.first_seen.replaceAll("-", "")}-${i.id.slice(0, 6)}`;
 let dbMode = false;
 let saves = 0;
+let uploadedImages = 0;
 let collaboDeleted = false;
 const dbItem = {
   ...sample,
@@ -70,6 +71,15 @@ async function configure(context) {
         items: Object.fromEntries(rawItems.map((i) => [i.id, { images: images(i.id) }])),
       });
     if (p === "/api/auth/session") return json({ authenticated: true });
+    if (p === "/api/admin/collabo/assets" && route.request().method() === "POST") {
+      uploadedImages++;
+      const image = {
+        ...dbItem.images[0],
+        id: `uploaded-${uploadedImages}`,
+        source_url: "https://cdn.example.com/illustration.png",
+      };
+      return json({ images: [image] });
+    }
     if (p.startsWith("/api/releases/")) {
       const id = p.split("/").pop();
       return json({
@@ -311,6 +321,18 @@ async function swipe(page, selector, dx, dy = 2) {
       await page.locator(".cb-image-controls .cb-image-remove").first().evaluate((button) => getComputedStyle(button).color),
       "rgb(231, 130, 132)",
     );
+    await page.getByPlaceholder("粘贴图片直链").fill("https://cdn.example.com/illustration.png");
+    const imageCountBeforeUrl = await page.locator(".cb-image-editor").count();
+    await page.getByRole("button", { name: "上传直链到 R2", exact: true }).click();
+    await page.waitForFunction((count) => document.querySelectorAll(".cb-image-editor").length === count + 1, imageCountBeforeUrl);
+    const imageCountBeforePaste = await page.locator(".cb-image-editor").count();
+    await page.locator(".cb-editor-assets").evaluate((element) => {
+      const data = new DataTransfer();
+      data.items.add(new File(["clipboard-image"], "clipboard.png", { type: "image/png" }));
+      element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, clipboardData: data }));
+    });
+    await page.waitForFunction((count) => document.querySelectorAll(".cb-image-editor").length === count + 1, imageCountBeforePaste);
+    assert.equal(uploadedImages, 2);
     await page.getByRole("button", { name: "保存到数据库", exact: true }).click();
     await page.getByRole("status").filter({ hasText: "保存成功" }).waitFor();
     assert.equal(saves, 1);

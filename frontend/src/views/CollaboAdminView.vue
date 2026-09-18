@@ -7,6 +7,7 @@ import {
   getCollaboration,
   listCollaborations,
   saveCollaboration,
+  uploadCollaborationImageUrl,
   uploadCollaborationImages,
 } from "../collabo/api";
 import {
@@ -28,6 +29,7 @@ const loading = ref(true);
 const saving = ref(false);
 const deleting = ref(false);
 const uploading = ref(false);
+const imageUrl = ref("");
 const error = ref("");
 const message = ref("");
 const keyword = ref("");
@@ -259,15 +261,13 @@ function exportDraft() {
   anchor.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-async function upload(event) {
-  const files = [...event.target.files];
-  event.target.value = "";
-  if (!writable.value || !files.length) return;
+async function uploadFiles(files) {
+  if (!writable.value || !files.length || uploading.value) return;
   if (
     files.length > 16 ||
-    files.some((file) => !["image/jpeg", "image/png", "image/webp"].includes(file.type) || file.size > 20 * 1024 * 1024)
+    files.some((file) => !["image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp"].includes(file.type) || file.size > 20 * 1024 * 1024)
   ) {
-    error.value = "JPEG / PNG / WebP · ≤ 20 MB / image · ≤ 16 images";
+    error.value = "JPEG / PNG / GIF / WebP / BMP · ≤ 20 MB / image · ≤ 16 images";
     return;
   }
   uploading.value = true;
@@ -275,6 +275,39 @@ async function upload(event) {
   try {
     form.value.images.push(...(await uploadCollaborationImages(files)).map(normalizeImage));
     if (!form.value.cover_image_id) form.value.cover_image_id = form.value.images[0]?.id || "";
+  } catch (err) {
+    error.value = err.message;
+  } finally {
+    uploading.value = false;
+  }
+}
+
+async function upload(event) {
+  const files = [...event.target.files];
+  event.target.value = "";
+  await uploadFiles(files);
+}
+
+async function handleImagePaste(event) {
+  if (!writable.value || uploading.value) return;
+  const item = Array.from(event.clipboardData?.items || []).find(
+    (candidate) => candidate.kind === "file" && candidate.type.startsWith("image/"),
+  );
+  const file = item?.getAsFile();
+  if (!file) return;
+  event.preventDefault();
+  await uploadFiles([file]);
+}
+
+async function uploadImageUrl() {
+  const url = imageUrl.value.trim();
+  if (!writable.value || !url || uploading.value) return;
+  uploading.value = true;
+  error.value = "";
+  try {
+    form.value.images.push(...(await uploadCollaborationImageUrl(url)).map(normalizeImage));
+    if (!form.value.cover_image_id) form.value.cover_image_id = form.value.images[0]?.id || "";
+    imageUrl.value = "";
   } catch (err) {
     error.value = err.message;
   } finally {
@@ -434,7 +467,7 @@ async function upload(event) {
           </button>
         </div>
       </fieldset>
-      <fieldset class="cb-editor-assets" :disabled="saving || deleting || uploading">
+      <fieldset class="cb-editor-assets" :disabled="saving || deleting || uploading" @paste="handleImagePaste">
         <div class="cb-edit-section">
           <h2>
             04 / {{ c("图片画廊") }} <small>{{ form.images.length }}</small>
@@ -486,13 +519,22 @@ async function upload(event) {
             <button type="button" class="cb-quiet" @click="addImage">＋ {{ c("添加图片 URL") }}</button
             ><button type="button" :disabled="!writable" @click="fileInput.click()">↑ {{ c("上传图片") }}</button
             ><input
+              v-model="imageUrl"
+              class="cb-image-url-upload"
+              type="url"
+              :placeholder="c('粘贴图片直链')"
+              :disabled="!writable"
+              @keydown.enter.prevent="uploadImageUrl"
+            /><button type="button" :disabled="!writable || !imageUrl.trim()" @click="uploadImageUrl">{{ c("上传直链到 R2") }}</button
+            ><input
               ref="fileInput"
               hidden
               type="file"
-              accept="image/jpeg,image/png,image/webp"
+              accept="image/jpeg,image/png,image/gif,image/webp,image/bmp"
               multiple
               @change="upload"
             />
+            <small>{{ c("可直接粘贴剪贴板图片；图片直链会先抓取并上传到 R2。") }}</small>
           </div>
         </div>
       </fieldset>

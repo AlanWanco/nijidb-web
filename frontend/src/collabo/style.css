@@ -1380,6 +1380,13 @@
   font-size: 11px;
   padding: 9px 12px;
 }
+.cb-upload-actions .cb-image-url-upload {
+  min-width: 220px;
+  flex: 1 1 260px;
+}
+.cb-upload-actions small {
+  flex-basis: 100%;
+}
 .cb-image-editor {
   border: 1px solid var(--line);
   border-radius: 12px;

@@ -846,7 +846,7 @@ class OfficialNewsPoller:
             "POST",
             f"{self.config.base_url}{INGEST_PATH}",
             json=payload,
-            headers={"X-Nijidb-API-Key": self.config.api_key},
+            headers={"X-Nijidb-API-Key": self.config.api_key, "X-Nijidb-News-Notify": "1"},
         ) as response:
             if response.status_code == 200:
                 return

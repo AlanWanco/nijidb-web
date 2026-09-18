@@ -7,7 +7,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
@@ -170,6 +170,32 @@ class ExternalIngestApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM news_articles").fetchone()[0], 1)
             row = conn.execute("SELECT source_url FROM news_articles").fetchone()
         self.assertEqual(row["source_url"], payload["article"]["source_url"])
+
+    async def test_official_poller_ingest_header_notifies_but_image_worker_does_not(self):
+        payload = {
+            "article": {
+                "source": "niji_topics",
+                "page_name": "01_124",
+                "title": "第一版新闻",
+                "source_url": "https://www.lovelive-anime.jp/nijigasaki/news/01_124.html",
+                "body_markdown": "正文",
+            }
+        }
+        headers = {"X-Nijidb-API-Key": "news-test-key"}
+        with patch.dict(os.environ, {"NIJIDB_INGEST_API_KEY": "news-test-key"}), patch.object(
+            main, "notify_news", new_callable=AsyncMock
+        ) as notify:
+            first = await self.client.post("/api/ingest/news", json=payload, headers=headers)
+            payload["article"]["title"] = "第二版新闻"
+            updated = await self.client.post(
+                "/api/ingest/news",
+                json=payload,
+                headers={**headers, "X-Nijidb-News-Notify": "1"},
+            )
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(updated.status_code, 200, updated.text)
+        notify.assert_awaited_once()
+        self.assertEqual(notify.await_args.args[0][0]["title"], "第二版新闻")
 
     async def test_external_json_rejects_nonstandard_numeric_constants(self):
         with patch.dict(os.environ, {"NIJIDB_MUSIC_INGEST_API_KEY": "music-test-key"}):

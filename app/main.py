@@ -77,6 +77,7 @@ from app.news_fetch import (
     OFFICIAL_IMAGE_HOSTS,
     describe_news_fetch_error,
     fetch_news_page,
+    fetch_public_image_bytes,
     filter_news_images,
     image_dimensions_from_bytes,
     is_allowed_official_image_url,
@@ -4788,6 +4789,65 @@ async def cache_cover(item: dict[str, str], client: httpx.AsyncClient, force_ref
     return cover_changed
 
 
+async def store_manual_release_cover(release_id: str, content: bytes) -> dict[str, Any]:
+    if len(content) > PROGRAM_IMAGE_MAX_BYTES:
+        raise HTTPException(413, "音乐封面不能超过 20 MB")
+    if not REMOTE_INGEST_ID_PATTERN.fullmatch(release_id):
+        raise HTTPException(400, "音乐发行 ID 格式无效")
+    extension = news_upload_extension("", content, "release-cover")
+    dimensions = image_dimensions_from_bytes(content)
+    if not extension or not dimensions or any(value > 10000 for value in dimensions):
+        raise HTTPException(415, "图片内容或尺寸无效")
+    if not r2_is_configured():
+        raise HTTPException(503, "R2 未配置，无法上传音乐封面")
+    if MEDIA_DIR.is_symlink():
+        raise HTTPException(400, "封面保存目录不能是符号链接")
+    media_root = MEDIA_DIR.resolve()
+    relative = Path(f"{release_id}{extension}")
+    target = media_root / relative
+    previous_bytes: bytes | None = None
+    try:
+        opened = _open_relative_regular_file(media_root, relative)
+        if opened:
+            descriptor, metadata = opened
+            try:
+                previous_bytes = os.read(descriptor, PROGRAM_IMAGE_MAX_BYTES + 1)
+                if metadata.st_size > PROGRAM_IMAGE_MAX_BYTES or len(previous_bytes) > PROGRAM_IMAGE_MAX_BYTES:
+                    previous_bytes = None
+            finally:
+                os.close(descriptor)
+        replace_local_file(media_root, relative, content)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(400, "封面保存目录不能包含符号链接") from exc
+    try:
+        await asyncio.to_thread(upload_cover_to_r2, target)
+    except Exception as exc:
+        if previous_bytes is None:
+            unlink_local_file(media_root, relative)
+        else:
+            try:
+                replace_local_file(media_root, relative, previous_bytes)
+            except OSError:
+                pass
+        raise HTTPException(502, "音乐封面上传到 R2 失败，请稍后重试") from exc
+    public_url = public_image_url(relative.name)
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        row = conn.execute("SELECT * FROM releases WHERE id = ?", (release_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "音乐发行不存在")
+        values = dict(row)
+        values["cover_url"] = public_url
+        values["fingerprint"] = release_fingerprint(values)
+        conn.execute(
+            "UPDATE releases SET cover_url = ?, fingerprint = ?, updated_at = ? WHERE id = ?",
+            (public_url, values["fingerprint"], now, release_id),
+        )
+        updated = conn.execute("SELECT * FROM releases WHERE id = ?", (release_id,)).fetchone()
+    log_database_activity("music", f"上传音乐封面：{str(updated['title'] or '')[:80]}")
+    return release_summary(updated)
+
+
 async def store_records(
     records: list[dict[str, str]],
     assign_positions: bool = False,
@@ -7012,6 +7072,53 @@ async def api_release_detail(release_id: str) -> dict[str, Any]:
     }
 
 
+@app.post("/api/admin/releases/{release_id}/cover")
+async def api_admin_release_cover(release_id: str, request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    with db() as conn:
+        if not conn.execute("SELECT id FROM releases WHERE id = ?", (release_id,)).fetchone():
+            raise HTTPException(404, "音乐发行不存在")
+    if not r2_is_configured():
+        raise HTTPException(503, "R2 未配置，无法上传音乐封面")
+    request_type = str(request.headers.get("content-type", "")).split(";", 1)[0].strip().lower()
+    if request_type == "application/json" or request_type.endswith("+json"):
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 16 * 1024:
+                raise HTTPException(413, "图片直链请求过大")
+            body.extend(chunk)
+        try:
+            payload = json.loads(bytes(body).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise HTTPException(400, "图片直链格式无效") from exc
+        if not isinstance(payload, dict) or not str(payload.get("url") or "").strip():
+            raise HTTPException(400, "图片直链不能为空")
+        try:
+            content, _ = await fetch_public_image_bytes(str(payload["url"]).strip(), PROGRAM_IMAGE_MAX_BYTES)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(502, "音乐封面直链读取失败，请稍后重试") from exc
+    else:
+        content_length = request.headers.get("content-length", "")
+        try:
+            if content_length and int(content_length) > PROGRAM_IMAGE_MAX_BYTES:
+                raise HTTPException(413, "音乐封面不能超过 20 MB")
+        except ValueError:
+            pass
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > PROGRAM_IMAGE_MAX_BYTES:
+                raise HTTPException(413, "音乐封面不能超过 20 MB")
+            chunks.append(chunk)
+        content = b"".join(chunks)
+        if not content:
+            raise HTTPException(400, "没有收到图片")
+    return {"release": await store_manual_release_cover(release_id, content)}
+
+
 @app.get("/api/programs")
 async def api_programs(q: str = "") -> dict[str, Any]:
     return {"programs": program_rows(q, include_occurrences=False), "q": q.strip()}
@@ -7387,6 +7494,26 @@ async def api_remote_collabo_ingest(request: Request) -> dict[str, Any]:
     }
 
 
+def previous_news_snapshot(conn: sqlite3.Connection, record: dict[str, Any]) -> dict[str, dict[str, Any] | None]:
+    record_id = str(record.get("id") or "").strip()
+    row = conn.execute("SELECT * FROM news_articles WHERE id = ?", (record_id,)).fetchone() if record_id else None
+    if row is None and record.get("page_name"):
+        row = conn.execute(
+            "SELECT * FROM news_articles WHERE source = ? AND page_name = ? ORDER BY updated_at DESC, id LIMIT 1",
+            (str(record.get("source") or ""), str(record.get("page_name") or "")),
+        ).fetchone()
+    if row is None:
+        return {}
+    article = dict(row)
+    article["_images"] = [
+        dict(image)
+        for image in conn.execute(
+            "SELECT * FROM news_images WHERE news_id = ? ORDER BY position, id", (row["id"],)
+        ).fetchall()
+    ]
+    return {str(row["id"]): article}
+
+
 @app.post("/api/ingest/news", include_in_schema=False)
 async def api_remote_news_ingest(request: Request) -> dict[str, Any]:
     """Accept validated news content after an external worker archives images to R2."""
@@ -7396,12 +7523,16 @@ async def api_remote_news_ingest(request: Request) -> dict[str, Any]:
         record = remote_news_record(payload)
     except (TypeError, ValueError, OverflowError, RecursionError) as exc:
         raise HTTPException(400, "新闻导入内容格式无效") from exc
+    notify_requested = request.headers.get("x-nijidb-news-notify") == "1"
     if news_run_lock.locked():
         raise HTTPException(409, "新闻检查正在进行，请稍后再试")
     async with news_run_lock:
         timestamp = datetime.now(timezone.utc).isoformat()
+        previous_news: dict[str, dict[str, Any] | None] = {}
         async with sync_lock:
             with db() as conn:
+                if notify_requested:
+                    previous_news = previous_news_snapshot(conn, record)
                 changed, created = upsert_news_record(conn, record, timestamp)
                 article = conn.execute("SELECT * FROM news_articles WHERE id = ?", (record["id"],)).fetchone()
                 image_count = conn.execute(
@@ -7413,6 +7544,11 @@ async def api_remote_news_ingest(request: Request) -> dict[str, Any]:
                 r2_image_count = sum(1 for image in article_images if valid_r2_public_image_url(image["public_url"]))
     if changed:
         log_database_activity("news", f"远程导入新闻：{str(article['title'] or '')[:80]}")
+        if notify_requested:
+            try:
+                await notify_news(news_notification_items([str(record["id"])], previous_news), settings())
+            except Exception as exc:
+                print(f"[news-ingest] notification failed: {type(exc).__name__}", flush=True)
     return {
         "id": record["id"],
         "source": record["source"],
@@ -7574,31 +7710,20 @@ async def api_admin_news_refresh(news_id: str, request: Request) -> dict[str, An
         return {"article": result, "changed": changed, "activity_logs": recent_database_logs()}
 
 
-@app.post("/api/admin/news/{news_id}/images")
-async def api_admin_news_upload_image(news_id: str, request: Request) -> dict[str, Any]:
-    require_api_admin(request)
+async def store_news_image_bytes(
+    news_id: str,
+    content: bytes,
+    filename: str = "news-image",
+    alt_text: str = "",
+) -> dict[str, Any]:
     max_bytes = 20 * 1024 * 1024
-    content_length = request.headers.get("content-length", "")
-    try:
-        if content_length and int(content_length) > max_bytes:
-            raise HTTPException(413, "单张新闻图片不能超过 20 MB")
-    except ValueError:
-        pass
+    if len(content) > max_bytes:
+        raise HTTPException(413, "单张新闻图片不能超过 20 MB")
     with db() as conn:
         article = conn.execute("SELECT id FROM news_articles WHERE id = ?", (news_id,)).fetchone()
     if not article:
         raise HTTPException(404, "新闻不存在")
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > max_bytes:
-            raise HTTPException(413, "单张新闻图片不能超过 20 MB")
-        chunks.append(chunk)
-    content = b"".join(chunks)
-    filename = unquote(str(request.headers.get("x-filename", "news-image")))
-    content_type = str(request.headers.get("content-type", "")).split(";", 1)[0].strip().lower()
-    extension = news_upload_extension(content_type, content, filename)
+    extension = news_upload_extension("", content, filename)
     if not extension:
         raise HTTPException(415, "只支持 JPEG、PNG、GIF、WebP、BMP 或 AVIF 图片")
     dimensions = image_dimensions_from_bytes(content)
@@ -7623,7 +7748,7 @@ async def api_admin_news_upload_image(news_id: str, request: Request) -> dict[st
             raise HTTPException(502, "新闻图片上传到 R2 失败，请稍后重试") from exc
         if r2_is_configured():
             r2_url = r2_public_image_url(r2_relative)
-    alt_text = unquote(str(request.headers.get("x-alt-text", ""))).strip()[:500]
+    alt_text = str(alt_text or "").strip()[:500]
     with db() as conn:
         existing = conn.execute(
             "SELECT id, public_url FROM news_images WHERE news_id = ? AND kind = 'manual' AND local_path = ? LIMIT 1",
@@ -7633,7 +7758,9 @@ async def api_admin_news_upload_image(news_id: str, request: Request) -> dict[st
             if r2_url and str(existing["public_url"] or "") != r2_url:
                 conn.execute("UPDATE news_images SET public_url = ? WHERE id = ?", (r2_url, existing["id"]))
         else:
-            position = conn.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM news_images WHERE news_id = ?", (news_id,)).fetchone()[0]
+            position = conn.execute(
+                "SELECT COALESCE(MAX(position), -1) + 1 FROM news_images WHERE news_id = ?", (news_id,)
+            ).fetchone()[0]
             conn.execute(
                 """INSERT INTO news_images
                 (news_id, position, kind, local_path, public_url, source_url, alt_text, width, height, bytes, sha256, created_at)
@@ -7646,7 +7773,7 @@ async def api_admin_news_upload_image(news_id: str, request: Request) -> dict[st
                     alt_text,
                     dimensions[0],
                     dimensions[1],
-                    total,
+                    len(content),
                     digest,
                     datetime.now(timezone.utc).isoformat(),
                 ),
@@ -7655,6 +7782,32 @@ async def api_admin_news_upload_image(news_id: str, request: Request) -> dict[st
         result = news_article_payload(conn, updated, detail=True)
     log_database_activity("news", f"补充官网新闻图片：{result['title'][:80]}")
     return {"article": result}
+
+
+@app.post("/api/admin/news/{news_id}/images")
+async def api_admin_news_upload_image(news_id: str, request: Request) -> dict[str, Any]:
+    require_api_admin(request)
+    max_bytes = 20 * 1024 * 1024
+    content_length = request.headers.get("content-length", "")
+    try:
+        if content_length and int(content_length) > max_bytes:
+            raise HTTPException(413, "单张新闻图片不能超过 20 MB")
+    except ValueError:
+        pass
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(413, "单张新闻图片不能超过 20 MB")
+        chunks.append(chunk)
+    content = b"".join(chunks)
+    return await store_news_image_bytes(
+        news_id,
+        content,
+        filename=unquote(str(request.headers.get("x-filename", "news-image"))),
+        alt_text=unquote(str(request.headers.get("x-alt-text", ""))),
+    )
 
 
 @app.delete("/api/admin/news/images/{image_id}")
@@ -7977,6 +8130,7 @@ async def api_admin_collabo_upload(request: Request) -> dict[str, list[dict[str,
     max_files = 16
     request_type = str(request.headers.get("content-type", "")).split(";", 1)[0].strip().lower()
     uploads: list[tuple[str, str, bytes]] = []
+    source_urls_by_digest: dict[str, str] = {}
     if request_type == "multipart/form-data":
         try:
             form = await request.form(max_files=max_files, max_fields=max_files, max_part_size=max_bytes)
@@ -7987,6 +8141,32 @@ async def api_admin_collabo_upload(request: Request) -> dict[str, list[dict[str,
                 continue
             content = await value.read()
             uploads.append((str(value.filename), str(value.content_type or ""), content))
+    elif request_type == "application/json" or request_type.endswith("+json"):
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 16 * 1024:
+                raise HTTPException(413, "图片直链请求过大")
+            body.extend(chunk)
+        try:
+            payload = json.loads(bytes(body).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise HTTPException(400, "图片直链格式无效") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "图片直链格式无效")
+        source_url = str(payload.get("url") or "").strip()
+        if not source_url:
+            raise HTTPException(400, "图片直链不能为空")
+        if not r2_is_configured():
+            raise HTTPException(503, "R2 未配置，无法归档联动图片直链")
+        try:
+            content, fetched_content_type = await fetch_public_image_bytes(source_url, max_bytes)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(502, "联动图片直链读取失败，请稍后重试") from exc
+        digest = hashlib.sha256(content).hexdigest()
+        source_urls_by_digest[digest] = source_url
+        uploads.append(("collabo-image", fetched_content_type, content))
     else:
         content_length = request.headers.get("content-length", "")
         try:
@@ -8053,7 +8233,7 @@ async def api_admin_collabo_upload(request: Request) -> dict[str, list[dict[str,
             "thumbnail_path": "",
             "url": url,
             "thumbnail_url": "",
-            "source_url": "",
+            "source_url": source_urls_by_digest.get(digest, ""),
             "source_page": "",
             "source_title": "",
             "caption": "",
@@ -8618,19 +8798,23 @@ async def api_add_program_occurrence_image(
     program_title = str(occurrence["title"] or "")
 
     content_type = str(request.headers.get("content-type", "")).split(";", 1)[0].strip().lower()
-    kind = "external"
+    kind = "upload"
     local_path = ""
     public_url = ""
     source_url = ""
     alt_text = ""
-    total = 0
     digest = ""
     width = 0
     height = 0
     if content_type == "application/json" or content_type.endswith("+json"):
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 16 * 1024:
+                raise HTTPException(413, "图片直链请求过大")
+            body.extend(chunk)
         try:
-            payload = await request.json()
-        except ValueError as exc:
+            payload = json.loads(bytes(body).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
             raise HTTPException(400, "图片直链格式无效") from exc
         if not isinstance(payload, dict):
             raise HTTPException(400, "图片直链格式无效")
@@ -8638,9 +8822,18 @@ async def api_add_program_occurrence_image(
             image_input = normalized_occurrence_images([payload])[0]
         except (ValueError, IndexError) as exc:
             raise HTTPException(400, str(exc)) from exc
+        if not r2_is_configured():
+            raise HTTPException(503, "R2 未配置，无法归档图片直链")
         source_url = image_input["url"]
-        public_url = source_url
         alt_text = image_input["alt_text"]
+        try:
+            content, fetched_content_type = await fetch_public_image_bytes(source_url, PROGRAM_IMAGE_MAX_BYTES)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(502, "图片直链读取失败，请稍后重试") from exc
+        content_type = fetched_content_type.split(";", 1)[0].strip().lower()
+        filename = "program-image"
     else:
         content_length = request.headers.get("content-length", "")
         try:
@@ -8649,6 +8842,7 @@ async def api_add_program_occurrence_image(
         except ValueError:
             pass
         chunks: list[bytes] = []
+        total = 0
         async for chunk in request.stream():
             total += len(chunk)
             if total > PROGRAM_IMAGE_MAX_BYTES:
@@ -8658,31 +8852,34 @@ async def api_add_program_occurrence_image(
         if not content:
             raise HTTPException(400, "没有收到图片")
         filename = unquote(str(request.headers.get("x-filename", "program-image")))
-        extension = news_upload_extension(content_type, content, filename)
-        if not extension:
-            raise HTTPException(415, "只支持 JPEG、PNG、GIF、WebP、BMP 或 AVIF 图片")
-        dimensions = image_dimensions_from_bytes(content)
-        if not dimensions or any(value > 10000 for value in dimensions):
-            raise HTTPException(415, "图片内容或尺寸无效")
-        width, height = dimensions
-        kind = "upload"
-        digest = hashlib.sha256(content).hexdigest()
-        relative = Path("programs") / f"{digest}{extension}"
-        local_path = relative.as_posix()
-        try:
-            target, target_created = write_new_local_file(MEDIA_DIR, relative, content)
-        except (OSError, ValueError) as exc:
-            raise HTTPException(400, "节目返图保存目录不能包含符号链接") from exc
-        if r2_upload_is_configured():
-            try:
-                await asyncio.to_thread(upload_image_to_r2, target, local_path)
-            except Exception as exc:
-                if target_created:
-                    await cleanup_program_image_storage([local_path])
-                raise HTTPException(502, "节目返图上传到 R2 失败，请稍后重试") from exc
-            if r2_is_configured():
-                public_url = r2_public_image_url(local_path)
         alt_text = unquote(str(request.headers.get("x-alt-text", ""))).strip()[:500]
+
+    if len(content) > PROGRAM_IMAGE_MAX_BYTES:
+        raise HTTPException(413, "单张节目返图不能超过 20 MB")
+    extension = news_upload_extension(content_type, content, filename)
+    if not extension:
+        raise HTTPException(415, "只支持 JPEG、PNG、GIF、WebP、BMP 或 AVIF 图片")
+    dimensions = image_dimensions_from_bytes(content)
+    if not dimensions or any(value > 10000 for value in dimensions):
+        raise HTTPException(415, "图片内容或尺寸无效")
+    width, height = dimensions
+    total = len(content)
+    digest = hashlib.sha256(content).hexdigest()
+    relative = Path("programs") / f"{digest}{extension}"
+    local_path = relative.as_posix()
+    try:
+        target, target_created = write_new_local_file(MEDIA_DIR, relative, content)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(400, "节目返图保存目录不能包含符号链接") from exc
+    if r2_upload_is_configured():
+        try:
+            await asyncio.to_thread(upload_image_to_r2, target, local_path)
+        except Exception as exc:
+            if target_created:
+                await cleanup_program_image_storage([local_path])
+            raise HTTPException(502, "节目返图上传到 R2 失败，请稍后重试") from exc
+        if r2_is_configured():
+            public_url = r2_public_image_url(local_path)
 
     now = datetime.now(timezone.utc).isoformat()
     with db() as conn:

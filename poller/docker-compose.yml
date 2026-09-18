@@ -61,6 +61,11 @@ services:
         required: false
       - path: ./mihomo/controller.env
         required: true
+    # 宿主局域网 DNS 会把外域名映射到 mihomo fake-IP（198.18.0.0/15），
+    # 这会让 worker 的公网测速地址校验误判为内网地址；worker 不承担代理解析，使用可信公网 DNS。
+    dns:
+      - 1.1.1.1
+      - 223.5.5.5
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       NIJIDB_LOG_TZ_OFFSET_HOURS: ${NIJIDB_LOG_TZ_OFFSET_HOURS:-8}

@@ -95,7 +95,7 @@ async function setup(context) {
     const individualTimeBox = await periodCard.locator(".period-time-field").boundingBox();
     const individualTimezoneBox = await periodCard.locator(".period-timezone-field").boundingBox();
     assert.ok(Math.abs(individualTimeBox.y - individualTimezoneBox.y) < 1);
-    assert.match(await periodCard.innerText(), /逐期设置不代表月更/);
+    assert.match(await periodCard.innerText(), /仅新建节目.*已有节目不补建/);
 
     await periodCard.getByRole("button", { name: "月更" }).click();
     const timeBox = await periodCard.locator(".period-time-field").boundingBox();
@@ -118,7 +118,7 @@ async function setup(context) {
     await periodCard.getByRole("button", { name: "单次" }).click();
     assert.equal(await autoToggle.count(), 0);
     assert.equal(await periodCard.getByText("播出时间", { exact: true }).count(), 1);
-    assert.match(await periodCard.innerText(), /自动生成一条单集/);
+    assert.match(await periodCard.innerText(), /新建单次节目.*已有节目不补建首期/);
 
     await page.getByLabel("节目名称").fill("单次保存测试");
     await periodCard.locator('input[placeholder="选择日期"]').fill("2026-09-20");

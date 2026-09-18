@@ -1689,6 +1689,15 @@ def normalized_program(values: dict[str, Any]) -> dict[str, Any]:
     periods = normalized_periods(values, parsed_start, parsed_end)
     first_period = periods[0]
     all_single = all(period["frequency"] == "single" for period in periods)
+    if len(periods) == 1 and first_period["frequency"] not in {"individual", "single"}:
+        # With one recurring period, the period-level setting is the program's
+        # only effective setting. Honor the legacy program field when callers
+        # omit the new period field, then keep both fields synchronized.
+        raw_first_period = raw_periods[0] if isinstance(raw_periods, list) and raw_periods else {}
+        if "auto_generate" not in raw_first_period:
+            first_period["auto_generate"] = auto_generate
+        auto_generate = auto_generate and first_period["auto_generate"]
+        first_period["auto_generate"] = auto_generate
     normalized_end = "" if all_single else periods[-1]["end_date"]
     status = inferred_program_status({"end_date": normalized_end, "periods": periods})
     return {
@@ -1800,11 +1809,11 @@ def program_json_metadata() -> dict[str, Any]:
             "program.people": "节目固定参与成员、主持人或常驻嘉宾数组。推荐使用以下 14 个虹咲成员日文原名以启用成员筛选和彩色标记：大西亜玖璃、相良茉優、前田佳織里、久保田未夢、村上奈津実、鬼頭明里、楠木ともり、林鼓子、指出毬亜、田中ちえ美、小泉萌香、内田秀、法元明菜、矢野妃菜喜。其他主持人或嘉宾也可直接填写姓名，会被保存和显示，但不会被识别为虹咲成员。",
             "program.periods[].frequency": "weekly、monthly、individual 或 single。monthly 还需要通过 monthly_mode 区分有规律和无规律。",
             "program.periods[].monthly_mode": "仅 monthly 使用：week 表示按周次计算，day 表示按日计算，irregular 表示每月更新一期但日期未知。",
-            "program.periods[].auto_generate": "是否按本时期的排期规则自动生成后续单集；individual 逐期设置不自动生成后续单集，monthly/irregular 的首期始终使用时期开始日期，开启后从下个月 1 日生成占位单集，single 单次始终使用时期开始日期生成一条。节目级 auto_generate 仍是后续单集总开关。",
+            "program.periods[].auto_generate": "是否按本时期的排期规则自动生成后续单集；individual 不生成后续单集，monthly/irregular 开启后按每月 1 日生成占位。仅新建且未提供单集的节目创建首期；读取、更新、切换开关和覆盖导入不补建首期。",
             "program.periods[].week_interval": "周更间隔；填写 2 表示隔周。",
             "program.periods[].week_index": "周次计算时的第几周，1–5 表示顺数，-1–-5 表示倒数；按日计算时填 0。",
             "program.periods[].day_index": "按日计算时的第几天；1–28 表示顺数，-1–-14 表示倒数；周次计算和无规律月更填 0。",
-            "program.periods[].start_date": "时期开始日期必填；第一段时期的 start_date 就是节目第一期的原定日期。",
+            "program.periods[].start_date": "时期开始日期必填；仅新建且未提供单集的节目使用它初始化首期，已有单集的日期以保存值为准。",
             "program.periods[].end_date": "时期结束日期可空；留空表示该时期或节目仍在连载，不要把最后一条单集日期误填为结束日期。",
             "program.periods[].schedule_time": "时期默认播出时间，格式 HH:MM；monthly 时期可设置默认时间并在单集列表中逐期修改，individual 逐期设置也可作为新增单集的默认时间；所有 period 的日期和时间按 timezone 解释。",
             "program.periods[].timezone": "规范 JSON 统一使用 Asia/Tokyo（UTC+09:00）；period 的日期和时间必须与该时区一致。",
@@ -1836,7 +1845,7 @@ def program_json_metadata() -> dict[str, Any]:
             "schedule_mode 缺省为 individual：导入的 occurrences 是准确的最终逐期数据，program.auto_generate 会被关闭，不会凭 periods 生成额外单集。",
             "需要手动指定导入行为时，可将 schedule_mode 设置为 individual 或 generated；current 由导出文件使用，按每个 program 的 auto_generate 还原当前设置。",
             "导出 JSON 会根据当前节目设置保留 auto_generate、periods（包括每个时期的 auto_generate）和当前生效的 occurrences；自动生成节目按系统现有约半年的生成窗口导出。",
-            "逐期设置不代表月更，individual 时期不会按规则自动生成后续单集；保存节目排期时会先创建一条以时期开始日期和默认时间为初始值的首期，之后按实际情况手动维护；monthly/week 按周次计算，monthly/day 按日计算（顺数 1–28 日或倒数 1–14 日），monthly/irregular 的首期始终使用时期开始日期，开启后续自动生成后从下个月 1 日作为占位日期；single 时期无论节目是否开启后续自动生成，都使用时期开始日期和默认时间生成一条单集；weekly 和规律 monthly 时期默认开启。",
+            "仅新建且未提供单集的节目，为 individual、monthly/irregular、single 时期创建初始首期。已有节目的读取、更新、切换开关和覆盖导入均不补建首期；导入已整理的 occurrences 时以其为准。monthly/week 按周次计算，monthly/day 按日计算（顺数 1–28 日或倒数 1–14 日），monthly/irregular 开启后按每月 1 日生成后续占位；individual 不生成后续单集。",
             "target_mode 缺省为 new；覆盖导入必须指定 target_program_id，并在网页导入预览中明确选择覆盖目标。",
             "子节目 JSON 导入必须在预览中选择一个已有的主节目；new 会在该主节目下新建子节目，overwrite 会覆盖该主节目下同名或同 ID 的子节目。",
             "JSON 可以保留这些说明字段；导入器也兼容 // 和 /* */ 注释。",
@@ -2591,7 +2600,9 @@ def period_recurring_dates(period: dict[str, Any], range_end: date) -> list[date
         return []
     period_start = date.fromisoformat(period["start_date"])
     if period["frequency"] == "single":
-        return [period_start] if period_start <= range_end else []
+        # A single episode is seeded only on the new-program creation path;
+        # reads must not invent it for an existing program.
+        return []
     if period["frequency"] == "weekly":
         current = period_start + timedelta(days=(period["weekday"] - period_start.weekday()) % 7)
         step = timedelta(days=7 * period["week_interval"])
@@ -2606,11 +2617,12 @@ def period_recurring_dates(period: dict[str, Any], range_end: date) -> list[date
     if period["frequency"] != "monthly":
         return []
     if monthly_mode == "irregular":
-        # The first episode always uses the period start date. Only later
-        # automatically generated placeholders use the first day of each
-        # following month; a mid-month start must not lose its initial episode.
-        dates = [period_start] if period_start <= range_end else []
-        current = date(period_start.year + (period_start.month == 12), period_start.month % 12 + 1, 1)
+        # Initial episodes are stored only at creation, never synthesized on
+        # reads. Keep the existing first-of-month recurrence for later episodes.
+        current = date(period_start.year, period_start.month, 1)
+        if current < period_start:
+            current = date(current.year + (current.month == 12), current.month % 12 + 1, 1)
+        dates = []
         while current <= range_end:
             dates.append(current)
             current = date(current.year + (current.month == 12), current.month % 12 + 1, 1)
@@ -2728,26 +2740,17 @@ def program_occurrence_records(program: dict[str, Any], range_start: date, range
     for period in periods:
         period_auto_generate = boolean_value(period.get("auto_generate"), True)
         frequency = str(period.get("frequency") or "weekly").strip()
-        monthly_irregular = frequency == "monthly" and str(period.get("monthly_mode") or "week") == "irregular"
-        initial_episode_type = frequency in {"individual", "single"} or monthly_irregular
         period_start = date.fromisoformat(period["start_date"])
         period_end = date.fromisoformat(period["end_date"]) if period.get("end_date") else program_end
         period_generation_end = min(generation_end, period_end) if period_end else generation_end
         future_generation_disabled = frequency == "individual" or not program_auto_generate or (
             not period_auto_generate and frequency != "single"
         )
-        if period_generation_end < period_start:
+        if period_generation_end < period_start or future_generation_disabled:
+            # Manual schedules and disabled generation expose stored rows only.
+            # Reading an existing program must never create an initial episode.
             continue
-        if future_generation_disabled:
-            # Disabling future generation must still leave the initial anchor
-            # for flexible schedules and one-time programs.
-            if not initial_episode_type:
-                continue
-            base_dates = [period_start]
-            initial_manual = True
-        else:
-            base_dates = period_recurring_dates(period, period_generation_end)
-            initial_manual = False
+        base_dates = period_recurring_dates(period, period_generation_end)
         schedule_time = str(period.get("schedule_time") or "").strip()
         base_date_keys.update((item.isoformat(), schedule_time) for item in base_dates)
         schedule_shift_days = 0
@@ -2779,7 +2782,6 @@ def program_occurrence_records(program: dict[str, Any], range_start: date, range
                 schedule_time,
                 period.get("timezone", "Asia/Tokyo"),
                 period.get("frequency", "weekly"),
-                manual=initial_manual,
                 schedule_shift_days=schedule_shift_days,
                 monthly_mode=period.get("monthly_mode", "week"),
             )
@@ -3016,7 +3018,9 @@ def materialize_generated_occurrences(conn: sqlite3.Connection, program: dict[st
     if range_end < program_start:
         return 0
 
-    records = program_occurrence_records({**program, "auto_generate": True}, program_start, range_end)
+    # Materialize only occurrences that were actually enabled before the toggle.
+    # Repeatedly saving "off" must not recreate historical episodes.
+    records = program_occurrence_records(program, program_start, range_end)
     now = datetime.now(timezone.utc).isoformat()
     rows = [
         (
@@ -3143,31 +3147,27 @@ def replace_program_periods(conn: sqlite3.Connection, program_id: str, periods: 
     ])
 
 
-def ensure_individual_occurrence_starts(
+def seed_new_program_occurrences(
     conn: sqlite3.Connection,
     program_id: str,
     periods: list[dict[str, Any]],
     timestamp: str,
-    program_auto_generate: bool = True,
 ) -> int:
-    """Create the required initial episode anchors.
+    """Seed first episodes only when creating a new program without episodes.
 
-    ``individual`` periods are always manual, while irregular monthly and
-    one-time periods need a start-date episode whenever future generation is
-    disabled at either the program or period level. Later episodes remain
-    manual in those cases. Existing rows, including cancelled or deleted
-    rows, suppress reseeding.
+    Callers must be on a creation path, never update, overwrite-import, startup
+    or toggle paths. Supplied/imported episodes (including deleted rows) are
+    authoritative and must not be supplemented with guessed initial episodes.
     """
+    if conn.execute(
+        "SELECT 1 FROM program_occurrences WHERE program_id = ? LIMIT 1", (program_id,)
+    ).fetchone():
+        return 0
     initial_periods = []
     for period in periods:
         frequency = str(period.get("frequency") or "").strip()
         monthly_irregular = frequency == "monthly" and str(period.get("monthly_mode") or "week") == "irregular"
-        period_auto_generate = boolean_value(period.get("auto_generate"), True)
-        needs_initial = frequency == "individual" or (
-            frequency == "monthly"
-            and monthly_irregular
-            and (not program_auto_generate or not period_auto_generate)
-        ) or (frequency == "single" and not program_auto_generate)
+        needs_initial = frequency in {"individual", "single"} or monthly_irregular
         if needs_initial:
             initial_periods.append(period)
     if not initial_periods:
@@ -7532,13 +7532,8 @@ async def api_remote_program_ingest(request: Request) -> dict[str, Any]:
                         }
                         cursor = insert_occurrence_row(conn, values)
                         insert_occurrence_images(conn, cursor.lastrowid, occurrence.get("images"), now)
-                    ensure_individual_occurrence_starts(
-                        conn,
-                        target_id,
-                        program_values["periods"],
-                        now,
-                        program_values["auto_generate"],
-                    )
+                    if not entry["overwrite"] and not entry["occurrences"]:
+                        seed_new_program_occurrences(conn, target_id, program_values["periods"], now)
     except (TypeError, ValueError, OverflowError, RecursionError) as exc:
         raise HTTPException(400, str(exc) or "节目导入内容格式无效") from exc
     except sqlite3.IntegrityError as exc:
@@ -8683,13 +8678,8 @@ async def api_import_program(request: Request) -> dict[str, Any]:
                         }
                         cursor = insert_occurrence_row(conn, values)
                         insert_occurrence_images(conn, cursor.lastrowid, occurrence.get("images"), now)
-                    ensure_individual_occurrence_starts(
-                        conn,
-                        target_id,
-                        program_values["periods"],
-                        now,
-                        program_values["auto_generate"],
-                    )
+                    if not entry["overwrite"] and not entry["occurrences"]:
+                        seed_new_program_occurrences(conn, target_id, program_values["periods"], now)
     except sqlite3.IntegrityError as exc:
         raise HTTPException(409, "导入的单集存在重复播出日期和时间") from exc
 
@@ -8733,9 +8723,7 @@ async def api_create_program(request: Request) -> dict[str, Any]:
     values.update({"id": f"program-{secrets.token_hex(6)}", "created_at": now, "updated_at": now})
     with db() as conn:
         insert_program_row(conn, values)
-        ensure_individual_occurrence_starts(
-            conn, values["id"], values["periods"], now, values["auto_generate"]
-        )
+        seed_new_program_occurrences(conn, values["id"], values["periods"], now)
     log_database_activity("program", f"新增节目：{values['title']}")
     program = next(item for item in program_rows(program_ids={values["id"]}, include_occurrences=False) if item["id"] == values["id"])
     return {"program": program}
@@ -8782,9 +8770,6 @@ async def api_update_program(program_id: str, request: Request) -> dict[str, Any
             )
         backfill_individual_occurrence_anchors(conn, program_id, old_periods, values["periods"])
         replace_program_periods(conn, program_id, values["periods"], values["updated_at"])
-        ensure_individual_occurrence_starts(
-            conn, program_id, values["periods"], values["updated_at"], values["auto_generate"]
-        )
     log_database_activity("program", f"更新节目：{values['title']}")
     program = next(item for item in program_rows(program_ids={program_id}, include_occurrences=False) if item["id"] == program_id)
     return {"program": program}
@@ -8844,9 +8829,13 @@ async def api_update_auto_generation(program_id: str, request: Request) -> dict[
             "UPDATE programs SET auto_generate = ?, updated_at = ? WHERE id = ?",
             (int(auto_generate), now, program_id),
         )
-        ensure_individual_occurrence_starts(
-            conn, program_id, program.get("periods") or [], now, auto_generate
-        )
+        if len(program.get("periods") or []) == 1:
+            period = (program.get("periods") or [])[0]
+            if period.get("frequency") not in {"individual", "single"}:
+                conn.execute(
+                    "UPDATE program_periods SET auto_generate = ?, updated_at = ? WHERE program_id = ?",
+                    (int(auto_generate), now, program_id),
+                )
     state = "开启" if auto_generate else "关闭"
     suffix = f"，保存 {materialized_count} 期" if materialized_count else ""
     log_database_activity("program", f"{state}自动生成：{program['title']}{suffix}")

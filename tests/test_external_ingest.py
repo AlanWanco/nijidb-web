@@ -114,6 +114,23 @@ class ExternalIngestApiTests(unittest.IsolatedAsyncioTestCase):
         with main.db() as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM releases").fetchone()[0], 1)
 
+    async def test_program_ingest_does_not_add_first_episode_to_curated_or_overwritten_snapshot(self):
+        payload = self.program_payload()
+        payload["_version"] = main.PROGRAM_JSON_VERSION
+        payload["occurrences"][0]["original_date"] = "2026-09-23"
+        headers = {"X-Nijidb-API-Key": "program-test-key"}
+        with patch.dict(os.environ, {"NIJIDB_PROGRAM_INGEST_API_KEY": "program-test-key"}):
+            response = await self.client.post("/api/ingest/program", json=payload, headers=headers)
+            self.assertEqual(response.status_code, 200, response.text)
+            with main.db() as conn:
+                rows = conn.execute("SELECT original_date FROM program_occurrences").fetchall()
+            self.assertEqual([row["original_date"] for row in rows], ["2026-09-23"])
+            payload["occurrences"] = []
+            repeated = await self.client.post("/api/ingest/program", json=payload, headers=headers)
+            self.assertEqual(repeated.status_code, 200, repeated.text)
+            with main.db() as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM program_occurrences").fetchone()[0], 0)
+
     async def test_program_api_keeps_source_id_and_replaces_full_snapshot(self):
         with patch.dict(os.environ, {"NIJIDB_PROGRAM_INGEST_API_KEY": "program-test-key"}):
             response = await self.client.post(

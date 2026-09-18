@@ -75,6 +75,36 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
             )["auto_generate"]
         )
 
+    def test_single_recurring_period_uses_period_auto_generation_for_program(self):
+        values = main.normalized_program(
+            {
+                "title": "单时期同步测试",
+                "auto_generate": True,
+                "periods": [{
+                    "start_date": "2026-01-01",
+                    "frequency": "monthly",
+                    "monthly_mode": "irregular",
+                    "auto_generate": False,
+                }],
+            }
+        )
+        self.assertFalse(values["auto_generate"])
+        self.assertFalse(values["periods"][0]["auto_generate"])
+
+        legacy_values = main.normalized_program(
+            {
+                "title": "单时期旧格式同步测试",
+                "auto_generate": False,
+                "periods": [{
+                    "start_date": "2026-01-01",
+                    "frequency": "monthly",
+                    "monthly_mode": "irregular",
+                }],
+            }
+        )
+        self.assertFalse(legacy_values["auto_generate"])
+        self.assertFalse(legacy_values["periods"][0]["auto_generate"])
+
     def test_individual_period_is_manual_even_if_legacy_flag_is_true(self):
         today = datetime_today()
         start = date(today.year, today.month, 1)
@@ -98,17 +128,14 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
             "occurrences": [],
         }
         initial_records = main.program_occurrence_records(program, start, range_end)
-        self.assertEqual(len(initial_records), 1)
-        self.assertFalse(initial_records[0]["generated"])
-        self.assertTrue(initial_records[0]["manual"])
-        self.assertEqual(initial_records[0]["original_date"], start.isoformat())
+        self.assertEqual(initial_records, [])
 
         program["occurrences"] = [{"original_date": (start + timedelta(days=3)).isoformat(), "original_time": "20:00"}]
         manual_records = main.program_occurrence_records(program, start, range_end)
-        self.assertEqual(len(manual_records), 2)
+        self.assertEqual(len(manual_records), 1)
         self.assertTrue(all(record["manual"] for record in manual_records))
 
-    def test_irregular_monthly_period_uses_start_then_first_of_following_months(self):
+    def test_irregular_monthly_read_does_not_invent_start_date_episode(self):
         start = date(2026, 1, 15)
         end = date(2026, 4, 30)
         period = {
@@ -121,7 +148,7 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
             "timezone": "Asia/Tokyo",
         }
         dates = main.period_recurring_dates(period, end)
-        self.assertEqual(dates, [date(2026, 1, 15), date(2026, 2, 1), date(2026, 3, 1), date(2026, 4, 1)])
+        self.assertEqual(dates, [date(2026, 2, 1), date(2026, 3, 1), date(2026, 4, 1)])
         program = {
             "id": "irregular-program-test",
             "title": "无规律月更测试节目",
@@ -133,7 +160,8 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
             "occurrences": [],
         }
         records = main.program_occurrence_records(program, start, end)
-        self.assertEqual([record["original_time"] for record in records], ["20:00"] * 4)
+        self.assertEqual([record["original_time"] for record in records], ["20:00"] * 3)
+        self.assertNotIn(start.isoformat(), [record["original_date"] for record in records])
 
     def test_regular_monthly_day_calculation_supports_forward_and_reverse(self):
         start = date(2026, 1, 1)
@@ -187,7 +215,7 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
                     None,
                 )
 
-    def test_initial_episode_anchor_survives_program_auto_generation_switch(self):
+    def test_disabled_generation_never_synthesizes_initial_episode(self):
         start = date(2026, 1, 15)
         end = date(2026, 4, 30)
         cases = [
@@ -224,12 +252,17 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
                     "periods": [period],
                     "occurrences": [],
                 }
+                self.assertEqual(main.program_occurrence_records(program, start, end), [])
+                # An already edited first episode need not match the period start.
+                edited_date = (start + timedelta(days=2)).isoformat()
+                program["occurrences"] = [{
+                    "id": 42,
+                    "original_date": edited_date,
+                    "original_time": "21:00",
+                    "status": "scheduled",
+                }]
                 records = main.program_occurrence_records(program, start, end)
-                self.assertEqual(records[0]["original_date"], start.isoformat())
-                self.assertEqual(records[0]["original_time"], "20:00")
-                self.assertFalse(records[0]["generated"])
-                self.assertTrue(records[0]["manual"])
-                self.assertEqual(len(records), 1)
+                self.assertEqual([(r["id"], r["original_date"]) for r in records], [(42, edited_date)])
 
     def test_initial_flexible_anchor_keeps_an_edited_manual_time(self):
         start = date(2026, 1, 15)
@@ -264,7 +297,7 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
         self.assertFalse(records[0]["generated"])
         self.assertTrue(records[0]["manual"])
 
-    def test_period_auto_generation_off_keeps_irregular_initial_episode(self):
+    def test_period_auto_generation_off_does_not_synthesize_initial_episode(self):
         start = date(2026, 1, 15)
         period = {
             "start_date": start.isoformat(),
@@ -286,12 +319,9 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
             "occurrences": [],
         }
         records = main.program_occurrence_records(program, start, date(2026, 4, 30))
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["original_date"], start.isoformat())
-        self.assertFalse(records[0]["generated"])
-        self.assertTrue(records[0]["manual"])
+        self.assertEqual(records, [])
 
-    def test_single_period_generates_start_date_by_default(self):
+    def test_single_period_read_does_not_invent_start_date_episode(self):
         today = datetime_today()
         start = date(today.year, today.month, 1)
         period = {
@@ -312,10 +342,7 @@ class ProgramPeriodSchedulingTests(unittest.TestCase):
             "occurrences": [],
         }
         records = main.program_occurrence_records(program, start, start)
-        self.assertEqual(len(records), 1)
-        self.assertTrue(records[0]["generated"])
-        self.assertEqual(records[0]["original_date"], start.isoformat())
-        self.assertEqual(records[0]["original_time"], "20:00")
+        self.assertEqual(records, [])
 
     def test_occurrence_images_are_normalized_and_carried_to_records(self):
         values = main.normalized_occurrence(
@@ -512,6 +539,139 @@ class IndividualProgramApiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(first["generated"])
                 self.assertTrue(first["manual"])
 
+    async def test_single_period_edit_syncs_period_and_program_auto_generation(self):
+        start = main.datetime.now(main.JAPAN_TZ).date() + timedelta(days=7)
+        payload = {
+            "title": "单时期编辑同步",
+            "auto_generate": True,
+            "periods": [{
+                "start_date": start.isoformat(),
+                "frequency": "monthly",
+                "monthly_mode": "irregular",
+                "auto_generate": True,
+                "schedule_time": "20:00",
+            }],
+        }
+        created = await self.client.post("/api/admin/programs", json=payload)
+        self.assertEqual(created.status_code, 200, created.text)
+        program_id = created.json()["program"]["id"]
+        payload["periods"][0]["auto_generate"] = False
+        updated = await self.client.patch(f"/api/admin/programs/{program_id}", json=payload)
+        self.assertEqual(updated.status_code, 200, updated.text)
+        program = updated.json()["program"]
+        self.assertFalse(program["auto_generate"])
+        self.assertFalse(program["periods"][0]["auto_generate"])
+        with main.db() as conn:
+            self.assertEqual(conn.execute("SELECT auto_generate FROM programs WHERE id = ?", (program_id,)).fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT auto_generate FROM program_periods WHERE program_id = ?", (program_id,)).fetchone()[0], 0)
+
+    async def test_existing_edited_programs_are_not_reseeded_on_read_save_toggle_or_restart(self):
+        # Past dates also exercise the materialization path when saving "off".
+        start = main.datetime.now(main.JAPAN_TZ).date() - timedelta(days=60)
+        for frequency in ("individual", "monthly", "single"):
+            for status in ("scheduled", "cancelled", "deleted", "empty"):
+                with self.subTest(frequency=frequency, status=status):
+                    payload = {
+                        "title": f"已维护-{frequency}-{status}",
+                        "auto_generate": False,
+                        "periods": [{
+                            "start_date": start.isoformat(),
+                            "frequency": frequency,
+                            "monthly_mode": "irregular" if frequency == "monthly" else "week",
+                            "auto_generate": False,
+                            "schedule_time": "20:00",
+                        }],
+                    }
+                    created = await self.client.post("/api/admin/programs", json=payload)
+                    self.assertEqual(created.status_code, 200, created.text)
+                    program_id = created.json()["program"]["id"]
+                    # Reproduce an existing program whose initial episode was moved
+                    # or removed. These fixture writes only touch the temporary DB.
+                    with main.db() as conn:
+                        if status == "empty":
+                            conn.execute("DELETE FROM program_occurrences WHERE program_id = ?", (program_id,))
+                        else:
+                            conn.execute(
+                                "UPDATE program_occurrences SET original_date = ?, original_time = '21:00', status = ?, "
+                                "title = '已校对', note = '不得自动修改' WHERE program_id = ?",
+                                ((start + timedelta(days=2)).isoformat(), status, program_id),
+                            )
+                        expected = [dict(r) for r in conn.execute(
+                            "SELECT * FROM program_occurrences WHERE program_id = ?", (program_id,)
+                        )]
+                    for step in ("read", "save", "toggle", "restart"):
+                        if step == "save":
+                            response = await self.client.patch(f"/api/admin/programs/{program_id}", json=payload)
+                            self.assertEqual(response.status_code, 200, response.text)
+                        elif step == "toggle":
+                            response = await self.client.patch(
+                                f"/api/admin/programs/{program_id}/auto-generation", json={"auto_generate": False}
+                            )
+                            self.assertEqual(response.status_code, 200, response.text)
+                        elif step == "restart":
+                            main.init_db()
+                        listing = await self.client.get(f"/api/admin/programs/{program_id}/occurrences")
+                        self.assertEqual(listing.status_code, 200, listing.text)
+                        self.assertEqual(len(listing.json()["occurrences"]), len(expected), step)
+                        with main.db() as conn:
+                            actual = [dict(r) for r in conn.execute(
+                                "SELECT * FROM program_occurrences WHERE program_id = ?", (program_id,)
+                            )]
+                        self.assertEqual(actual, expected, step)
+
+    async def test_new_irregular_program_seeds_once_even_when_future_generation_is_enabled(self):
+        start = (main.datetime.now(main.JAPAN_TZ).date() + timedelta(days=40)).replace(day=15)
+        payload = {
+            "title": "新建无规律首期只创建一次",
+            "auto_generate": True,
+            "periods": [{
+                "start_date": start.isoformat(), "frequency": "monthly", "monthly_mode": "irregular",
+                "schedule_time": "20:00",
+            }],
+        }
+        response = await self.client.post("/api/admin/programs", json=payload)
+        self.assertEqual(response.status_code, 200, response.text)
+        program_id = response.json()["program"]["id"]
+        listing = await self.client.get(f"/api/admin/programs/{program_id}/occurrences")
+        first = [row for row in listing.json()["occurrences"] if row["original_date"] == start.isoformat()]
+        self.assertEqual(len(first), 1)
+        self.assertIsNotNone(first[0]["id"])
+        with main.db() as conn:
+            conn.execute(
+                "UPDATE program_occurrences SET original_date = ? WHERE program_id = ?",
+                ((start + timedelta(days=1)).isoformat(), program_id),
+            )
+        updated = await self.client.patch(f"/api/admin/programs/{program_id}", json=payload)
+        self.assertEqual(updated.status_code, 200, updated.text)
+        listing = await self.client.get(f"/api/admin/programs/{program_id}/occurrences")
+        self.assertNotIn(start.isoformat(), [r["original_date"] for r in listing.json()["occurrences"]])
+        self.assertEqual(sum(r["id"] is not None for r in listing.json()["occurrences"]), 1)
+
+    async def test_imported_episodes_are_authoritative_and_overwrite_does_not_seed(self):
+        payload = {
+            "_version": main.PROGRAM_JSON_VERSION,
+            "program": {
+                "title": "已整理的导入节目",
+                "periods": [{"start_date": "2026-01-01", "frequency": "monthly", "monthly_mode": "irregular"}],
+            },
+            "occurrences": [{"original_date": "2026-01-03", "original_time": "21:00", "title": "校对后的首期"}],
+        }
+        imported = await self.client.post("/api/admin/programs/import", json=payload)
+        self.assertEqual(imported.status_code, 200, imported.text)
+        program_id = imported.json()["program"]["id"]
+        listing = await self.client.get(f"/api/admin/programs/{program_id}/occurrences")
+        self.assertEqual([r["original_date"] for r in listing.json()["occurrences"]], ["2026-01-03"])
+        payload["import_options"] = {"target_mode": "overwrite", "target_program_id": program_id}
+        payload["occurrences"] = []
+        overwritten = await self.client.post("/api/admin/programs/import", json=payload)
+        self.assertEqual(overwritten.status_code, 200, overwritten.text)
+        listing = await self.client.get(f"/api/admin/programs/{program_id}/occurrences")
+        self.assertEqual(listing.json()["occurrences"], [])
+        with main.db() as conn:
+            self.assertEqual(conn.execute(
+                "SELECT count(*) FROM program_occurrences WHERE program_id = ?", (program_id,)
+            ).fetchone()[0], 0)
+
     async def test_monthly_day_period_persists_and_generates_fixed_dates(self):
         start = main.datetime.now(main.JAPAN_TZ).date().replace(day=1)
         end = start + timedelta(days=100)
@@ -566,6 +726,11 @@ class IndividualProgramApiTests(unittest.IsolatedAsyncioTestCase):
             json={"auto_generate": False},
         )
         self.assertEqual(disabled.status_code, 200)
+        with main.db() as conn:
+            program_row = conn.execute("SELECT auto_generate FROM programs WHERE id = ?", (program_id,)).fetchone()
+            period_row = conn.execute("SELECT auto_generate FROM program_periods WHERE program_id = ?", (program_id,)).fetchone()
+        self.assertEqual(program_row["auto_generate"], 0)
+        self.assertEqual(period_row["auto_generate"], 0)
         listing = await self.client.get(f"/api/admin/programs/{program_id}/occurrences")
         occurrences = listing.json()["occurrences"]
         self.assertEqual(len(occurrences), 1)

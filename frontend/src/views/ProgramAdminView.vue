@@ -212,6 +212,23 @@ const occurrencePeriod = computed(() => {
   const anchor = occurrenceDraft.generated_date || occurrenceDraft.original_date;
   return form.periods.find(period => period.start_date && anchor >= period.start_date && (!period.end_date || anchor <= period.end_date)) || null;
 });
+const recurringPeriods = computed(() => form.periods.filter(period => !["individual", "single"].includes(period.frequency)));
+const occurrenceGenerationDescription = computed(() => {
+  if (!form.auto_generate) return t("已关闭后续自动生成；仅保留已保存单集，不会为已有节目补建首期。");
+  const currentPeriod = occurrencePeriod.value;
+  if (currentPeriod && !["individual", "single"].includes(currentPeriod.frequency)) {
+    return currentPeriod.auto_generate === false
+      ? t("节目级开关已开启，但当前排期时期已关闭自动生成。")
+      : t("按排期规则生成未来约半年的单集。");
+  }
+  if (recurringPeriods.value.length && recurringPeriods.value.every(period => period.auto_generate === false)) {
+    return t("节目级开关已开启，但所有排期时期都已关闭自动生成。");
+  }
+  if (recurringPeriods.value.some(period => period.auto_generate === false)) {
+    return t("节目级开关已开启，部分排期时期已关闭自动生成。");
+  }
+  return t("按排期规则生成未来约半年的单集。");
+});
 const canShiftFollowing = computed(() => occurrencePeriod.value?.frequency === "weekly" && Number(occurrencePeriod.value.week_interval) === 2);
 const occurrenceRescheduleBaseDate = computed(() => occurrenceDraft.original_date
   ? addDays(occurrenceDraft.original_date, Number(occurrenceDraft.schedule_shift_days) || 0)
@@ -713,6 +730,42 @@ async function openRequestedProgram() {
 
 function applyProgram(program) {
   const episodeStart = normalizeEpisodeStart(program.episode_start);
+  const sourcePeriods = program.periods && program.periods.length ? program.periods : [legacyPeriod(program)];
+  const periods = sourcePeriods.map(period => {
+    const legacyIrregular = period.frequency === "irregular";
+    const frequency = legacyIrregular ? "monthly" : period.frequency || "weekly";
+    const monthlyMode = frequency === "monthly"
+      ? period.monthly_mode || (legacyIrregular ? "irregular" : program.monthly_mode || "week")
+      : "week";
+    const hasAutoGenerate = period.auto_generate !== undefined
+      && period.auto_generate !== null
+      && period.auto_generate !== "";
+    const autoGenerate = frequency === "individual"
+      ? false
+      : frequency === "single"
+        ? true
+        : hasAutoGenerate
+          ? ![false, 0, "0", "false"].includes(period.auto_generate)
+          : program.auto_generate !== false;
+    const weekIndex = Number(period.week_index) || 1;
+    return {
+      ...blankPeriod(),
+      ...period,
+      frequency,
+      monthly_mode: ["week", "day", "irregular"].includes(monthlyMode) ? monthlyMode : "week",
+      auto_generate: autoGenerate,
+      week_interval: Number(period.week_interval) || 1,
+      week_direction: weekIndex < 0 ? "last" : "first",
+      week_number: Math.abs(weekIndex) || 1,
+      day_direction: Number(period.day_index) < 0 ? "last" : "first",
+      day_number: Math.abs(Number(period.day_index)) || 1,
+    };
+  });
+  const singleRecurringPeriod = periods.length === 1 && !["individual", "single"].includes(periods[0].frequency);
+  if (singleRecurringPeriod) {
+    // Loading legacy data must never turn a disabled program back on.
+    periods[0].auto_generate = periods[0].auto_generate && program.auto_generate !== false;
+  }
   Object.assign(form, {
     title: program.title || "",
     parent_id: program.parent_id || "",
@@ -721,41 +774,12 @@ function applyProgram(program) {
     format: program.format || "video",
     platform: program.platform || "network",
     delivery: program.delivery || "recorded",
-    auto_generate: program.auto_generate !== false,
+    auto_generate: singleRecurringPeriod ? periods[0].auto_generate !== false : program.auto_generate !== false,
     episode_start: episodeStart,
     people: [...(program.people || [])],
     official_url: program.official_url || "",
     description: program.description || "",
-    periods: (program.periods && program.periods.length ? program.periods : [legacyPeriod(program)]).map(period => {
-      const legacyIrregular = period.frequency === "irregular";
-      const frequency = legacyIrregular ? "monthly" : period.frequency || "weekly";
-      const monthlyMode = frequency === "monthly"
-        ? period.monthly_mode || (legacyIrregular ? "irregular" : program.monthly_mode || "week")
-        : "week";
-      const hasAutoGenerate = period.auto_generate !== undefined
-        && period.auto_generate !== null
-        && period.auto_generate !== "";
-      const autoGenerate = frequency === "individual"
-        ? false
-        : frequency === "single"
-          ? true
-          : hasAutoGenerate
-            ? ![false, 0, "0", "false"].includes(period.auto_generate)
-            : true;
-      const weekIndex = Number(period.week_index) || 1;
-      return {
-        ...blankPeriod(),
-        ...period,
-        frequency,
-        monthly_mode: ["week", "day", "irregular"].includes(monthlyMode) ? monthlyMode : "week",
-        auto_generate: autoGenerate,
-        week_interval: Number(period.week_interval) || 1,
-        week_direction: weekIndex < 0 ? "last" : "first",
-        week_number: Math.abs(weekIndex) || 1,
-        day_direction: Number(period.day_index) < 0 ? "last" : "first",
-        day_number: Math.abs(Number(period.day_index)) || 1,
-      };
-    }),
+    periods,
   });
   syncEpisodeStartControls(episodeStart);
 }
@@ -1036,6 +1060,11 @@ function removePeriod(index) {
   form.periods.splice(index, 1);
 }
 
+function setPeriodAutoGeneration(period, enabled) {
+  period.auto_generate = enabled;
+  if (form.periods.length === 1) form.auto_generate = enabled;
+}
+
 function programBody() {
   const periods = form.periods.map(period => ({
     start_date: period.start_date,
@@ -1060,13 +1089,14 @@ function programBody() {
   const first = sorted[0] || {};
   const last = sorted[sorted.length - 1] || {};
   const allSingle = sorted.length > 0 && sorted.every(period => period.frequency === "single");
+  const singleRecurringPeriod = sorted.length === 1 && !["individual", "single"].includes(sorted[0].frequency);
   return {
     title: form.title,
     category: form.category,
      format: form.format,
      platform: form.platform,
       delivery: form.delivery,
-     auto_generate: form.auto_generate,
+     auto_generate: singleRecurringPeriod ? sorted[0].auto_generate : form.auto_generate,
         episode_start: episodeStartPayload(),
        people: [...form.people],
       official_url: form.official_url,
@@ -1120,6 +1150,9 @@ async function saveAutoGeneration() {
       body: { auto_generate: requested },
     });
     await Promise.all([loadPrograms(), loadOccurrences(editingId.value)]);
+    if (form.periods.length === 1 && !["individual", "single"].includes(form.periods[0].frequency)) {
+      form.periods[0].auto_generate = requested;
+    }
     const retained = Number(data.materialized_count || 0);
     message.value = requested
       ? t("已开启后续单集自动生成")
@@ -1915,9 +1948,9 @@ onUnmounted(() => {
                  <button type="button" :class="{ selected: period.frequency === 'individual' }" @click="setPeriodFrequency(period, 'individual')">{{ t("逐期设置") }}</button>
                  <button type="button" :class="{ selected: period.frequency === 'single' }" @click="setPeriodFrequency(period, 'single')">{{ t("单次") }}</button>
               </div>
-               <small v-if="period.frequency === 'monthly' && period.monthly_mode === 'irregular'">{{ t("按月生成单集：首期使用时期开始日，后续从每月 1 日作为占位；之后可在单集列表中直接修改每期原定日期和时间。") }}</small>
-               <small v-else-if="period.frequency === 'individual'">{{ t("逐期设置不代表月更，不自动生成后续单集；保存后会先按时期开始日期和默认时间创建首期，之后可按实际情况跨数月手动添加。") }}</small>
-               <small v-else-if="period.frequency === 'single'">{{ t("单次会自动生成一条单集，直接使用这里填写的播出日期和时间。") }}</small>
+               <small v-if="period.frequency === 'monthly' && period.monthly_mode === 'irregular'">{{ t("仅新建节目时按时期开始日创建首期；开启后续自动生成时按每月 1 日生成占位单集。已有节目不补建首期。") }}</small>
+               <small v-else-if="period.frequency === 'individual'">{{ t("逐期设置不自动生成后续单集；仅新建节目时按时期开始日期和默认时间创建首期，已有节目不补建。") }}</small>
+               <small v-else-if="period.frequency === 'single'">{{ t("新建单次节目时按播出日期和时间创建一条单集，已有节目不补建首期。") }}</small>
             </div>
             <div v-if="period.frequency === 'weekly'" class="program-form-field">
                <span class="program-field-label">{{ t("更新间隔") }}</span>
@@ -1990,12 +2023,12 @@ onUnmounted(() => {
              <label v-else class="period-start-field">{{ t("时期开始") }}<VueDatePicker v-model="period.start_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" :locale="localeTag()" :enable-time-picker="false" auto-apply :clearable="false" :teleport="true" :placeholder="t('选择日期')" /></label>
              <label v-if="period.frequency !== 'single'" class="period-end-field">{{ t("时期结束") }}<VueDatePicker v-model="period.end_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" :locale="localeTag()" auto-apply :clearable="true" :teleport="true" :placeholder="t('留空表示进行中')" /><small>{{ index < form.periods.length - 1 ? t("用于划分下一个排期时期。") : t("填入结束日期后会自动标记为已完结；留空表示进行中。") }}</small></label>
              <label v-if="period.frequency !== 'individual' && period.frequency !== 'single'" class="period-auto-toggle program-field-wide">
-                <input v-model="period.auto_generate" type="checkbox" :disabled="saving || occurrenceSaving">
+                <input :checked="period.auto_generate" type="checkbox" :disabled="saving || occurrenceSaving" @change="setPeriodAutoGeneration(period, $event.target.checked)">
                 <span>
-                  <strong>{{ t("自动生成后续单集") }}</strong>
-                  <small v-if="period.frequency === 'monthly' && period.monthly_mode === 'irregular'">{{ t("按月生成单集：首期使用时期开始日，后续从每月 1 日作为占位；之后可在单集列表中直接修改每期原定日期和时间。") }}</small>
+                  <strong>{{ t("本时期自动生成后续单集") }}</strong>
+                  <small v-if="period.frequency === 'monthly' && period.monthly_mode === 'irregular'">{{ t("仅新建节目时按时期开始日创建首期；开启后续自动生成时按每月 1 日生成占位单集。已有节目不补建首期。") }}</small>
                   <small v-else-if="period.auto_generate">{{ t("按排期规则生成未来约半年的单集。") }}</small>
-                  <small v-else>{{ t("已关闭后续自动生成；无规律月更、逐期设置和单次仍保留时期开始日的首期，其他单集需手动添加。") }}</small>
+                  <small v-else>{{ t("已关闭后续自动生成；仅保留已保存单集，不会为已有节目补建首期。") }}</small>
                 </span>
               </label>
           </div>
@@ -2022,7 +2055,7 @@ onUnmounted(() => {
         <div class="occurrence-generation-bar">
            <label class="occurrence-auto-toggle">
              <input v-model="form.auto_generate" type="checkbox" :disabled="saving || occurrenceSaving" @change="saveAutoGeneration">
-              <span><strong>{{ t("自动生成后续单集") }}</strong><small>{{ form.auto_generate ? t("按排期规则生成未来约半年的单集。") : t("已关闭后续自动生成；无规律月更、逐期设置和单次仍保留时期开始日的首期，其他单集需手动添加。") }}</small></span>
+              <span><strong>{{ t("节目级自动生成后续单集") }}</strong><small>{{ occurrenceGenerationDescription }}</small></span>
           </label>
           <div class="occurrence-bulk-actions">
              <button v-if="form.periods.some(period => period.frequency === 'monthly' && period.monthly_mode !== 'irregular')" type="button" class="secondary program-action-button" :disabled="saving || occurrenceSaving" @click="convertMonthlyToIndividual">{{ t("固定月更 → 逐期设置") }}</button>

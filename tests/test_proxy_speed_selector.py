@@ -86,6 +86,23 @@ class ProxySpeedSelectorTests(unittest.TestCase):
         with patch("scripts.proxy_speed_selector.socket.getaddrinfo", return_value=records):
             self.assertFalse(speed_host_resolves_global("speed.example.com"))
 
+    def test_speed_url_dns_check_retries_doh_for_fake_ip_resolution(self):
+        records = [(2, 1, 6, "", ("198.18.1.230", 0))]
+        with (
+            patch("scripts.proxy_speed_selector.socket.getaddrinfo", return_value=records),
+            patch("scripts.proxy_speed_selector._doh_resolve_global", return_value=True) as resolve,
+        ):
+            self.assertTrue(speed_host_resolves_global("speed.example.com"))
+        resolve.assert_called_once_with("speed.example.com")
+
+    def test_speed_url_dns_check_rejects_private_doh_resolution(self):
+        records = [(2, 1, 6, "", ("198.18.1.230", 0))]
+        with (
+            patch("scripts.proxy_speed_selector.socket.getaddrinfo", return_value=records),
+            patch("scripts.proxy_speed_selector._doh_resolve_global", return_value=False),
+        ):
+            self.assertFalse(speed_host_resolves_global("speed.example.com"))
+
     def test_speed_url_validator_rejects_empty_query_or_fragment(self):
         for value in ("https://speed.example.com/test?", "https://speed.example.com/test#fragment"):
             with self.subTest(value=value):

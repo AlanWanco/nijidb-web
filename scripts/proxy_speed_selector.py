@@ -13,12 +13,14 @@ import argparse
 import asyncio
 import fcntl
 import hashlib
+import http.client
 import ipaddress
 import json
 import math
 import os
 import re
 import socket
+import ssl
 import stat
 import sys
 import time
@@ -28,6 +30,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
+
+DOH_RESOLVERS = (("1.1.1.1", "cloudflare-dns.com"), ("8.8.8.8", "dns.google"))
+DOH_TIMEOUT_SECONDS = 5
+DOH_MAX_RESPONSE_BYTES = 64 * 1024
+FAKE_IP_NETWORK = ipaddress.ip_network("198.18.0.0/15")
 
 import httpx
 
@@ -634,6 +641,69 @@ def speed_host_is_safe(host: str) -> bool:
     return "." in normalized and not any(ord(character) < 0x20 or ord(character) == 0x7F for character in normalized)
 
 
+def _doh_query(
+    host: str, record_type: str, resolver_ip: str, resolver_name: str
+) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    path = f"/dns-query?name={quote(host, safe='')}&type={record_type}"
+    raw_socket = None
+    tls_socket = None
+    try:
+        raw_socket = socket.create_connection((resolver_ip, 443), timeout=DOH_TIMEOUT_SECONDS)
+        context = ssl.create_default_context()
+        tls_socket = context.wrap_socket(raw_socket, server_hostname=resolver_name)
+        raw_socket = None
+        tls_socket.settimeout(DOH_TIMEOUT_SECONDS)
+        tls_socket.sendall(
+            (
+                f"GET {path} HTTP/1.1\r\n"
+                f"Host: {resolver_name}\r\n"
+                "Accept: application/dns-json\r\n"
+                "Connection: close\r\n\r\n"
+            ).encode("ascii")
+        )
+        response = http.client.HTTPResponse(tls_socket, method="GET")
+        response.begin()
+        if response.status != 200:
+            raise OSError(f"DoH HTTP {response.status}")
+        payload = response.read(DOH_MAX_RESPONSE_BYTES + 1)
+        if len(payload) > DOH_MAX_RESPONSE_BYTES:
+            raise OSError("DoH 响应过大")
+        decoded = json.loads(payload.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, ssl.SSLError) as exc:
+        raise OSError("DoH 查询失败") from exc
+    finally:
+        if tls_socket is not None:
+            tls_socket.close()
+        if raw_socket is not None:
+            raw_socket.close()
+    answers = decoded.get("Answer") if isinstance(decoded, dict) else None
+    if not isinstance(answers, list):
+        return []
+    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    expected_type = 1 if record_type == "A" else 28
+    for answer in answers:
+        if not isinstance(answer, dict) or answer.get("type") != expected_type:
+            continue
+        try:
+            addresses.append(ipaddress.ip_address(str(answer.get("data") or "")))
+        except ValueError:
+            raise OSError("DoH 地址格式无效")
+    return addresses
+
+
+def _doh_resolve_global(host: str) -> bool:
+    """Resolve through pinned DoH when the local network supplies mihomo fake IPs."""
+    for resolver_ip, resolver_name in DOH_RESOLVERS:
+        try:
+            addresses = _doh_query(host, "A", resolver_ip, resolver_name)
+            addresses.extend(_doh_query(host, "AAAA", resolver_ip, resolver_name))
+        except OSError:
+            continue
+        if addresses:
+            return all(address.is_global for address in addresses)
+    return False
+
+
 def speed_host_resolves_global(host: str) -> bool:
     """Reject DNS names that currently resolve to any private/non-global address."""
     address = _literal_ip(host)
@@ -646,14 +716,18 @@ def speed_host_resolves_global(host: str) -> bool:
     try:
         records = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
     except OSError:
-        return False
+        return _doh_resolve_global(host)
     addresses = set()
     for record in records:
         try:
             addresses.add(ipaddress.ip_address(record[4][0]))
         except (IndexError, ValueError):
             return False
-    return bool(addresses) and all(address.is_global for address in addresses)
+    if not addresses:
+        return _doh_resolve_global(host)
+    if all(address in FAKE_IP_NETWORK for address in addresses):
+        return _doh_resolve_global(host)
+    return all(address.is_global for address in addresses)
 
 
 def build_selector() -> ProxySpeedSelector:

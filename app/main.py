@@ -6589,7 +6589,9 @@ async def lifespan(_: FastAPI):
 
 
 class SafeStaticFiles(StaticFiles):
-    def file_response(self, full_path: str, stat_result, status_code: int = 200):  # type: ignore[no-untyped-def]
+    def file_response(
+        self, full_path: str, stat_result, scope: Any, status_code: int = 200
+    ):  # type: ignore[no-untyped-def]
         response = secure_file_response(
             Path(full_path),
             Path(self.directory),

@@ -55,6 +55,20 @@ class FrontendRoutingTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertFalse(main.is_frontend_route(path))
 
+    def test_static_assets_accept_starlette_scope_argument(self):
+        async def check() -> None:
+            with tempfile.TemporaryDirectory() as directory:
+                asset = Path(directory) / "app.js"
+                asset.write_text("console.log('ok');", encoding="utf-8")
+                static_app = main.SafeStaticFiles(directory=directory)
+                transport = httpx.ASGITransport(app=static_app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                    response = await client.get("/app.js")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.text, "console.log('ok');")
+
+        asyncio.run(check())
+
     def test_fallback_returns_404_for_unknown_paths(self):
         async def check() -> None:
             transport = httpx.ASGITransport(app=main.app)

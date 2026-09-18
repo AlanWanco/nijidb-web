@@ -25,8 +25,8 @@ RUN apk add --no-cache ca-certificates curl tzdata \
 # The release tag is refreshed upstream, so pin the downloaded bytes as well as
 # the source tag. Update these three values together when refreshing geo data.
 ARG GEO_RELEASE=latest
-ARG GEOSITE_SHA256=9e37f1c1e764a1772f5331b69b20f741944b033f0584aec4fc358330e2d869dd
-ARG GEOIP_METADB_SHA256=2483ea23514052425a64538aa502fc37263db797150c62bd2f6ad147ae61372b
+ARG GEOSITE_SHA256=e64f329023037e618fe179ac02be0a6600823ed0c27d1321d75d671af8df3a06
+ARG GEOIP_METADB_SHA256=731eb94f0f9dc42a47b864d642f9142bd40fd3c4be8d45a7bd9a33b47162cd78
 RUN set -eux; \
     curl -fsSL --retry 3 --retry-delay 3 --max-time 300 -o /tmp/geosite.dat \
         "https://github.com/MetaCubeX/meta-rules-dat/releases/download/${GEO_RELEASE}/geosite.dat"; \

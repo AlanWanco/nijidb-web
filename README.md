@@ -23,21 +23,9 @@ docker run -d --name nijidb-web -p 8000:8000 \
 
 ## R2 图片
 
-运行时封面、节目返图、新闻图片和联动立绘保存在 `/data/images`。`scripts/upload_images_to_r2.py` 使用 S3 API 将该目录增量上传到 Cloudflare R2，凭证只从环境变量读取，不要写入仓库。管理员新上传的节目返图、新闻图片和联动立绘也会在运行时直接上传到 R2；本地文件只作为备份。节目单集也支持保存不下载的 HTTP/HTTPS 图片直链。S3 Endpoint 仅用于上传；要让浏览器读取图片，还需要在 `R2_PUBLIC_BASE_URL` 填写 R2 自定义域名或 `r2.dev` 公共地址。
+运行时封面、节目返图、新闻图片和联动立绘保存在 `/data/images`。管理员新上传的节目返图、新闻图片和联动立绘会在运行时直接上传到 Cloudflare R2；本地文件只作为备份。官网新闻刷新服务会先把新新闻图片归档到 R2，再提交新闻；`scripts/remote_news_image_worker.py` 负责历史新闻图片补档。R2 S3 Endpoint 仅用于服务端上传；要让浏览器读取图片，还需要在 `R2_PUBLIC_BASE_URL` 填写 R2 自定义域名或 `r2.dev` 公共地址。
 
-```bash
-R2_ENDPOINT='https://你的账户.r2.cloudflarestorage.com' \
-R2_BUCKET='nijidb' \
-R2_ACCESS_KEY_ID='你的 Access Key ID' \
-R2_SECRET_ACCESS_KEY='你的 Secret Access Key' \
-R2_PUBLIC_BASE_URL='https://你的公开图片域名' \
-docker run --rm --mount source=nijidb-data,target=/data \
-  --mount type=bind,src="$PWD/scripts",dst=/scripts,readonly \
-  -e R2_ENDPOINT -e R2_BUCKET -e R2_ACCESS_KEY_ID -e R2_SECRET_ACCESS_KEY -e R2_PUBLIC_BASE_URL \
-  --entrypoint python nijidb-web /scripts/upload_images_to_r2.py --rewrite-db
-```
-
-`--rewrite-db` 会先在数据目录创建 SQLite 备份，再为发行、新闻和联动图片写入公开 R2 URL，同时改写发行详情 HTML。没有公开访问地址时可以省略该参数，仅执行图片上传。上传前会列出目标 prefix 的已有对象，按稳定 key 和文件大小跳过已存在文件，因此 SSH 断线或容器重启后可安全续传，不会从头重复上传；日志最后会报告新上传和跳过数量。确认数据库引用已同步后，可显式追加 `--delete-unused-news` 清理 R2 中未被数据库引用的 `news/` 与 `news-archive/` 对象（默认不会删除任何对象）。长任务应使用 detached 容器并通过 `docker logs -f <container>` 查看。后续同步只配置 Endpoint、Bucket 和 S3 凭证时，会自动把新封面上传到 R2；补充 `R2_PUBLIC_BASE_URL` 后，页面会优先读取 R2。正式迁移前可先运行 `uv run --locked python scripts/prepare_production_database.py --database /data/nijidb.sqlite3` 检查本地路径；确认新闻/联动 R2 URL 和发行 R2 改写都已就绪后，再追加 `--apply`。该脚本只清除 SQLite 本地路径、不删除本地备份文件，并会保留在线数据库备份。
+正式迁移前可运行 `uv run --locked python scripts/prepare_production_database.py --database /data/nijidb.sqlite3` 检查本地路径；该脚本只清除 SQLite 本地路径、不删除本地备份文件，并会保留在线数据库备份。
 
 ## 外部内容导入 API
 
@@ -77,7 +65,7 @@ docker run --rm --mount source=nijidb-data,target=/data \
 - 站点没有该文章 → 归档图片到 R2 后提交新增。
 - 站点已有、官网内容变化 → 重新归档图片并提交更新。
 - 站点已有、内容未变 → 跳过，不写入。
-- 站点已有但图片尚未归档（封面不是当前实例的 R2 地址）→ 补归档后提交。
+- 站点已有但图片尚未归档（封面不是当前实例的 R2 地址、站点图片数量不足，或上次仅部分图片成功）→ 补归档后提交。
 - 官网返回 403 → 退避（默认 30 分钟），并可通过控制接口自动切换出口节点。
 - 两趟之间随机等待 30–60 分钟，避免固定节奏。
 
@@ -93,7 +81,7 @@ docker run --rm --mount source=nijidb-data,target=/data \
 | --- | --- |
 | `NIJIDB_BASE_URL` | 站点地址，必填，无默认值 |
 | `NIJIDB_INGEST_API_KEY` | 新闻资源密钥，必填；已生成数据库密钥时用数据库密钥，否则回退到该环境变量 |
-| `NEWS_POLL_PROXY` | 访问官网使用的**单条固定代理**（如 `http://127.0.0.1:<port>`）；留空则直连 |
+| `NEWS_POLL_PROXY` | 访问官网使用的**单条固定代理**（容器部署使用 `http://mihomo:7890`）；生产轮询配置必填，不做轮换 |
 | `R2_ENDPOINT` / `R2_BUCKET` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_PUBLIC_BASE_URL` | R2 凭据与公开地址 |
 | `R2_IMAGE_PREFIX` | 默认 `images`；图片写入 `<prefix>/news-remote/<sha256>.<ext>` |
 | `NEWS_POLL_STATE_FILE` | 状态文件（基线、计数），默认 `~/.local/state/nijidb-news-poller/state.json` |
@@ -101,7 +89,7 @@ docker run --rm --mount source=nijidb-data,target=/data \
 | `NEWS_POLL_ARTICLE_DELAY_SECONDS` / `NEWS_POLL_IMAGE_DELAY_SECONDS` | 篇间/图间间隔，默认 30 / 10 |
 | `NEWS_POLL_REST_MIN_MINUTES` / `NEWS_POLL_REST_MAX_MINUTES` | 两趟之间的随机间隔区间，默认 30 / 60 |
 | `NEWS_POLL_BACKOFF_MINUTES` | 官网 403 后的退避时长，默认 30 |
-| `NEWS_POLL_NODE_API` / `NEWS_POLL_NODES` | 可选：403 时通过该控制接口切换出口节点（如本机 mihomo 的 `http://127.0.0.1:<port>`） |
+| `NEWS_POLL_NODES_FILE` / `NEWS_POLL_HINTS_FILE` | 可选：健康节点状态与本轮失败提示文件；配置后每趟从最近探测成功的 per-node 入口随机选一个 |
 
 站点密钥与 R2 凭据只放在运行机器上权限为 `600` 的环境文件里，不要写进仓库、状态文件或日志；
 状态文件只保存内容指纹与计数。密钥通过 HTTPS 请求头发送，不要放进 URL。

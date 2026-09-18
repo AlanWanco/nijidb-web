@@ -18,7 +18,11 @@ const tracks = computed(() => release.value?.tracks || []);
 const specs = computed(() => Object.entries(release.value?.specs || {}).filter(([key]) => !hiddenSpecs.has(key)));
 const extras = computed(() => release.value?.extras || []);
 const safeDetailHtml = computed(() => {
-  const sanitized = DOMPurify.sanitize(release.value?.detail_html || "", { ADD_ATTR: ["loading"] });
+  const sanitized = DOMPurify.sanitize(release.value?.detail_html || "", {
+    ADD_ATTR: ["loading"],
+    FORBID_ATTR: ["srcset", "style"],
+    ALLOW_DATA_ATTR: false,
+  });
   const parsed = new DOMParser().parseFromString(`<body>${sanitized}</body>`, "text/html");
   parsed.body.querySelectorAll("img").forEach(image => image.setAttribute("loading", "lazy"));
   return parsed.body.innerHTML;

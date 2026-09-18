@@ -1,13 +1,55 @@
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 
-export function newsHref(value, base) {
-  if (!String(value || "").trim()) return "";
+const OFFICIAL_IMAGE_HOSTS = new Set([
+  "www.lovelive-anime.jp",
+  "lovelive-anime.jp",
+  "lovelive-as.bushimo.jp",
+  "img.sunrise-inc.co.jp",
+  "img.sunrise-inc.jp",
+]);
+
+function hasEmptyPort(raw) {
+  const match = raw.match(/^(?:[a-z][a-z\d+.-]*:)?\/\/([^/?#]*)/i);
+  return Boolean(match?.[1]?.endsWith(":"));
+}
+
+function safePath(path) {
   try {
-    const url = new URL(String(value || ""), base || window.location.origin);
+    const decoded = decodeURIComponent(path);
+    if (/[\u0000-\u001f\u007f\\]/.test(decoded)) return false;
+    const parts = decoded.split("/");
+    return !parts.some((part, index) => part === "." || part === ".." || (index > 0 && index < parts.length - 1 && !part));
+  } catch {
+    return false;
+  }
+}
+
+function safeImageUrl(value, base) {
+  const raw = String(value || "").trim();
+  if (raw.includes("#")) return "";
+  const href = newsHref(raw, base);
+  if (!href) return "";
+  try {
+    const url = new URL(href);
+    return url.protocol === "https:" && !url.hash && (!url.port || url.port === "443") && OFFICIAL_IMAGE_HOSTS.has(url.hostname) ? href : "";
+  } catch {
+    return "";
+  }
+}
+
+export function newsHref(value, base) {
+  const raw = String(value || "").trim();
+  if (!raw || /[\u0000-\u001f\u007f\\]/.test(raw) || raw.includes("#") || hasEmptyPort(raw)) return "";
+  try {
+    const url = new URL(raw, base || window.location.origin);
+    const port = url.port ? Number(url.port) : null;
     return ["http:", "https:"].includes(url.protocol) &&
       !url.username &&
-      !url.password
+      !url.password &&
+      safePath(url.pathname) &&
+      !(raw.includes("?") && !url.search) &&
+      (port === null || Number.isInteger(port) && port > 0 && port <= 65535)
       ? url.href
       : "";
   } catch {
@@ -57,9 +99,7 @@ export function renderNewsMarkdown(value, article = {}) {
         entry.local_path?.replace(/^archive:/, "") === local ||
         entry.source_url === raw,
     );
-    const url =
-      reference?.url ||
-      (local.startsWith("pic/") ? "" : newsHref(raw, article.source_url));
+    const url = reference?.url || (local.startsWith("pic/") ? "" : safeImageUrl(raw, article.source_url));
     if (!url || !newsHref(url)) {
       image.replaceWith(document.createTextNode(image.alt || ""));
       continue;

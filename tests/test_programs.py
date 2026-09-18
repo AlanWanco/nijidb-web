@@ -437,7 +437,14 @@ class ProgramImageApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(direct.json()["image"]["kind"], "external")
         self.assertEqual(direct.json()["image"]["url"], "https://cdn.example.com/live.jpg")
 
-        content = b"\x89PNG\r\n\x1a\nprogram-photo"
+        content = (
+            b"\x89PNG\r\n\x1a\n"
+            + b"\x00\x00\x00\rIHDR"
+            + (640).to_bytes(4, "big")
+            + (360).to_bytes(4, "big")
+            + b"\x08\x02\x00\x00\x00\x00\x00\x00\x00"
+            + b"program-photo"
+        )
         uploaded = await self.client.post(
             endpoint,
             content=content,

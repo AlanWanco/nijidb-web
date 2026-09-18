@@ -6,7 +6,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
+import stat
+import tempfile
 from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
@@ -22,6 +25,7 @@ WAYBACK_ROOT = ROOT / "data/illustration-wayback-cache"
 WAYBACK_API = "https://web.archive.org/cdx/search/cdx"
 WAYBACK_BASE = "https://web.archive.org/web"
 USER_AGENT = "nijidb-collaboration-illustration-collector/1.0"
+MAX_CACHE_BYTES = 16 * 1024 * 1024
 
 
 def canonical(url: str) -> str:
@@ -45,21 +49,45 @@ def capture_cache_path(prefix: str, match_type: str) -> Path:
     return WAYBACK_ROOT / f"captures-{match_type}-{collector.cache_key(prefix)}.json"
 
 
-def load_capture_cache(prefix: str, match_type: str) -> list[dict[str, str]] | None:
-    path = capture_cache_path(prefix, match_type)
-    if not path.exists():
-        return None
+def load_json_cache(path: Path) -> Any | None:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_CACHE_BYTES:
+            return None
+        return json.loads(path.read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
+
+
+def save_json_cache(path: Path, payload: Any) -> None:
+    if WAYBACK_ROOT.is_symlink():
+        raise RuntimeError("Wayback 缓存目录不能是符号链接")
+    WAYBACK_ROOT.mkdir(parents=True, exist_ok=True)
+    content = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    if len(content.encode("utf-8")) > MAX_CACHE_BYTES:
+        raise RuntimeError("Wayback 缓存超过 16 MB 限制")
+    descriptor, raw_temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=WAYBACK_ROOT)
+    temporary = Path(raw_temporary)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def load_capture_cache(prefix: str, match_type: str) -> list[dict[str, str]] | None:
+    cached = load_json_cache(capture_cache_path(prefix, match_type))
+    return cached if isinstance(cached, list) else None
 
 
 def save_capture_cache(prefix: str, match_type: str, captures: list[dict[str, str]]) -> None:
-    WAYBACK_ROOT.mkdir(parents=True, exist_ok=True)
-    capture_cache_path(prefix, match_type).write_text(
-        json.dumps(captures, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    save_json_cache(capture_cache_path(prefix, match_type), captures)
 
 
 def parse_cdx(content: bytes) -> list[dict[str, str]]:
@@ -94,12 +122,15 @@ async def fetch_cdx(
         params["collapse"] = collapse
     for attempt in range(5):
         try:
-            response = await client.get(WAYBACK_API, params=params, timeout=180)
-            if response.status_code == 200:
-                captures = parse_cdx(response.content)
+            request_url = str(httpx.URL(WAYBACK_API, params=params))
+            status_code, _, _, content = await collector.bounded_get(
+                client, request_url, MAX_CACHE_BYTES, timeout=180
+            )
+            if status_code == 200:
+                captures = parse_cdx(content)
                 save_capture_cache(prefix, cache_type, captures)
                 return captures
-        except (httpx.HTTPError, json.JSONDecodeError):
+        except (httpx.HTTPError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
             pass
         await asyncio.sleep(6 * (attempt + 1))
     save_capture_cache(prefix, cache_type, [])
@@ -158,20 +189,12 @@ def page_cache_path(url: str) -> Path:
 
 
 def load_archived_page_cache(url: str) -> dict[str, Any] | None:
-    path = page_cache_path(url)
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
+    cached = load_json_cache(page_cache_path(url))
+    return cached if isinstance(cached, dict) else None
 
 
 def save_archived_page_cache(url: str, payload: dict[str, Any]) -> None:
-    WAYBACK_ROOT.mkdir(parents=True, exist_ok=True)
-    page_cache_path(url).write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    save_json_cache(page_cache_path(url), payload)
 
 
 async def fetch_archived_candidates(
@@ -192,18 +215,18 @@ async def fetch_archived_candidates(
         ):
             return cached
     try:
-        response = await client.get(archived_url, follow_redirects=True, timeout=90)
-        content_type = response.headers.get("content-type", "")
-        if response.is_success and "html" in content_type:
-            page_title, candidates = collector.extract_page_candidates(
-                response.content, original_url, item
-            )
+        status_code, response_headers, final_url, content = await collector.bounded_get(
+            client, archived_url, MAX_CACHE_BYTES, timeout=90
+        )
+        content_type = response_headers.get("content-type", "")
+        if 200 <= status_code < 300 and "html" in content_type:
+            page_title, candidates = collector.extract_page_candidates(content, original_url, item)
             candidates = rewrite_archived_relative_candidates(candidates, original_url, timestamp)
             payload = {
                 "original_url": original_url,
                 "timestamp": timestamp,
-                "archived_url": str(response.url),
-                "status": response.status_code,
+                "archived_url": final_url,
+                "status": status_code,
                 "page_title": page_title,
                 "candidates": candidates,
                 "error": "",
@@ -212,13 +235,13 @@ async def fetch_archived_candidates(
             payload = {
                 "original_url": original_url,
                 "timestamp": timestamp,
-                "archived_url": str(response.url),
-                "status": response.status_code,
+                "archived_url": final_url,
+                "status": status_code,
                 "page_title": "",
                 "candidates": [],
-                "error": f"HTTP {response.status_code} {content_type}",
+                "error": f"HTTP {status_code} {content_type}",
             }
-    except (httpx.HTTPError, UnicodeError) as exc:
+    except (httpx.HTTPError, UnicodeError, ValueError) as exc:
         payload = {
             "original_url": original_url,
             "timestamp": timestamp,
@@ -245,12 +268,8 @@ def bulk_prefixes() -> list[str]:
 
 
 def load_manifest() -> dict[str, Any]:
-    if not collector.MANIFEST_PATH.exists():
-        return {"items": {}}
-    try:
-        return json.loads(collector.MANIFEST_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {"items": {}}
+    payload = collector.load_existing_manifest()
+    return payload if isinstance(payload, dict) else {"items": {}}
 
 
 async def recover(
@@ -273,7 +292,13 @@ async def recover(
     headers = {"User-Agent": USER_AGENT, "Accept-Language": "ja,en;q=0.8"}
     semaphore = asyncio.Semaphore(concurrency)
     captures_by_url: dict[str, list[dict[str, str]]] = defaultdict(list)
-    async with httpx.AsyncClient(headers=headers, limits=limits) as client:
+    async with httpx.AsyncClient(
+        headers=headers,
+        limits=limits,
+        trust_env=False,
+        follow_redirects=False,
+        transport=collector.PublicOnlyTransport(limits),
+    ) as client:
         async def load_prefix(prefix: str) -> None:
             async with semaphore:
                 captures = await fetch_cdx(client, prefix, refresh=refresh)

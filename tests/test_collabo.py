@@ -119,6 +119,18 @@ class CollaborationStorageTests(unittest.TestCase):
         self.assertFalse(collaboration_combination_matches(initial9[:-1], "initial9"))
         self.assertFalse(collaboration_combination_matches(["ayumu", "shizuku", "setsuna"], "azuna"))
 
+    def test_invalid_related_link_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "有效的 HTTP/HTTPS 地址"):
+            upsert_collaboration_item(
+                self.conn,
+                {
+                    "id": "e" * 16,
+                    "title": "非法链接",
+                    "date": "2026-09-11",
+                    "links": [{"title": "恶意", "url": "javascript:alert(1)"}],
+                },
+            )
+
     def test_period_requires_title_or_description(self) -> None:
         with self.assertRaisesRegex(ValueError, "标题或描述"):
             upsert_collaboration_item(

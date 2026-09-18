@@ -10,7 +10,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urljoin
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from bs4 import BeautifulSoup
 
@@ -24,6 +24,7 @@ SOURCE_URL = (
     "%c6%fa%a5%f6%ba%e9%c9%c1%a4%ad%b2%bc%a4%ed%a4%b7%a5%a4%a5%e9%a5%b9%a5%c8%b0%ec%cd%f7"
 )
 DEFAULT_OUTPUT = Path(__file__).resolve().parents[1] / "frontend/src/content/collaborationIllustrations.json"
+MAX_SOURCE_BYTES = 8 * 1024 * 1024
 
 
 def fetch_source() -> bytes:
@@ -34,8 +35,21 @@ def fetch_source() -> bytes:
             "User-Agent": "nijidb-collaboration-import/1.0",
         },
     )
-    with urlopen(request, timeout=30) as response:
-        return response.read()
+    class NoRedirectHandler(HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    with build_opener(ProxyHandler({}), NoRedirectHandler()).open(request, timeout=30) as response:
+        try:
+            announced_length = int(response.headers.get("Content-Length", "0") or 0)
+        except (TypeError, ValueError, OverflowError):
+            announced_length = 0
+        if announced_length > MAX_SOURCE_BYTES:
+            raise ValueError("来源页面超过 8 MB 限制")
+        content = response.read(MAX_SOURCE_BYTES + 1)
+        if len(content) > MAX_SOURCE_BYTES:
+            raise ValueError("来源页面超过 8 MB 限制")
+        return content
 
 
 def normalize_lines(cell) -> list[str]:

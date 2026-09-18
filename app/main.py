@@ -6,10 +6,12 @@ import difflib
 import hashlib
 import hmac
 import json
+import math
 import mimetypes
 import re
 import os
 import secrets
+import stat
 import sqlite3
 import time as time_module
 from contextlib import asynccontextmanager
@@ -20,6 +22,7 @@ from urllib.parse import quote, unquote, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 import boto3
+from botocore.exceptions import ClientError
 import httpx
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Request
@@ -54,6 +57,7 @@ from app.news import (
     normalize_news_date,
     news_article_tag_ids,
     news_id,
+    news_image_dimensions_allowed,
     news_source_group,
     news_tag_catalog,
     news_tag_id_for_slug,
@@ -70,9 +74,13 @@ from app.news import (
 from app.news_fetch import (
     NEWS_HEADERS,
     OFFICIAL_BROWSER_HEADERS,
+    OFFICIAL_IMAGE_HOSTS,
     describe_news_fetch_error,
     fetch_news_page,
     filter_news_images,
+    image_dimensions_from_bytes,
+    is_allowed_official_image_url,
+    is_avif_bytes,
     validate_news_url,
 )
 
@@ -155,6 +163,16 @@ COLLABORATION_INDEX_PATHS = (
 NEWS_ARCHIVE_DEFAULT = Path("/Volumes/SSK/Download/bangumi-parser/ll-offical-site")
 NEWS_ARCHIVE_DIR = Path(os.getenv("NEWS_ARCHIVE_DIR", str(NEWS_ARCHIVE_DEFAULT if NEWS_ARCHIVE_DEFAULT.is_dir() else MEDIA_DIR / "news-archive")))
 NEWS_RUNTIME_DIR = MEDIA_DIR / "news"
+
+
+def ensure_runtime_directory(path: Path, label: str) -> None:
+    if path.is_symlink():
+        raise RuntimeError(f"{label} 不能是符号链接")
+    path.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink() or not path.is_dir():
+        raise RuntimeError(f"{label} 不是安全的目录")
+
+
 PASSWORD_ITERATIONS = 310_000
 BACKUP_RETENTION_COUNT = 30
 ADMIN_ROLE = "admin"
@@ -184,9 +202,9 @@ R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "").strip()
 R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "").strip()
 R2_PUBLIC_BASE_URL = os.getenv("R2_PUBLIC_BASE_URL", "").strip().rstrip("/")
 R2_IMAGE_PREFIX = os.getenv("R2_IMAGE_PREFIX", "images").strip("/")
-MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-NEWS_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+ensure_runtime_directory(MEDIA_DIR, "媒体目录")
+ensure_runtime_directory(NEWS_RUNTIME_DIR, "新闻媒体目录")
+ensure_runtime_directory(BACKUP_DIR, "数据库备份目录")
 os.chmod(BACKUP_DIR, 0o700)
 stop_event = asyncio.Event()
 sync_lock = asyncio.Lock()
@@ -213,14 +231,44 @@ def remove_file(path: Path) -> None:
 
 
 def backup_database_to(destination: Path) -> None:
+    """Create a snapshot through an exclusive descriptor, never reopening a path."""
     source = db()
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination_connection = sqlite3.connect(destination)
+    descriptor = -1
+    directory_fd = -1
+    created = False
     try:
-        source.backup(destination_connection)
-        destination_connection.commit()
+        if destination.parent.is_symlink():
+            raise RuntimeError("数据库备份目录不能是符号链接")
+        payload = source.serialize()
+        directory_fd = _open_directory_chain(destination.parent, (), create=True)
+        descriptor = os.open(
+            destination.name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        created = True
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("数据库备份写入失败")
+            view = view[written:]
+        os.fsync(descriptor)
+    except Exception:
+        if created:
+            try:
+                os.unlink(destination.name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                remove_file(destination)
+        raise
     finally:
-        destination_connection.close()
+        if descriptor >= 0:
+            os.close(descriptor)
+        if directory_fd >= 0:
+            os.close(directory_fd)
         source.close()
 
 
@@ -228,10 +276,12 @@ def prune_database_backups() -> int:
     candidates = []
     for path in BACKUP_DIR.glob("nijidb-backup-*.sqlite3"):
         try:
-            stat = path.stat()
+            metadata = path.lstat()
+            if not stat.S_ISREG(metadata.st_mode):
+                continue
         except OSError:
             continue
-        candidates.append((stat.st_mtime_ns, path.name, path))
+        candidates.append((metadata.st_mtime_ns, path.name, path))
     candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
     removed = 0
     for _, _, path in candidates[BACKUP_RETENTION_COUNT:]:
@@ -271,13 +321,15 @@ def list_database_backups() -> list[dict[str, Any]]:
     backups = []
     for path in BACKUP_DIR.glob("nijidb-backup-*.sqlite3"):
         try:
-            stat = path.stat()
+            metadata = path.lstat()
+            if not stat.S_ISREG(metadata.st_mode):
+                continue
         except OSError:
             continue
         backups.append({
             "filename": path.name,
-            "size": stat.st_size,
-            "created_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            "size": metadata.st_size,
+            "created_at": datetime.fromtimestamp(metadata.st_mtime, timezone.utc).isoformat(),
             "reason": backup_reason(path.name),
         })
     return sorted(backups, key=lambda item: item["created_at"], reverse=True)
@@ -286,12 +338,16 @@ def list_database_backups() -> list[dict[str, Any]]:
 def resolve_database_backup(filename: str) -> Path:
     if Path(filename).name != filename or not filename.endswith(".sqlite3"):
         raise ValueError("数据库备份文件名无效")
-    path = (BACKUP_DIR / filename).resolve()
+    if BACKUP_DIR.is_symlink():
+        raise ValueError("数据库备份目录不能是符号链接")
+    path = BACKUP_DIR / filename
     try:
-        path.relative_to(BACKUP_DIR.resolve())
-    except ValueError as exc:
+        metadata = path.lstat()
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(filename) from exc
+    except OSError as exc:
         raise ValueError("数据库备份文件路径无效") from exc
-    if not path.is_file():
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
         raise FileNotFoundError(filename)
     return path
 
@@ -657,6 +713,9 @@ def public_settings() -> dict[str, str]:
     values = settings()
     values.pop("admin_password_hash", None)
     values.pop("editor_password_hash", None)
+    # OneBot credentials are only needed by the server-side notifier. Never
+    # return the token to a browser, even on an authenticated admin request.
+    values.pop("onebot_token", None)
     return values
 
 
@@ -748,11 +807,25 @@ def decode_json(value: str | None, fallback: Any) -> Any:
         return fallback
 
 
+def valid_official_image_url(value: Any) -> bool:
+    return is_allowed_official_image_url(value)
+
+
 def release_payload(row: sqlite3.Row) -> dict[str, Any]:
     payload = dict(row)
     payload["tracks"] = decode_json(payload.pop("tracks_json", ""), [])
     payload["specs"] = decode_json(payload.pop("spec_json", ""), {})
-    payload["extras"] = decode_json(payload.pop("extras_json", ""), [])
+    raw_extras = decode_json(payload.pop("extras_json", ""), [])
+    payload["extras"] = [
+        {
+            **extra,
+            "url": safe_program_link(extra.get("url")),
+        }
+        for extra in raw_extras
+        if isinstance(extra, dict)
+    ] if isinstance(raw_extras, list) else []
+    payload["cover_url"] = safe_program_link(payload.get("cover_url"))
+    payload["source_url"] = safe_program_link(payload.get("source_url"))
     return payload
 
 
@@ -802,9 +875,13 @@ def boolean_value(value: Any, default: bool = False) -> bool:
 def integer_value(value: Any, label: str, minimum: int, maximum: int) -> int:
     if value in (None, ""):
         return 0
+    if isinstance(value, bool) or (
+        isinstance(value, float) and (not math.isfinite(value) or not value.is_integer())
+    ):
+        raise ValueError(f"{label}必须是数字")
     try:
         result = int(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"{label}必须是数字") from exc
     if not minimum <= result <= maximum:
         raise ValueError(f"{label}范围为 {minimum}–{maximum}")
@@ -850,10 +927,21 @@ def normalized_program_link(value: Any, label: str, allow_bilibili_id: bool = Fa
         return ""
     if allow_bilibili_id and BILIBILI_BV_PATTERN.fullmatch(raw):
         return f"BV{raw[2:]}"
-    parsed = urlparse(raw)
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
-        raise ValueError(f"{label}需要填写完整的 HTTP/HTTPS 地址或有效的 BV 号")
+    try:
+        # Program links are rendered for visitors; never persist credentials,
+        # invalid ports, control characters, or ambiguous backslash URLs.
+        if not valid_external_url(raw):
+            raise ValueError
+    except ValueError as exc:
+        raise ValueError(f"{label}需要填写完整的无凭据 HTTP/HTTPS 地址或有效的 BV 号") from exc
     return raw
+
+
+def safe_program_link(value: Any, allow_bilibili_id: bool = False) -> str:
+    raw = str(value or "").strip()
+    if allow_bilibili_id and BILIBILI_BV_PATTERN.fullmatch(raw):
+        return f"BV{raw[2:]}"
+    return raw if valid_external_url(raw) else ""
 
 
 def normalized_occurrence_images(value: Any) -> list[dict[str, str]]:
@@ -928,15 +1016,269 @@ def program_occurrence_image_target(row: sqlite3.Row | dict[str, Any]) -> Path |
     local_path = str(row.get("local_path", "") if isinstance(row, dict) else row["local_path"] or "").strip()
     if not local_path:
         return None
+    raw_parts = local_path.split("/")
     relative = Path(local_path)
-    if relative.is_absolute() or ".." in relative.parts or "\x00" in local_path:
+    if (
+        relative.is_absolute()
+        or any(not part or part in {".", ".."} for part in raw_parts)
+        or "\x00" in local_path
+        or "?" in local_path
+        or "#" in local_path
+        or "\\" in local_path
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in local_path)
+    ):
         return None
-    target = (MEDIA_DIR / relative).resolve()
+    root = MEDIA_DIR.resolve()
+    target = root / relative
+    for index, _ in enumerate(relative.parts, start=1):
+        target_part = root.joinpath(*relative.parts[:index])
+        try:
+            if target_part.is_symlink():
+                return None
+        except OSError:
+            return None
     try:
-        target.relative_to(MEDIA_DIR.resolve())
+        target.relative_to(root)
     except ValueError:
         return None
     return target if target.is_file() else None
+
+
+def _relative_path_parts(relative: Path) -> tuple[str, ...]:
+    parts = tuple(relative.parts)
+    if (
+        not parts
+        or relative.is_absolute()
+        or any(
+            not part
+            or part in {".", ".."}
+            or "\\" in part
+            or "\x00" in part
+            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in part)
+            for part in parts
+        )
+    ):
+        raise ValueError("本地图片路径格式无效")
+    return parts
+
+
+def _open_directory_chain(root: Path, parts: tuple[str, ...], *, create: bool = False) -> int:
+    """Open a directory and its children without following database-controlled symlinks."""
+    root_path = root.absolute()
+    if root_path.is_symlink():
+        raise ValueError("本地文件根目录不能是符号链接")
+    if create:
+        root_path.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(root_path, flags)
+    try:
+        for part in parts:
+            if create:
+                try:
+                    os.mkdir(part, 0o755, dir_fd=directory_fd)
+                except FileExistsError:
+                    pass
+            next_fd = os.open(part, flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        return directory_fd
+    except Exception:
+        os.close(directory_fd)
+        raise
+
+
+def write_new_local_file(root: Path, relative: Path, content: bytes) -> tuple[Path, bool]:
+    """Create a content-addressed file under ``root`` using no-follow directory FDs."""
+    parts = _relative_path_parts(relative)
+    root_path = root.resolve()
+    if root.is_symlink():
+        raise ValueError("图片保存目录不能包含符号链接")
+    directory_fd = _open_directory_chain(root_path, parts[:-1], create=True)
+    target = root_path.joinpath(*parts)
+    temporary_name = f".{parts[-1]}.{os.getpid()}.{secrets.token_hex(12)}.tmp"
+    temporary_fd = -1
+    created = False
+    try:
+        try:
+            existing_fd = os.open(parts[-1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        else:
+            try:
+                if not stat.S_ISREG(os.fstat(existing_fd).st_mode):
+                    raise ValueError("图片目标不是普通文件")
+            finally:
+                os.close(existing_fd)
+            return target, False
+
+        temporary_fd = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        with os.fdopen(temporary_fd, "wb") as handle:
+            temporary_fd = -1
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary_name, parts[-1], src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            created = True
+        except FileExistsError:
+            # Another request won the same digest race. Keep its file and do
+            # not let a failed upload from this request remove it later.
+            existing_stat = os.stat(parts[-1], dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISLNK(existing_stat.st_mode) or not stat.S_ISREG(existing_stat.st_mode):
+                raise ValueError("图片目标不是普通文件")
+        os.fsync(directory_fd)
+        return target, created
+    finally:
+        if temporary_fd >= 0:
+            os.close(temporary_fd)
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        finally:
+            os.close(directory_fd)
+
+
+def replace_local_file(root: Path, relative: Path, content: bytes) -> None:
+    """Atomically replace one regular file without following database-controlled symlinks."""
+    parts = _relative_path_parts(relative)
+    if root.is_symlink():
+        raise ValueError("图片保存目录不能包含符号链接")
+    directory_fd = _open_directory_chain(root, parts[:-1], create=True)
+    temporary_name = f".{parts[-1]}.{os.getpid()}.{secrets.token_hex(12)}.tmp"
+    temporary_fd = -1
+    try:
+        temporary_fd = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        with os.fdopen(temporary_fd, "wb") as handle:
+            temporary_fd = -1
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, parts[-1], src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    finally:
+        if temporary_fd >= 0:
+            os.close(temporary_fd)
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        finally:
+            os.close(directory_fd)
+
+
+def unlink_local_file(root: Path, relative: Path) -> None:
+    """Unlink one local file without following a replaced parent directory."""
+    parts = _relative_path_parts(relative)
+    directory_fd = -1
+    try:
+        directory_fd = _open_directory_chain(root, parts[:-1])
+        try:
+            os.unlink(parts[-1], dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+    except (OSError, ValueError):
+        pass
+    finally:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+
+
+def _open_relative_regular_file(root: Path, relative: Path) -> tuple[int, os.stat_result] | None:
+    parts = _relative_path_parts(relative)
+    directory_fd = -1
+    file_fd = -1
+    try:
+        directory_fd = _open_directory_chain(root, parts[:-1])
+        file_fd = os.open(parts[-1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd)
+        metadata = os.fstat(file_fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            os.close(file_fd)
+            file_fd = -1
+            return None
+        return file_fd, metadata
+    except (OSError, ValueError):
+        if file_fd >= 0:
+            os.close(file_fd)
+        return None
+    finally:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+
+
+class DescriptorFileResponse(FileResponse):
+    """Serve an already-open descriptor so validation cannot race with opening."""
+
+    def __init__(self, descriptor: int, metadata: os.stat_result, **kwargs: Any):
+        self._descriptor = descriptor
+        fd_root = Path("/dev/fd") if Path("/dev/fd").is_dir() else Path("/proc/self/fd")
+        if not fd_root.is_dir():
+            raise OSError("当前系统没有可用的文件描述符路径")
+        super().__init__(fd_root / str(descriptor), stat_result=metadata, **kwargs)
+
+    async def __call__(self, scope, receive, send):  # type: ignore[no-untyped-def]
+        # Uvicorn's pathsend extension would make the server open the path
+        # after the response returns. Stream through Starlette instead while
+        # the descriptor remains owned by this response.
+        extensions = scope.get("extensions")
+        if extensions and "http.response.pathsend" in extensions:
+            scope = dict(scope)
+            scope["extensions"] = {key: value for key, value in extensions.items() if key != "http.response.pathsend"}
+        try:
+            return await super().__call__(scope, receive, send)
+        finally:
+            try:
+                os.close(self._descriptor)
+            except OSError:
+                pass
+
+
+def secure_file_response(
+    target: Path,
+    root: Path,
+    *,
+    status_code: int = 200,
+    media_type: str | None = None,
+    filename: str | None = None,
+) -> FileResponse | None:
+    try:
+        if root.is_symlink():
+            return None
+        lexical_target = target.absolute()
+        lexical_root = root.absolute()
+        try:
+            relative = lexical_target.relative_to(lexical_root)
+        except ValueError:
+            # StaticFiles may return a realpath while the configured directory
+            # still contains a macOS /var -> /private/var alias.
+            relative = lexical_target.parent.resolve().relative_to(lexical_root.resolve()) / lexical_target.name
+        opened = _open_relative_regular_file(lexical_root, relative)
+        if not opened:
+            return None
+        descriptor, metadata = opened
+        try:
+            return DescriptorFileResponse(
+                descriptor,
+                metadata,
+                status_code=status_code,
+                media_type=media_type or mimetypes.guess_type(target.name)[0],
+                filename=filename,
+            )
+        except Exception:
+            os.close(descriptor)
+            raise
+    except (OSError, ValueError):
+        return None
 
 
 def program_occurrence_image_url(row: sqlite3.Row | dict[str, Any]) -> str:
@@ -962,9 +1304,17 @@ def program_occurrence_image_payload(row: sqlite3.Row | dict[str, Any]) -> dict[
         "position": row["position"],
         "kind": str(row.get("kind", "") if isinstance(row, dict) else row["kind"] or ""),
         "url": url,
-        "source_url": str(row.get("source_url", "") if isinstance(row, dict) else row["source_url"] or ""),
+        "source_url": (
+            str(row.get("source_url", "") if isinstance(row, dict) else row["source_url"] or "")
+            if valid_external_url(row.get("source_url", "") if isinstance(row, dict) else row["source_url"])
+            else ""
+        ),
         "local_path": str(row.get("local_path", "") if isinstance(row, dict) else row["local_path"] or ""),
-        "public_url": str(row.get("public_url", "") if isinstance(row, dict) else row["public_url"] or ""),
+        "public_url": (
+            str(row.get("public_url", "") if isinstance(row, dict) else row["public_url"] or "")
+            if valid_external_url(row.get("public_url", "") if isinstance(row, dict) else row["public_url"])
+            else ""
+        ),
         "alt_text": alt_text,
         "alt": alt_text,
         "width": row["width"],
@@ -985,8 +1335,9 @@ def occurrence_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     delivery = str(payload.get("delivery") or "").strip()
     payload["delivery"] = delivery if delivery in PROGRAM_DELIVERIES else ""
     payload["shift_following_days"] = occurrence_shift_days(payload.get("shift_following_days"))
-    for key in ("source_url", "mirror_url", "subtitle_url"):
-        payload[key] = str(payload.get(key) or "").strip()
+    payload["source_url"] = safe_program_link(payload.get("source_url"))
+    payload["mirror_url"] = safe_program_link(payload.get("mirror_url"), True)
+    payload["subtitle_url"] = safe_program_link(payload.get("subtitle_url"), True)
     payload["materialized"] = boolean_value(payload.get("materialized"), False)
     if payload.get("status") == "scheduled" and payload.get("adjusted_date"):
         payload["status"] = "rescheduled"
@@ -1102,6 +1453,7 @@ def program_payload(
     payload.pop("mirror_url", None)
     payload.pop("subtitle_url", None)
     payload["people"] = program_people(payload.get("people", ""))
+    payload["official_url"] = safe_program_link(payload.get("official_url"))
     payload["auto_generate"] = boolean_value(payload.get("auto_generate"), True)
     payload["week_interval"] = int(payload.get("week_interval") or 1)
     payload["monthly_mode"] = (
@@ -1348,8 +1700,8 @@ def import_payload_options(payload: dict[str, Any]) -> dict[str, str]:
         raise ValueError("import_options 必须是对象")
 
     try:
-        version = int(payload.get("_version") or 1)
-    except (TypeError, ValueError):
+        version = integer_value(payload.get("_version") or 1, "_version", 1, 1_000_000)
+    except ValueError:
         version = 1
     schedule_mode = import_choice(raw_options.get("schedule_mode"), {
         "当前设置": "current", "current": "current",
@@ -1589,7 +1941,7 @@ def normalize_import_periods(values: dict[str, Any]) -> dict[str, Any]:
         if source["monthly_mode"] == "irregular":
             source["week_index"] = 0
         elif "week_index" not in source:
-            number = int(source.get("week_number") or 1)
+            number = integer_value(source.get("week_number") or 1, "第几周", 1, 5)
             source["week_index"] = -number if str(source.get("week_direction") or "first") in {"last", "倒数"} else number
     else:
         source["monthly_mode"] = "week"
@@ -2246,9 +2598,9 @@ def occurrence_record(
         "shift_following_days": shift_following_days,
         "schedule_shift_days": schedule_shift_days,
         "shifted_by_reschedule": shifted_by_reschedule,
-        "source_url": str(override.get("source_url") or "").strip(),
-        "mirror_url": str(override.get("mirror_url") or "").strip(),
-        "subtitle_url": str(override.get("subtitle_url") or "").strip(),
+        "source_url": safe_program_link(override.get("source_url")),
+        "mirror_url": safe_program_link(override.get("mirror_url"), True),
+        "subtitle_url": safe_program_link(override.get("subtitle_url"), True),
         "date": date.fromisoformat(event_date),
         "time": event_time,
         "timezone": timezone or program.get("timezone", "Asia/Tokyo"),
@@ -3200,7 +3552,7 @@ def set_admin_cookie(response: JSONResponse) -> None:
     set_auth_cookie(response, ADMIN_ROLE)
 
 
-def normalized_settings(values: dict[str, Any]) -> dict[str, str]:
+def normalized_settings(values: dict[str, Any], *, include_onebot_token: bool = True) -> dict[str, str]:
     try:
         interval = max(5, min(MAX_POLL_INTERVAL_MINUTES, int(str(values.get("interval_minutes", "10")))))
     except ValueError:
@@ -3222,7 +3574,7 @@ def normalized_settings(values: dict[str, Any]) -> dict[str, str]:
     music_auto_sync = "1" if boolean_value(values.get("music_auto_sync"), True) else "0"
     news_auto_sync = "1" if boolean_value(values.get("news_auto_sync"), True) else "0"
     news_slow_refresh_enabled = "1" if boolean_value(values.get("news_slow_refresh_enabled"), False) else "0"
-    return {
+    normalized = {
         "interval_minutes": str(interval),
         "detail_interval_minutes": str(detail_interval),
         "music_auto_sync": music_auto_sync,
@@ -3231,10 +3583,12 @@ def normalized_settings(values: dict[str, Any]) -> dict[str, str]:
         "news_slow_refresh_enabled": news_slow_refresh_enabled,
         "news_slow_refresh_delay_seconds": str(news_slow_refresh_delay),
         "onebot_url": str(values.get("onebot_url", "") or "").strip(),
-        "onebot_token": str(values.get("onebot_token", "") or "").strip(),
         "onebot_target": str(values.get("onebot_target", "") or "").strip(),
         "onebot_profile": str(values.get("onebot_profile", "bot") or "").strip() or "bot",
     }
+    if include_onebot_token:
+        normalized["onebot_token"] = str(values.get("onebot_token", "") or "").strip()
+    return normalized
 
 
 def save_settings(values: dict[str, str]) -> None:
@@ -3303,6 +3657,9 @@ def parse_extras(content) -> list[dict[str, object]]:
 
 
 def parse_release(release_id: str, content, entry_image=None) -> dict[str, str]:
+    release_id = str(release_id or "").strip()
+    if not REMOTE_INGEST_ID_PATTERN.fullmatch(release_id):
+        raise ValueError("官网音乐发行 ID 格式无效")
     title = content.select_one(".title") if content else None
     subtitle = title.find("span") if title else None
     entry_title = clean_text(title) or (entry_image.get("alt", "").strip() if entry_image else "") or release_id
@@ -3349,7 +3706,11 @@ def parse_release(release_id: str, content, entry_image=None) -> dict[str, str]:
         "artist": fields.get("アーティスト", ""),
         "release_date": fields.get("発売日") or fields.get("一般発売日") or fields.get("劇場先行発売日", ""),
         "price": fields.get("価格", ""),
-        "cover_url": urljoin(SOURCE_URL, image.get("src", "")) if image else "",
+        "cover_url": (
+            urljoin(SOURCE_URL, image.get("src", ""))
+            if image and valid_official_image_url(urljoin(SOURCE_URL, image.get("src", "")))
+            else ""
+        ),
         "detail_html": detail_html,
         "source_url": f"{SOURCE_URL}#{release_id}",
         "tracks_json": json.dumps(tracks, ensure_ascii=False),
@@ -3379,14 +3740,24 @@ def sync_exception_label(exc: BaseException) -> str:
     return f"{type(exc).__name__}{suffix}"
 
 
+def http_response_is_redirect(response: Any) -> bool:
+    try:
+        status_code = int(getattr(response, "status_code", 0))
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return 300 <= status_code < 400
+
+
 async def scrape() -> list[dict[str, str]]:
     print(f"[sync] fetching {SOURCE_URL}", flush=True)
     headers = {
         **OFFICIAL_BROWSER_HEADERS,
         "Referer": "https://www.lovelive-anime.jp/nijigasaki/",
     }
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
+    async with httpx.AsyncClient(timeout=30, follow_redirects=False, headers=headers, trust_env=False) as client:
         response = await client.get(SOURCE_URL)
+        if http_response_is_redirect(response):
+            raise ValueError("官网音乐目录不应重定向到未验证的地址")
         response.raise_for_status()
     soup = BeautifulSoup(response.text, "html.parser")
     result = []
@@ -3396,7 +3767,9 @@ async def scrape() -> list[dict[str, str]]:
         raise ValueError("官网音乐目录无法解析")
     missing_detail_ids = []
     for link in source_list.select("a[href^='#']"):
-        release_id = link["href"][1:]
+        release_id = link["href"][1:].strip()
+        if not REMOTE_INGEST_ID_PATTERN.fullmatch(release_id):
+            continue
         box = boxes.get(release_id)
         if not box or not box.select_one(".title"):
             missing_detail_ids.append(release_id)
@@ -3404,13 +3777,17 @@ async def scrape() -> list[dict[str, str]]:
     failed_detail_ids: set[str] = set()
     if missing_detail_ids:
         detail_headers = {**headers, "Content-Type": "application/json"}
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=detail_headers) as detail_client:
+        async with httpx.AsyncClient(
+            timeout=30, follow_redirects=False, headers=detail_headers, trust_env=False
+        ) as detail_client:
             for release_id in missing_detail_ids:
                 try:
                     detail_response = await detail_client.post(
                         urljoin(SOURCE_URL, "cd_detail.php"),
                         json=release_id.removeprefix("cd"),
                     )
+                    if http_response_is_redirect(detail_response):
+                        raise ValueError("官网音乐详情不应重定向到未验证的地址")
                     detail_response.raise_for_status()
                     dynamic_details[release_id] = BeautifulSoup(detail_response.json(), "html.parser")
                 except Exception as exc:
@@ -3433,7 +3810,9 @@ async def scrape() -> list[dict[str, str]]:
         link = entry.find("a", href=True)
         if not link or not link["href"].startswith("#"):
             continue
-        release_id = link["href"][1:]
+        release_id = link["href"][1:].strip()
+        if not REMOTE_INGEST_ID_PATTERN.fullmatch(release_id):
+            continue
         if release_id in failed_detail_ids:
             if release_id in preserved_records:
                 result.append(preserved_records[release_id])
@@ -3463,7 +3842,7 @@ def parse_music_source_html(html: str) -> list[dict[str, str]]:
         if not link or not href.startswith("#") or len(href) <= 1:
             continue
         release_id = href[1:].strip()
-        if release_id:
+        if REMOTE_INGEST_ID_PATTERN.fullmatch(release_id):
             entries.append((release_id, boxes.get(release_id), entry.find("img", src=True)))
     if not entries:
         raise ValueError("手动源代码中没有解析到音乐发行条目")
@@ -3511,23 +3890,70 @@ def preserve_cached_music_covers(records: list[dict[str, Any]]) -> None:
             item["fingerprint"] = release_fingerprint(item)
 
 
+def validate_onebot_url(value: Any) -> str:
+    raw = str(value or "").strip()
+    try:
+        parsed = urlparse(raw)
+        port = parsed.port
+        decoded_path = unquote(parsed.path)
+        path_parts = decoded_path.split("/")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("OneBot 地址格式无效") from exc
+    if (
+        not raw
+        or parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or any(character.isspace() for character in parsed.hostname)
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or "?" in raw
+        or "#" in raw
+        or "?" in decoded_path
+        or "#" in decoded_path
+        or "\\" in raw
+        or "\\" in decoded_path
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in raw)
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in decoded_path)
+        or parsed.netloc.endswith(":")
+        or (port is not None and not 1 <= port <= 65535)
+        or any(part in {".", ".."} for part in path_parts if part)
+        or any(not part for part in path_parts[1:-1])
+    ):
+        raise ValueError("OneBot 地址必须是无凭据、无查询参数的 HTTP/HTTPS 地址")
+    return raw.rstrip("/")
+
+
+def validate_onebot_target(value: Any) -> tuple[str, str, int]:
+    raw = str(value or "").strip()
+    if raw.startswith("private:"):
+        key, target = "user_id", raw.removeprefix("private:").strip()
+        path = "/send_private_msg"
+    elif raw.startswith("group:"):
+        key, target = "group_id", raw.removeprefix("group:").strip()
+        path = "/send_group_msg"
+    else:
+        key, target = "group_id", raw
+        path = "/send_group_msg"
+    if not re.fullmatch(r"[1-9][0-9]{0,18}", target):
+        raise ValueError("OneBot 接收目标必须是正整数")
+    target_id = int(target)
+    if target_id > 2**63 - 1:
+        raise ValueError("OneBot 接收目标超出范围")
+    return path, key, target_id
+
+
 async def send_onebot(message: str, config: dict[str, str]) -> None:
     if not config.get("onebot_url") or not config.get("onebot_target"):
         raise ValueError("OneBot 地址或接收目标未设置")
-    target = config["onebot_target"]
-    if target.startswith("private:"):
-        path, key = "/send_private_msg", "user_id"
-        target = target.removeprefix("private:")
-    elif target.startswith("group:"):
-        path, key = "/send_group_msg", "group_id"
-        target = target.removeprefix("group:")
-    else:
-        path, key = "/send_group_msg", "group_id"
+    onebot_url = validate_onebot_url(config["onebot_url"])
+    path, key, target = validate_onebot_target(config["onebot_target"])
     headers = {"Content-Type": "application/json"}
     if config.get("onebot_token"):
         headers["Authorization"] = f"Bearer {config['onebot_token']}"
-    async with httpx.AsyncClient(timeout=15) as client:
-        response = await client.post(config["onebot_url"].rstrip("/") + path, json={key: int(target), "message": message}, headers=headers)
+    async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+        response = await client.post(onebot_url + path, json={key: target, "message": message}, headers=headers)
         response.raise_for_status()
 
 
@@ -3968,16 +4394,81 @@ def r2_upload_is_configured() -> bool:
 
 
 def r2_is_configured() -> bool:
-    return bool(r2_upload_is_configured() and R2_PUBLIC_BASE_URL)
+    if not r2_upload_is_configured() or not R2_PUBLIC_BASE_URL:
+        return False
+    return valid_r2_public_image_url(r2_public_image_url("healthcheck.png"))
 
 
 def r2_object_key(relative_path: str) -> str:
-    clean_path = str(relative_path or "").replace("\\", "/").lstrip("/")
-    return f"{R2_IMAGE_PREFIX}/{clean_path}" if R2_IMAGE_PREFIX else clean_path
+    raw_path = str(relative_path or "")
+    decoded_path = unquote(raw_path)
+    if (
+        "?" in raw_path
+        or "#" in raw_path
+        or "\\" in raw_path
+        or "?" in decoded_path
+        or "#" in decoded_path
+        or "\\" in decoded_path
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in decoded_path)
+    ):
+        raise ValueError("R2 图片对象路径格式无效")
+    clean_path = raw_path.lstrip("/")
+    prefix = R2_IMAGE_PREFIX.strip("/")
+    decoded_prefix = unquote(prefix)
+    if (
+        "?" in decoded_prefix
+        or "#" in decoded_prefix
+        or "\\" in decoded_prefix
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in decoded_prefix)
+        or any(part in {"", ".", ".."} for part in decoded_prefix.split("/") if decoded_prefix)
+    ):
+        raise ValueError("R2 图片对象路径格式无效")
+    path_parts = clean_path.split("/") if clean_path else []
+    prefix_parts = prefix.split("/") if prefix else []
+    if (
+        not clean_path
+        or len(clean_path) > 900
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in clean_path)
+        or "\\" in prefix
+        or any(part in {"", ".", ".."} for part in (*prefix_parts, *path_parts))
+        or any(
+            part in {"", ".", ".."}
+            for part in unquote(clean_path).lstrip("/").split("/")
+            if clean_path
+        )
+        or len(prefix) > 100
+    ):
+        raise ValueError("R2 图片对象路径格式无效")
+    return f"{prefix}/{clean_path}" if prefix else clean_path
 
 
 def r2_public_image_url(relative_path: str) -> str:
-    return f"{R2_PUBLIC_BASE_URL}/{quote(r2_object_key(relative_path), safe='/')}"
+    try:
+        key = r2_object_key(relative_path)
+    except ValueError:
+        return ""
+    return f"{R2_PUBLIC_BASE_URL}/{quote(key, safe='/')}"
+
+
+def effective_http_port(parsed) -> int:
+    if parsed.port is not None:
+        return parsed.port
+    return 443 if parsed.scheme == "https" else 80
+
+
+def same_http_origin(first: str, second: str) -> bool:
+    try:
+        first_parsed = urlparse(first)
+        second_parsed = urlparse(second)
+        first_port = effective_http_port(first_parsed)
+        second_port = effective_http_port(second_parsed)
+    except (TypeError, ValueError):
+        return False
+    return (
+        first_parsed.scheme == second_parsed.scheme
+        and (first_parsed.hostname or "").lower() == (second_parsed.hostname or "").lower()
+        and first_port == second_port
+    )
 
 
 def valid_r2_public_image_url(value: Any) -> bool:
@@ -3985,39 +4476,121 @@ def valid_r2_public_image_url(value: Any) -> bool:
     raw = str(value or "").strip()
     if not raw or not R2_PUBLIC_BASE_URL:
         return False
+    if R2_ENDPOINT and same_http_origin(R2_PUBLIC_BASE_URL, R2_ENDPOINT):
+        return False
     try:
         base = urlparse(R2_PUBLIC_BASE_URL)
         candidate = urlparse(raw)
-    except ValueError:
+        base.port
+        candidate.port
+    except (TypeError, ValueError):
+        return False
+    base_path = unquote(base.path).rstrip("/")
+    candidate_path = unquote(candidate.path)
+    prefix = unquote(R2_IMAGE_PREFIX.strip("/"))
+    base_parts = base_path.strip("/").split("/") if base_path.strip("/") else []
+    prefix_parts = prefix.split("/") if prefix else []
+    candidate_parts = candidate_path.strip("/").split("/") if candidate_path.strip("/") else []
+    if (
+        any(ord(character) < 0x20 or ord(character) == 0x7F for character in raw)
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in base_path)
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in prefix)
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in candidate_path)
+        or "#" in raw
+        or "?" in raw
+        or "?" in base_path
+        or "#" in base_path
+        or "?" in prefix
+        or "#" in prefix
+        or "?" in candidate_path
+        or "#" in candidate_path
+        or "\\" in raw
+        or "\\" in base_path
+        or "\\" in prefix
+        or "\\" in candidate_path
+        or candidate_path.endswith("/")
+        or any(part in {"", ".", ".."} for part in (*base_parts, *prefix_parts, *candidate_parts))
+    ):
         return False
     if (
         base.scheme not in {"http", "https"}
+        or not base.hostname
+        or any(character.isspace() for character in base.hostname)
+        or base.port == 0
         or not base.netloc
+        or base.netloc.endswith(":")
+        or base.port == 0
+        or base.username
+        or base.password
+        or base.query
+        or base.fragment
         or candidate.scheme != base.scheme
         or candidate.netloc != base.netloc
+        or candidate.netloc.endswith(":")
+        or candidate.port == 0
         or candidate.username
         or candidate.password
         or candidate.query
         or candidate.fragment
     ):
         return False
-    base_path = unquote(base.path).rstrip("/")
-    candidate_path = unquote(candidate.path)
-    prefix = R2_IMAGE_PREFIX.strip("/")
     expected_prefix = f"{base_path}/{prefix}" if prefix else base_path
     if expected_prefix:
         expected_prefix = expected_prefix.rstrip("/")
         if not candidate_path.startswith(f"{expected_prefix}/"):
             return False
-    elif not candidate_path.strip("/"):
+    elif not candidate_parts:
         return False
-    return all(part not in {"", ".", ".."} for part in candidate_path.split("/") if part)
+    return bool(candidate_parts)
 
 
 def public_image_url(filename: str) -> str:
     if not r2_is_configured():
         return f"/media/{filename}"
     return r2_public_image_url(filename)
+
+
+def r2_object_exists(relative_path: str, expected_size: int) -> bool:
+    global _r2_client
+    if not r2_upload_is_configured() or expected_size < 0:
+        return False
+    if _r2_client is None:
+        _r2_client = boto3.client(
+            "s3",
+            endpoint_url=R2_ENDPOINT,
+            aws_access_key_id=R2_ACCESS_KEY_ID,
+            aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+            region_name=os.getenv("R2_REGION", "auto"),
+        )
+    try:
+        response = _r2_client.head_object(Bucket=R2_BUCKET, Key=r2_object_key(relative_path))
+    except ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        if code in {"404", "NoSuchKey", "NotFound"}:
+            return False
+        raise RuntimeError("R2 对象检查失败") from exc
+    except Exception as exc:
+        raise RuntimeError("R2 对象检查失败") from exc
+    try:
+        return int(response.get("ContentLength") or -1) == expected_size
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _open_upload_file(path: Path) -> tuple[int, os.stat_result] | None:
+    # Resolve the parent only: resolving the final component would follow a
+    # database-controlled symlink before the no-follow open below.
+    lexical_path = path.parent.resolve() / path.name
+    for root in (MEDIA_DIR, NEWS_RUNTIME_DIR, ILLUSTRATION_RUNTIME_DIR):
+        if root.is_symlink():
+            continue
+        lexical_root = root.resolve()
+        try:
+            relative = lexical_path.relative_to(lexical_root)
+        except ValueError:
+            continue
+        return _open_relative_regular_file(lexical_root, relative)
+    return None
 
 
 def upload_image_to_r2(path: Path, relative_path: str | None = None) -> None:
@@ -4030,13 +4603,27 @@ def upload_image_to_r2(path: Path, relative_path: str | None = None) -> None:
             aws_secret_access_key=R2_SECRET_ACCESS_KEY,
             region_name=os.getenv("R2_REGION", "auto"),
         )
-    content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-    _r2_client.upload_file(
-        str(path),
-        R2_BUCKET,
-        r2_object_key(relative_path or path.name),
-        ExtraArgs={"ContentType": content_type, "CacheControl": "no-cache"},
-    )
+    object_name = relative_path or path.name
+    object_key = r2_object_key(object_name)
+    opened = _open_upload_file(path)
+    if not opened:
+        raise RuntimeError("图片文件不存在或不是普通文件")
+    descriptor, _ = opened
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            _r2_client.upload_fileobj(
+                handle,
+                R2_BUCKET,
+                object_key,
+                ExtraArgs={
+                    "ContentType": mimetypes.guess_type(object_name)[0] or "application/octet-stream",
+                    "CacheControl": "no-cache",
+                },
+            )
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def upload_cover_to_r2(path: Path) -> None:
@@ -4077,7 +4664,7 @@ async def cleanup_program_image_storage(relative_paths: list[str]) -> None:
             continue
         target = program_occurrence_image_target({"local_path": relative_path})
         if target:
-            target.unlink(missing_ok=True)
+            unlink_local_file(MEDIA_DIR, Path(relative_path))
         if r2_upload_is_configured():
             try:
                 await asyncio.to_thread(delete_image_from_r2, relative_path)
@@ -4086,25 +4673,115 @@ async def cleanup_program_image_storage(relative_paths: list[str]) -> None:
 
 
 async def cache_cover(item: dict[str, str], client: httpx.AsyncClient, force_refresh: bool = False) -> bool:
-    if not item["cover_url"]:
+    if not item["cover_url"] or not valid_official_image_url(item["cover_url"]):
         return False
-    extension = Path(urlparse(item["cover_url"]).path).suffix.lower()
-    if extension not in {".jpg", ".jpeg", ".png", ".webp"}:
-        extension = ".jpg"
-    target = MEDIA_DIR / f"{item['id']}{extension}"
-    cover_changed = not target.exists()
-    if force_refresh or not target.exists():
-        response = await client.get(item["cover_url"])
-        response.raise_for_status()
-        cover_changed = not target.exists() or target.read_bytes() != response.content
-        temporary = target.with_name(f".{target.name}.{secrets.token_hex(6)}.tmp")
+    requested_extension = Path(urlparse(item["cover_url"]).path).suffix.lower()
+    if requested_extension not in {".jpg", ".jpeg", ".png", ".webp", ".avif"}:
+        requested_extension = ".jpg"
+    release_id = str(item.get("id") or "").strip()
+    if not REMOTE_INGEST_ID_PATTERN.fullmatch(release_id):
+        raise ValueError("音乐发行 ID 格式无效")
+    if MEDIA_DIR.is_symlink():
+        raise ValueError("封面保存目录不能是符号链接")
+    media_root = MEDIA_DIR.resolve()
+
+    def target_for(extension: str) -> Path:
+        target = media_root / f"{release_id}{extension}"
         try:
-            temporary.write_bytes(response.content)
-            temporary.replace(target)
+            target.relative_to(media_root)
+        except ValueError as exc:  # pragma: no cover - release_id is validated above
+            raise ValueError("封面保存路径无效") from exc
+        return target
+
+    def read_existing(target: Path) -> tuple[bool, bytes | None, int]:
+        try:
+            target_stat = target.lstat()
+        except FileNotFoundError:
+            return False, None, 0
+        if stat.S_ISLNK(target_stat.st_mode) or not stat.S_ISREG(target_stat.st_mode):
+            raise ValueError("封面目标不是普通文件")
+        opened = _open_relative_regular_file(media_root, Path(target.name))
+        if not opened:
+            raise ValueError("封面目标不能是符号链接")
+        descriptor, metadata = opened
+        try:
+            content = bytearray()
+            while True:
+                chunk = os.read(descriptor, PROGRAM_IMAGE_MAX_BYTES + 1 - len(content))
+                if not chunk:
+                    break
+                content.extend(chunk)
+                if len(content) > PROGRAM_IMAGE_MAX_BYTES:
+                    raise ValueError("官方封面超过 20 MB 限制")
+            return True, bytes(content), metadata.st_size
         finally:
-            temporary.unlink(missing_ok=True)
-        if r2_upload_is_configured():
-            await asyncio.to_thread(upload_cover_to_r2, target)
+            os.close(descriptor)
+
+    target = target_for(requested_extension)
+    target_is_file, previous_bytes, _ = read_existing(target)
+    downloaded = False
+    cover_changed = not target_is_file
+    # A legacy cache entry must be validated before it is reused or uploaded.
+    needs_download = force_refresh or not target_is_file
+    if target_is_file and (
+        not news_upload_extension("", previous_bytes or b"", target.name)
+        or not image_dimensions_from_bytes(previous_bytes or b"")
+    ):
+        needs_download = True
+    if needs_download:
+        async with client.stream("GET", item["cover_url"], follow_redirects=False) as response:
+            if http_response_is_redirect(response):
+                raise ValueError("官方封面不应重定向到未验证的地址")
+            response.raise_for_status()
+            content_length = response.headers.get("content-length", "")
+            try:
+                announced_length = int(content_length) if content_length else 0
+            except (TypeError, ValueError, OverflowError):
+                announced_length = 0
+            if announced_length > PROGRAM_IMAGE_MAX_BYTES:
+                raise ValueError("官方封面超过 20 MB 限制")
+            content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            content = bytearray()
+            async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                if not isinstance(chunk, (bytes, bytearray)):
+                    raise ValueError("官方封面响应格式无效")
+                remaining = PROGRAM_IMAGE_MAX_BYTES - len(content)
+                if len(chunk) > remaining:
+                    raise ValueError("官方封面超过 20 MB 限制")
+                content.extend(chunk)
+        content_bytes = bytes(content)
+        actual_extension = news_upload_extension(content_type, content_bytes, item["cover_url"])
+        dimensions = image_dimensions_from_bytes(content_bytes)
+        if not actual_extension or not dimensions or any(value > 10000 for value in dimensions):
+            raise ValueError("官方封面不是有效的支持图片")
+        target = target_for(actual_extension)
+        target_is_file, previous_bytes, _ = read_existing(target)
+        cover_changed = not target_is_file or previous_bytes != content_bytes
+        replace_local_file(media_root, Path(target.name), content_bytes)
+        downloaded = True
+    if r2_upload_is_configured():
+        needs_upload = force_refresh or downloaded
+        if not needs_upload:
+            opened = _open_relative_regular_file(media_root, Path(target.name))
+            if not opened:
+                raise RuntimeError("封面文件不存在或不是普通文件")
+            descriptor, metadata = opened
+            os.close(descriptor)
+            needs_upload = not await asyncio.to_thread(r2_object_exists, target.name, metadata.st_size)
+        if needs_upload:
+            try:
+                await asyncio.to_thread(upload_cover_to_r2, target)
+            except Exception:
+                if previous_bytes is None:
+                    unlink_local_file(media_root, Path(target.name))
+                else:
+                    try:
+                        replace_local_file(media_root, Path(target.name), previous_bytes)
+                    except OSError:
+                        # Keep the newly downloaded file if restoration itself fails;
+                        # never delete a previously valid local cover on an R2 error.
+                        pass
+                raise
     source_url = item["cover_url"]
     item["cover_url"] = public_image_url(target.name)
     item["detail_html"] = item["detail_html"].replace(source_url, item["cover_url"])
@@ -4152,7 +4829,9 @@ async def sync_once() -> tuple[int, str | None]:
             }
             image_errors = 0
             refreshed_cover_ids: set[str] = set()
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=image_headers) as image_client:
+            async with httpx.AsyncClient(
+                timeout=30, follow_redirects=False, headers=image_headers, trust_env=False
+            ) as image_client:
                 for item in records:
                     try:
                         if await cache_cover(item, image_client, force_refresh=refresh_all or item["id"] in refresh_ids):
@@ -4198,10 +4877,14 @@ async def refresh_deferred_once() -> tuple[int, str | None]:
             }
             records = []
             detail_errors = 0
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
+            async with httpx.AsyncClient(
+                timeout=30, follow_redirects=False, headers=headers, trust_env=False
+            ) as client:
                 for row in rows:
                     try:
                         response = await client.post(urljoin(SOURCE_URL, "cd_detail.php"), json=row["id"].removeprefix("cd"))
+                        if http_response_is_redirect(response):
+                            raise ValueError("官网音乐详情不应重定向到未验证的地址")
                         response.raise_for_status()
                         item = parse_release(row["id"], BeautifulSoup(response.json(), "html.parser"))
                         item["position"] = row["position"]
@@ -4230,7 +4913,9 @@ async def refresh_deferred_once() -> tuple[int, str | None]:
                 "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
                 "Referer": SOURCE_URL,
             }
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=image_headers) as image_client:
+            async with httpx.AsyncClient(
+                timeout=30, follow_redirects=False, headers=image_headers, trust_env=False
+            ) as image_client:
                 for item in records:
                     try:
                         if await cache_cover(item, image_client, force_refresh=refresh_all or item["id"] in refresh_ids):
@@ -4255,19 +4940,50 @@ def news_image_target(row: sqlite3.Row | dict[str, Any]) -> Path | None:
     if not local_path:
         return None
     if local_path.startswith("runtime:"):
-        root = NEWS_RUNTIME_DIR
+        raw_root = NEWS_RUNTIME_DIR
         relative = local_path.removeprefix("runtime:").lstrip("/")
     else:
-        root = NEWS_ARCHIVE_DIR
+        raw_root = NEWS_ARCHIVE_DIR
         relative = local_path.removeprefix("archive:").lstrip("/")
-    if not relative:
+    if raw_root.is_symlink():
         return None
-    target = (root / relative).resolve()
+    root = raw_root.resolve()
+    if (
+        not relative
+        or "\\" in relative
+        or "?" in relative
+        or "#" in relative
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in relative)
+    ):
+        return None
+    parts = relative.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return None
+
+    # Do not follow database-controlled symlinks. Resolving first prevents
+    # traversal through a link outside the approved root, while the
+    # component-by-component check also rejects links that happen to point back
+    # inside the root.
+    target = root
+    for part in parts:
+        target = target / part
+        try:
+            if target.is_symlink():
+                return None
+        except OSError:
+            return None
     try:
-        target.relative_to(root.resolve())
+        target.relative_to(root)
     except ValueError:
         return None
     return target if target.is_file() else None
+
+
+def news_image_source_url(row: sqlite3.Row | dict[str, Any]) -> str:
+    source_url = str(row.get("source_url", "") if isinstance(row, dict) else row["source_url"] or "").strip()
+    is_remote = str(row.get("kind", "") if isinstance(row, dict) else row["kind"] or "") == "remote"
+    source_valid = is_allowed_official_image_url(source_url) if is_remote else valid_external_url(source_url)
+    return source_url if source_valid else ""
 
 
 def news_image_url(row: sqlite3.Row | dict[str, Any]) -> str:
@@ -4286,8 +5002,7 @@ def news_image_url(row: sqlite3.Row | dict[str, Any]) -> str:
         return f"/api/news/images/{image_id}"
     # Keep the original image visible until the worker archives this specific
     # image. Once archived, the R2 URL above replaces it independently.
-    source_url = str(row.get("source_url", "") if isinstance(row, dict) else row["source_url"] or "").strip()
-    return source_url
+    return news_image_source_url(row)
 
 
 def news_image_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -4297,9 +5012,13 @@ def news_image_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "position": row["position"],
         "kind": row["kind"],
         "url": news_image_url(row),
-        "source_url": str(row["source_url"] or ""),
+        "source_url": news_image_source_url(row),
         "local_path": str(row["local_path"] or ""),
-        "public_url": stored_public_url if valid_r2_public_image_url(stored_public_url) else "",
+        "public_url": (
+            stored_public_url
+            if valid_r2_public_image_url(stored_public_url)
+            else ""
+        ),
         "alt_text": str(row["alt_text"] or ""),
         "width": row["width"],
         "height": row["height"],
@@ -4327,7 +5046,11 @@ def news_summary_payload(
         "category": row["category"],
         "tags": clean_tag_values(decode_json(row["tags_json"], row["tags_json"])),
         "summary": truncate_news_summary(row["summary"]),
-        "source_url": row["source_url"],
+        "source_url": (
+            str(row["source_url"] or "")
+            if valid_external_url(row["source_url"])
+            else ""
+        ),
         "image_count": count,
         "edited": bool(decode_json(row["manual_fields_json"], [])),
         "updated_at": row["updated_at"],
@@ -4427,8 +5150,8 @@ def ensure_news_refresh_queue(conn: sqlite3.Connection, recover_processing: bool
                 """UPDATE news_refresh_queue
                    SET source_url = ?, status = 'pending', attempts = 0, risk = 0,
                        last_attempt_at = '', last_success_at = '', next_attempt_at = '', last_error = ?, updated_at = ?
-                 WHERE news_id = ?""",
-                (source_url, "来源地址已变化，等待重新刷新", now, article["id"]),
+                 WHERE news_id = ? AND source_url != ?""",
+                (source_url, "来源地址已变化，等待重新刷新", now, article["id"], queued_source_url),
             )
     conn.execute(
         "DELETE FROM news_refresh_queue WHERE news_id NOT IN (SELECT id FROM news_articles)"
@@ -4561,6 +5284,10 @@ async def news_slow_refresh_once() -> dict[str, Any]:
     async with news_run_lock:
         now = datetime.now(timezone.utc).isoformat()
         with db() as conn:
+            # Claim the row inside a write transaction. The asyncio lock only
+            # protects one process; SQLite must also prevent two workers from
+            # refreshing the same article in separate ASGI processes.
+            conn.execute("BEGIN IMMEDIATE")
             ensure_news_refresh_queue(conn)
             row = conn.execute(
                 """SELECT q.*, a.title
@@ -4577,30 +5304,38 @@ async def news_slow_refresh_once() -> dict[str, Any]:
             if row is None:
                 return {"processed": False, "idle": True}
             attempts = int(row["attempts"] or 0) + 1
-            conn.execute(
+            queue_source_url = str(row["source_url"] or "")
+            claimed = conn.execute(
                 """UPDATE news_refresh_queue
                    SET status = 'processing', attempts = ?, last_attempt_at = ?, updated_at = ?
-                 WHERE news_id = ?""",
-                (attempts, now, now, row["news_id"]),
-            )
+                 WHERE news_id = ? AND source_url = ? AND status IN ('pending', 'failed')""",
+                (attempts, now, now, row["news_id"], queue_source_url),
+            ).rowcount
+            if claimed != 1:
+                return {"processed": False, "busy": True}
 
         record_id = str(row["news_id"])
-        source_url = str(row["source_url"] or "").strip()
+        source_url = queue_source_url.strip()
         try:
             source_url = validate_news_url(source_url)
         except ValueError as exc:
             reason = describe_news_fetch_error(exc)
             with db() as conn:
-                conn.execute(
+                updated = conn.execute(
                     """UPDATE news_refresh_queue
                        SET status = 'skipped', risk = 0, last_error = ?, next_attempt_at = '', updated_at = ?
-                     WHERE news_id = ?""",
-                    (reason, datetime.now(timezone.utc).isoformat(), record_id),
-                )
-            return {"processed": True, "status": "skipped", "news_id": record_id, "error": reason}
+                     WHERE news_id = ? AND source_url = ? AND status = 'processing'""",
+                    (reason, datetime.now(timezone.utc).isoformat(), record_id, queue_source_url),
+                ).rowcount
+            return {
+                "processed": True,
+                "status": "skipped" if updated else "stale",
+                "news_id": record_id,
+                "error": reason,
+            }
 
         try:
-            async with httpx.AsyncClient(timeout=30, headers=NEWS_HEADERS) as client:
+            async with httpx.AsyncClient(timeout=30, headers=NEWS_HEADERS, trust_env=False) as client:
                 changed = await refresh_news_record(
                     client,
                     record_id,
@@ -4616,10 +5351,10 @@ async def news_slow_refresh_once() -> dict[str, Any]:
             permanent = news_refresh_error_is_permanent(exc)
             next_attempt_at = "" if permanent else news_refresh_retry_at(attempts, risk)
             with db() as conn:
-                conn.execute(
+                updated = conn.execute(
                     """UPDATE news_refresh_queue
                        SET status = ?, risk = ?, last_error = ?, next_attempt_at = ?, updated_at = ?
-                     WHERE news_id = ?""",
+                     WHERE news_id = ? AND source_url = ? AND status = 'processing'""",
                     (
                         "skipped" if permanent else "failed",
                         int(risk),
@@ -4627,12 +5362,13 @@ async def news_slow_refresh_once() -> dict[str, Any]:
                         next_attempt_at,
                         datetime.now(timezone.utc).isoformat(),
                         record_id,
+                        queue_source_url,
                     ),
-                )
+                ).rowcount
             print(f"[news-slow-refresh] failed {record_id}: {reason}", flush=True)
             return {
                 "processed": True,
-                "status": "skipped" if permanent else "failed",
+                "status": ("skipped" if permanent else "failed") if updated else "stale",
                 "news_id": record_id,
                 "error": reason,
                 "risk": risk,
@@ -4643,17 +5379,22 @@ async def news_slow_refresh_once() -> dict[str, Any]:
         await record_official_site_health(True, "新闻慢速刷新")
         completed_at = datetime.now(timezone.utc).isoformat()
         with db() as conn:
-            conn.execute(
+            updated = conn.execute(
                 """UPDATE news_refresh_queue
                    SET status = 'completed', risk = 0, last_success_at = ?, next_attempt_at = '',
                        last_error = '', updated_at = ?
-                 WHERE news_id = ?""",
-                (completed_at, completed_at, record_id),
-            )
+                 WHERE news_id = ? AND source_url = ? AND status = 'processing'""",
+                (completed_at, completed_at, record_id, queue_source_url),
+            ).rowcount
         if changed:
             log_database_activity("news", f"慢速刷新官网新闻：{str(row['title'] or '')[:80]}")
         print(f"[news-slow-refresh] completed {record_id}", flush=True)
-        return {"processed": True, "status": "completed", "news_id": record_id, "changed": changed}
+        return {
+            "processed": True,
+            "status": "completed" if updated else "stale",
+            "news_id": record_id,
+            "changed": changed,
+        }
 
 
 def normalized_news_edit_value(field: str, value: Any) -> str:
@@ -4674,23 +5415,36 @@ def normalized_news_edit_value(field: str, value: Any) -> str:
         return truncate_news_summary(result)
     if len(result) > limits.get(field, 500000):
         raise ValueError(f"{field}内容过长")
-    if field == "source_url" and result:
-        parsed = urlparse(result)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError("来源地址需要填写完整的 HTTP/HTTPS 地址")
+    if field == "source_url" and result and not valid_external_url(result):
+        raise ValueError("来源地址需要填写完整的无凭据 HTTP/HTTPS 地址")
     return result
 
 
 async def read_manual_source_request(request: Request) -> tuple[dict[str, Any], str]:
+    maximum = MANUAL_SOURCE_MAX_BYTES * 2
     content_length = request.headers.get("content-length", "")
     try:
-        if content_length and int(content_length) > MANUAL_SOURCE_MAX_BYTES * 2:
+        if content_length and int(content_length) > maximum:
             raise HTTPException(413, "网页源代码请求过大")
     except ValueError:
         pass
+    body = bytearray()
     try:
-        payload = await request.json()
-    except ValueError as exc:
+        async for chunk in request.stream():
+            remaining = maximum - len(body)
+            if len(chunk) > remaining:
+                raise HTTPException(413, "网页源代码请求过大")
+            body.extend(chunk)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(400, "请求格式无效") from exc
+    try:
+        payload = json.loads(
+            body.decode("utf-8"),
+            parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"invalid JSON constant: {value}")),
+        )
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError, RecursionError) as exc:
         raise HTTPException(400, "请求格式无效") from exc
     if not isinstance(payload, dict):
         raise HTTPException(400, "请求格式无效")
@@ -4784,15 +5538,23 @@ async def read_external_ingest_request(request: Request, resource_label: str) ->
             raise HTTPException(413, f"远程{resource_label}导入请求过大")
     except ValueError:
         pass
+    body = bytearray()
     try:
-        body = await request.body()
+        async for chunk in request.stream():
+            remaining = REMOTE_NEWS_INGEST_MAX_BYTES - len(body)
+            if len(chunk) > remaining:
+                raise HTTPException(413, f"远程{resource_label}导入请求不能超过 8 MB")
+            body.extend(chunk)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(400, "请求格式无效") from exc
-    if len(body) > REMOTE_NEWS_INGEST_MAX_BYTES:
-        raise HTTPException(413, f"远程{resource_label}导入请求不能超过 8 MB")
     try:
-        payload = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        payload = json.loads(
+            body.decode("utf-8"),
+            parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"invalid JSON constant: {value}")),
+        )
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError, RecursionError) as exc:
         raise HTTPException(400, "请求格式无效") from exc
     if not isinstance(payload, dict):
         raise HTTPException(400, "请求格式无效")
@@ -4806,11 +5568,13 @@ async def read_remote_news_request(request: Request) -> dict[str, Any]:
 def remote_news_integer(value: Any, field: str, maximum: int) -> int:
     if value in (None, ""):
         return 0
-    if isinstance(value, bool):
+    if isinstance(value, bool) or (
+        isinstance(value, float) and (not math.isfinite(value) or not value.is_integer())
+    ):
         raise HTTPException(400, f"{field}格式无效")
     try:
         number = int(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise HTTPException(400, f"{field}格式无效") from exc
     if number < 0 or number > maximum:
         raise HTTPException(400, f"{field}超出范围")
@@ -4834,19 +5598,16 @@ def remote_news_image(value: Any) -> dict[str, Any]:
     source_url = str(value.get("source_url") or "").strip()
     if len(source_url) > 2000:
         raise HTTPException(400, "新闻图片来源地址过长")
-    try:
-        parsed = urlparse(source_url)
-    except ValueError as exc:
-        raise HTTPException(400, "新闻图片来源地址无效") from exc
+    if not valid_external_url(source_url):
+        raise HTTPException(400, "新闻图片来源地址必须是无凭据且不带片段的 HTTPS 地址")
+    parsed_source_url = urlparse(source_url)
     if (
-        not source_url
-        or parsed.scheme not in {"http", "https"}
-        or not parsed.netloc
-        or parsed.username
-        or parsed.password
-        or "\\" in source_url
+        parsed_source_url.scheme != "https"
+        or parsed_source_url.fragment
+        or parsed_source_url.hostname not in OFFICIAL_IMAGE_HOSTS
+        or not is_allowed_official_image_url(source_url)
     ):
-        raise HTTPException(400, "新闻图片来源地址必须是无凭据的 HTTP/HTTPS 地址")
+        raise HTTPException(400, "新闻图片来源地址必须是白名单内无凭据且不带片段的 HTTPS 地址")
     public_url = str(value.get("public_url") or "").strip()
     if public_url:
         if not R2_PUBLIC_BASE_URL:
@@ -4904,11 +5665,27 @@ def remote_news_record(payload: dict[str, Any]) -> dict[str, Any]:
             # that field, but never let it overwrite an unrelated article.
             with db() as conn:
                 existing = conn.execute(
-                    "SELECT source, page_name FROM news_articles WHERE id = ?", (supplied_id,)
+                    "SELECT id, source, page_name FROM news_articles WHERE id = ?", (supplied_id,)
                 ).fetchone()
+                if existing is None:
+                    existing = conn.execute(
+                        "SELECT id, source, page_name FROM news_articles WHERE source = ? AND page_name = ? ORDER BY updated_at DESC, id LIMIT 1",
+                        (source, page_name),
+                    ).fetchone()
             if not existing or existing["source"] != source or existing["page_name"] != page_name:
                 raise HTTPException(400, "新闻 ID 与来源信息不匹配")
-            record_id = supplied_id
+            record_id = str(existing["id"])
+    else:
+        # The ID is optional in the documented API. Reuse an existing
+        # source/page record when it is omitted, otherwise repeated imports
+        # would silently create duplicate articles after a source URL changes.
+        with db() as conn:
+            existing = conn.execute(
+                "SELECT id FROM news_articles WHERE source = ? AND page_name = ? ORDER BY updated_at DESC, id LIMIT 1",
+                (source, page_name),
+            ).fetchone()
+        if existing:
+            record_id = str(existing["id"])
 
     title = str(article.get("title") or "").strip()
     if not title:
@@ -5009,15 +5786,7 @@ def remote_music_tracks(article: dict[str, Any]) -> list[dict[str, Any]]:
             credit_value = remote_ingest_text(value, f"第 {index} 条曲目作词作曲内容", 1000)
             if credit_key:
                 credits[credit_key] = credit_value
-        number = item.get("number", index)
-        if isinstance(number, bool):
-            raise HTTPException(400, f"第 {index} 条曲目编号格式无效")
-        try:
-            number = int(number)
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(400, f"第 {index} 条曲目编号格式无效") from exc
-        if not 0 <= number <= 9999:
-            raise HTTPException(400, f"第 {index} 条曲目编号超出范围")
+        number = remote_news_integer(item.get("number", index), f"第 {index} 条曲目编号", 9999)
         tracks.append(
             {
                 "disc": remote_ingest_text(item.get("disc"), f"第 {index} 条曲目碟片名称", 200),
@@ -5099,15 +5868,7 @@ def remote_music_record(payload: dict[str, Any]) -> dict[str, Any]:
     }
     position = release.get("position")
     if position not in (None, ""):
-        if isinstance(position, bool):
-            raise HTTPException(400, "音乐发行排序格式无效")
-        try:
-            position = int(position)
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(400, "音乐发行排序格式无效") from exc
-        if not 0 <= position <= 1_000_000_000:
-            raise HTTPException(400, "音乐发行排序超出范围")
-        record["position"] = position
+        record["position"] = remote_news_integer(position, "音乐发行排序", 1_000_000_000)
     record["fingerprint"] = release_fingerprint(record)
     return record
 
@@ -5410,7 +6171,8 @@ def external_ingest_api_docs() -> dict[str, Any]:
                         "images": [
                             {
                                 "url": "https://images.example.com/images/collabo/campaign_external_001.jpg",
-                                "source_url": "https://www.example.com/campaign_external_001",
+                                "source_url": "https://images.example.com/images/collabo/campaign_external_001.jpg",
+                                "source_page": "https://www.example.com/campaign_external_001",
                                 "public_url": "https://images.example.com/images/collabo/campaign_external_001.jpg",
                                 "alt": "联动立绘",
                             }
@@ -5472,8 +6234,8 @@ def news_upload_extension(content_type: str, content: bytes, filename: str) -> s
             return extension
     if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
         return ".webp"
-    if content_type == "image/avif" or Path(filename).suffix.lower() == ".avif":
-        return ".avif" if content_type == "image/avif" else None
+    if is_avif_bytes(content):
+        return ".avif"
     return None
 
 
@@ -5492,6 +6254,11 @@ async def refresh_news_record(
 ) -> bool:
     with db() as conn:
         old = conn.execute("SELECT * FROM news_articles WHERE id = ?", (record_id,)).fetchone()
+        old_images = (
+            conn.execute("SELECT * FROM news_images WHERE news_id = ? AND kind = 'remote'", (record_id,)).fetchall()
+            if old
+            else []
+        )
         state = conn.execute("SELECT * FROM news_fetch_state WHERE news_id = ?", (record_id,)).fetchone()
     headers = {}
     if state and state["source_url"] == source_url and not force:
@@ -5504,7 +6271,42 @@ async def refresh_news_record(
     record = None
     if response.status_code != 304:
         record = parse_topic_detail(response.text, source_url, listing)
-        record["images"] = await filter_news_images(client, record.get("images") or [])
+        if old is None:
+            with db() as conn:
+                identity_row = conn.execute(
+                    "SELECT * FROM news_articles WHERE source = ? AND page_name = ? ORDER BY updated_at DESC, id LIMIT 1",
+                    (record.get("source"), record.get("page_name")),
+                ).fetchone()
+                if identity_row:
+                    old = identity_row
+                    old_images = conn.execute(
+                        "SELECT * FROM news_images WHERE news_id = ? AND kind = 'remote'",
+                        (identity_row["id"],),
+                    ).fetchall()
+                    record_id = str(identity_row["id"])
+        original_images = [
+            image for image in (record.get("images") or []) if isinstance(image, dict) and image.get("source_url")
+        ]
+        filtered_images = await filter_news_images(client, original_images)
+        filtered_by_source = {str(image.get("source_url")): image for image in filtered_images}
+        old_remote_sources = {str(image["source_url"] or "") for image in old_images}
+        record["images"] = [
+            filtered_by_source.get(str(image["source_url"]))
+            or (
+                {
+                    **image,
+                    "width": image.get("width") or 0,
+                    "height": image.get("height") or 0,
+                    "bytes": 0,
+                    "sha256": "",
+                    "public_url": "",
+                }
+                if str(image["source_url"]) in old_remote_sources
+                else None
+            )
+            for image in original_images
+        ]
+        record["images"] = [image for image in record["images"] if image]
         record["id"] = record_id
         # A manual refresh of an old news.php/AS article never creates a Topics clone.
         if old:
@@ -5559,7 +6361,7 @@ async def news_sync_once() -> dict[str, Any]:
         error_message = None
         site_checked = False
         try:
-            async with httpx.AsyncClient(timeout=30, headers=NEWS_HEADERS) as client:
+            async with httpx.AsyncClient(timeout=30, headers=NEWS_HEADERS, trust_env=False) as client:
                 seen_urls: set[str] = set()
                 offset = 0
                 for _ in range(4):
@@ -5580,6 +6382,14 @@ async def news_sync_once() -> dict[str, Any]:
                             previous_row = conn.execute(
                                 "SELECT * FROM news_articles WHERE id = ?", (record_id,)
                             ).fetchone()
+                            if previous_row is None:
+                                previous_row = conn.execute(
+                                    "SELECT * FROM news_articles WHERE source = ? AND page_name = ? "
+                                    "ORDER BY updated_at DESC, id LIMIT 1",
+                                    ("niji_topics", entry["page_name"]),
+                                ).fetchone()
+                                if previous_row is not None:
+                                    record_id = str(previous_row["id"])
                             previous = dict(previous_row) if previous_row else None
                             if previous is not None:
                                 previous["_images"] = [
@@ -5778,11 +6588,23 @@ async def lifespan(_: FastAPI):
     await asyncio.gather(source_task, detail_task, news_task, news_slow_task, backup_task)
 
 
+class SafeStaticFiles(StaticFiles):
+    def file_response(self, full_path: str, stat_result, status_code: int = 200):  # type: ignore[no-untyped-def]
+        response = secure_file_response(
+            Path(full_path),
+            Path(self.directory),
+            status_code=status_code,
+        )
+        if response is None:
+            raise HTTPException(404, "文件不存在")
+        return response
+
+
 app = FastAPI(title="Nijigasaki DB", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=6)
-app.mount("/media", StaticFiles(directory=str(MEDIA_DIR)), name="media")
+app.mount("/media", SafeStaticFiles(directory=str(MEDIA_DIR)), name="media")
 if FRONTEND_DIST.is_dir():
-    app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="frontend-assets")
+    app.mount("/assets", SafeStaticFiles(directory=str(FRONTEND_DIST / "assets")), name="frontend-assets")
 
 
 def collaboration_asset_target(asset_path: str) -> Path | None:
@@ -5831,12 +6653,24 @@ def collaboration_image_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, 
         "position": row["position"],
         "path": url,
         "asset_path": str(row["path"] or ""),
-        "public_url": str(row["public_url"] or ""),
+        "public_url": (
+            str(row["public_url"] or "")
+            if valid_external_url(row["public_url"])
+            else ""
+        ),
         "thumbnail_path": str(row["thumbnail_path"] or ""),
         "url": url,
         "thumbnail_url": thumbnail_url,
-        "source_url": str(row["source_url"] or ""),
-        "source_page": str(row["source_page"] or ""),
+        "source_url": (
+            str(row["source_url"] or "")
+            if valid_external_url(row["source_url"])
+            else ""
+        ),
+        "source_page": (
+            str(row["source_page"] or "")
+            if valid_external_url(row["source_page"])
+            else ""
+        ),
         "source_title": str(row["source_title"] or ""),
         "caption": str(row["caption"] or ""),
         "alt": str(row["alt"] or ""),
@@ -5955,7 +6789,16 @@ def serve_collaboration_asset(asset_path: str) -> FileResponse:
     target = collaboration_asset_target(asset_path)
     if not target:
         raise HTTPException(404, "联动立绘资源不存在")
-    return FileResponse(target, media_type=mimetypes.guess_type(target.name)[0])
+    for root in (ILLUSTRATION_RUNTIME_DIR, ILLUSTRATION_DIR):
+        resolved_root = root.resolve()
+        try:
+            target.relative_to(resolved_root)
+        except ValueError:
+            continue
+        response = secure_file_response(target, root, media_type=mimetypes.guess_type(target.name)[0])
+        if response:
+            return response
+    raise HTTPException(404, "联动立绘资源不存在")
 
 
 @app.get("/api/collabo")
@@ -6014,6 +6857,7 @@ def news_article_payload(conn: sqlite3.Connection, row: sqlite3.Row, detail: boo
     cover = next((image for image in image_rows if news_image_url(image)), None)
     payload["cover_url"] = news_image_url(cover) if cover else ""
     payload["available_image_count"] = sum(1 for image in image_rows if news_image_url(image))
+    payload["r2_image_count"] = sum(1 for image in image_rows if valid_r2_public_image_url(image["public_url"]))
     if detail:
         payload.update({
             "body_markdown": clean_news_markdown(row["body_markdown"]),
@@ -6035,7 +6879,11 @@ async def api_news_image(image_id: int):
         raise HTTPException(404, "新闻图片不存在")
     target = news_image_target(image)
     if target:
-        return FileResponse(target, media_type=mimetypes.guess_type(target.name)[0])
+        local_path = str(image["local_path"] or "")
+        root = NEWS_RUNTIME_DIR if local_path.startswith("runtime:") else NEWS_ARCHIVE_DIR
+        response = secure_file_response(target, root, media_type=mimetypes.guess_type(target.name)[0])
+        if response:
+            return response
     public_url = str(image["public_url"] or "").strip()
     if public_url and valid_r2_public_image_url(public_url):
         return RedirectResponse(public_url)
@@ -6064,6 +6912,7 @@ async def api_news(
         article_ids = [row["id"] for row in page_rows]
         covers: dict[str, sqlite3.Row] = {}
         available_counts: dict[str, int] = {}
+        r2_counts: dict[str, int] = {}
         if article_ids:
             placeholders = ",".join("?" for _ in article_ids)
             for image in conn.execute(
@@ -6073,6 +6922,8 @@ async def api_news(
                 article_key = str(image["news_id"])
                 if news_image_url(image):
                     available_counts[article_key] = available_counts.get(article_key, 0) + 1
+                    if valid_r2_public_image_url(image["public_url"]):
+                        r2_counts[article_key] = r2_counts.get(article_key, 0) + 1
                     if article_key not in covers:
                         covers[article_key] = image
         tag_catalog = news_tag_catalog(conn)
@@ -6082,6 +6933,7 @@ async def api_news(
             cover = covers.get(str(row["id"]))
             payload["cover_url"] = news_image_url(cover) if cover else ""
             payload["available_image_count"] = available_counts.get(str(row["id"]), 0)
+            payload["r2_image_count"] = r2_counts.get(str(row["id"]), 0)
             payloads.append(payload)
         last = news_sync_status(conn)
         source_rows = news_query_rows(conn, q, tags)
@@ -6193,8 +7045,15 @@ async def api_eventernote_events(from_date: str = "", to_date: str = "") -> dict
     if range_end - range_start > timedelta(days=366):
         raise HTTPException(400, "Eventernote 日期范围过大")
     try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers={"Accept": "application/json", "User-Agent": "nijidb-web/1.0"}) as client:
+        async with httpx.AsyncClient(
+            timeout=20,
+            follow_redirects=False,
+            headers={"Accept": "application/json", "User-Agent": "nijidb-web/1.0"},
+            trust_env=False,
+        ) as client:
             response = await client.get(EVENTERNOTE_EVENTS_URL, params={"from_date": range_start.isoformat(), "to_date": range_end.isoformat()})
+            if http_response_is_redirect(response):
+                raise ValueError("Eventernote 不应重定向到未验证的地址")
             response.raise_for_status()
             payload = response.json()
     except (httpx.HTTPError, ValueError) as exc:
@@ -6306,7 +7165,7 @@ async def api_get_settings(request: Request) -> dict[str, Any]:
     )
     return {
         "role": role,
-        "settings": normalized_settings(public_settings()),
+        "settings": normalized_settings(public_settings(), include_onebot_token=False),
         "activity_logs": recent_database_logs(200),
         "news_last_sync": news_last,
         "news_syncing": news_run_lock.locked(),
@@ -6324,12 +7183,24 @@ async def api_save_settings(request: Request) -> dict[str, dict[str, str]]:
         raise HTTPException(400, "请求格式无效") from exc
     if not isinstance(payload, dict):
         raise HTTPException(400, "请求格式无效")
-    values = normalized_settings({**settings(), **payload})
+    # The token is write-only. An empty PATCH value has the same meaning as an
+    # omitted password field and must not erase the server-side credential.
+    patch = dict(payload)
+    if "onebot_token" in patch and not str(patch["onebot_token"] or "").strip():
+        patch.pop("onebot_token")
+    try:
+        if "onebot_url" in patch and str(patch["onebot_url"] or "").strip():
+            patch["onebot_url"] = validate_onebot_url(patch["onebot_url"])
+        if "onebot_target" in patch and str(patch["onebot_target"] or "").strip():
+            validate_onebot_target(patch["onebot_target"])
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    values = normalized_settings({**settings(), **patch})
     save_settings(values)
     if {"music_auto_sync", "interval_minutes", "detail_interval_minutes"} & payload.keys():
         music_settings_event.set()
     news_settings_event.set()
-    return {"settings": values}
+    return {"settings": normalized_settings(public_settings(), include_onebot_token=False)}
 
 
 @app.get("/api/admin/external-api-docs", include_in_schema=False)
@@ -6360,7 +7231,10 @@ async def api_generate_external_api_key(resource: str, request: Request) -> JSON
 async def api_remote_music_ingest(request: Request) -> dict[str, Any]:
     require_external_ingest_key(request, REMOTE_MUSIC_INGEST_API_KEY_ENV, "音乐")
     payload = await read_external_ingest_request(request, "音乐")
-    record = remote_music_record(payload)
+    try:
+        record = remote_music_record(payload)
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise HTTPException(400, "音乐导入内容格式无效") from exc
     async with sync_lock:
         with db() as conn:
             old = conn.execute("SELECT position FROM releases WHERE id = ?", (record["id"],)).fetchone()
@@ -6386,12 +7260,15 @@ async def api_remote_music_ingest(request: Request) -> dict[str, Any]:
 async def api_remote_program_ingest(request: Request) -> dict[str, Any]:
     require_external_ingest_key(request, REMOTE_PROGRAM_INGEST_API_KEY_ENV, "节目")
     payload = await read_external_ingest_request(request, "节目")
-    normalized_payload = remote_program_payload(payload)
+    try:
+        normalized_payload = remote_program_payload(payload)
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise HTTPException(400, "节目导入内容格式无效") from exc
     reject_external_program_local_images(normalized_payload)
     try:
         entries, warnings = normalize_import_bundle(normalized_payload)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise HTTPException(400, str(exc) or "节目导入内容格式无效") from exc
 
     image_paths_to_cleanup: list[str] = []
     now = datetime.now(timezone.utc).isoformat()
@@ -6441,8 +7318,8 @@ async def api_remote_program_ingest(request: Request) -> dict[str, Any]:
                         }
                         cursor = insert_occurrence_row(conn, values)
                         insert_occurrence_images(conn, cursor.lastrowid, occurrence.get("images"), now)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise HTTPException(400, str(exc) or "节目导入内容格式无效") from exc
     except sqlite3.IntegrityError as exc:
         raise HTTPException(409, "导入的节目或单集与现有资料冲突") from exc
 
@@ -6470,7 +7347,10 @@ async def api_remote_program_ingest(request: Request) -> dict[str, Any]:
 async def api_remote_collabo_ingest(request: Request) -> dict[str, Any]:
     require_external_ingest_key(request, REMOTE_COLLABO_INGEST_API_KEY_ENV, "联动")
     payload = await read_external_ingest_request(request, "联动")
-    record = remote_collabo_record(payload)
+    try:
+        record = remote_collabo_record(payload)
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise HTTPException(400, "联动导入内容格式无效") from exc
     async with sync_lock:
         with db() as conn:
             existing = None
@@ -6510,7 +7390,10 @@ async def api_remote_news_ingest(request: Request) -> dict[str, Any]:
     """Accept validated news content after an external worker archives images to R2."""
     require_remote_news_ingest_key(request)
     payload = await read_remote_news_request(request)
-    record = remote_news_record(payload)
+    try:
+        record = remote_news_record(payload)
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise HTTPException(400, "新闻导入内容格式无效") from exc
     if news_run_lock.locked():
         raise HTTPException(409, "新闻检查正在进行，请稍后再试")
     async with news_run_lock:
@@ -6522,9 +7405,10 @@ async def api_remote_news_ingest(request: Request) -> dict[str, Any]:
                 image_count = conn.execute(
                     "SELECT COUNT(*) FROM news_images WHERE news_id = ?", (record["id"],)
                 ).fetchone()[0]
-                r2_image_count = conn.execute(
-                    "SELECT COUNT(*) FROM news_images WHERE news_id = ? AND public_url != ''", (record["id"],)
-                ).fetchone()[0]
+                article_images = conn.execute(
+                    "SELECT public_url FROM news_images WHERE news_id = ?", (record["id"],)
+                ).fetchall()
+                r2_image_count = sum(1 for image in article_images if valid_r2_public_image_url(image["public_url"]))
     if changed:
         log_database_activity("news", f"远程导入新闻：{str(article['title'] or '')[:80]}")
     return {
@@ -6577,11 +7461,22 @@ async def api_admin_source_html(request: Request) -> dict[str, Any]:
             record = parse_topic_detail(html, source_url)
         except ValueError as exc:
             raise HTTPException(400, f"新闻源代码解析失败：{exc}") from exc
+        record["images"] = [
+            image
+            for image in (record.get("images") or [])
+            if isinstance(image, dict) and valid_official_image_url(image.get("source_url"))
+        ]
         if not str(record.get("page_name") or "").strip():
             raise HTTPException(400, "新闻源代码解析失败：请提供具体新闻详情页地址")
         timestamp = datetime.now(timezone.utc).isoformat()
-        record_id = str(record["id"])
         with db() as conn:
+            existing_identity = conn.execute(
+                "SELECT id FROM news_articles WHERE source = ? AND page_name = ? ORDER BY updated_at DESC, id LIMIT 1",
+                (record["source"], record["page_name"]),
+            ).fetchone()
+            if existing_identity:
+                record["id"] = str(existing_identity["id"])
+            record_id = str(record["id"])
             changed, created = upsert_news_record(conn, record, timestamp)
             conn.execute(
                 """INSERT INTO news_fetch_state (news_id, source_url, etag, last_modified, checked_at)
@@ -6659,7 +7554,7 @@ async def api_admin_news_refresh(news_id: str, request: Request) -> dict[str, An
         try:
             source_url = validate_news_url(article["source_url"])
             site_checked = True
-            async with httpx.AsyncClient(timeout=30, headers=NEWS_HEADERS) as client:
+            async with httpx.AsyncClient(timeout=30, headers=NEWS_HEADERS, trust_env=False) as client:
                 changed = await refresh_news_record(client, news_id, source_url, force=True)
             await record_official_site_health(True, "新闻手动刷新")
         except Exception as exc:
@@ -6704,23 +7599,25 @@ async def api_admin_news_upload_image(news_id: str, request: Request) -> dict[st
     extension = news_upload_extension(content_type, content, filename)
     if not extension:
         raise HTTPException(415, "只支持 JPEG、PNG、GIF、WebP、BMP 或 AVIF 图片")
+    dimensions = image_dimensions_from_bytes(content)
+    if not dimensions:
+        raise HTTPException(415, "图片内容无法解析")
+    if not news_image_dimensions_allowed(*dimensions):
+        raise HTTPException(400, "新闻图片尺寸必须在 240×120 至 10000×10000 之间")
     digest = hashlib.sha256(content).hexdigest()
     relative = Path("manual") / f"{digest}{extension}"
-    target = NEWS_RUNTIME_DIR / relative
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if not target.exists():
-        temporary = target.with_name(f".{target.name}.{secrets.token_hex(6)}.tmp")
-        try:
-            temporary.write_bytes(content)
-            temporary.replace(target)
-        finally:
-            temporary.unlink(missing_ok=True)
+    try:
+        target, target_created = write_new_local_file(NEWS_RUNTIME_DIR, relative, content)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(400, "新闻图片保存目录不能包含符号链接") from exc
     r2_relative = (Path("news") / relative).as_posix()
     r2_url = ""
     if r2_upload_is_configured():
         try:
             await asyncio.to_thread(upload_image_to_r2, target, r2_relative)
         except Exception as exc:
+            if target_created:
+                unlink_local_file(NEWS_RUNTIME_DIR, relative)
             raise HTTPException(502, "新闻图片上传到 R2 失败，请稍后重试") from exc
         if r2_is_configured():
             r2_url = r2_public_image_url(r2_relative)
@@ -6737,9 +7634,20 @@ async def api_admin_news_upload_image(news_id: str, request: Request) -> dict[st
             position = conn.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM news_images WHERE news_id = ?", (news_id,)).fetchone()[0]
             conn.execute(
                 """INSERT INTO news_images
-                (news_id, position, kind, local_path, public_url, source_url, alt_text, bytes, sha256, created_at)
-                VALUES (?, ?, 'manual', ?, ?, '', ?, ?, ?, ?)""",
-                (news_id, position, f"runtime:{relative.as_posix()}", r2_url, alt_text, total, digest, datetime.now(timezone.utc).isoformat()),
+                (news_id, position, kind, local_path, public_url, source_url, alt_text, width, height, bytes, sha256, created_at)
+                VALUES (?, ?, 'manual', ?, ?, '', ?, ?, ?, ?, ?, ?)""",
+                (
+                    news_id,
+                    position,
+                    f"runtime:{relative.as_posix()}",
+                    r2_url,
+                    alt_text,
+                    dimensions[0],
+                    dimensions[1],
+                    total,
+                    digest,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
             )
         updated = conn.execute("SELECT * FROM news_articles WHERE id = ?", (news_id,)).fetchone()
         result = news_article_payload(conn, updated, detail=True)
@@ -6768,7 +7676,9 @@ async def api_admin_news_delete_image(image_id: int, request: Request) -> dict[s
         article = conn.execute("SELECT * FROM news_articles WHERE id = ?", (image["news_id"],)).fetchone()
         result = news_article_payload(conn, article, detail=True)
     if target and not still_used:
-        target.unlink(missing_ok=True)
+        local_path = str(image["local_path"] or "")
+        relative = Path(local_path.removeprefix("runtime:").lstrip("/"))
+        unlink_local_file(NEWS_RUNTIME_DIR, relative)
     log_database_activity("news", f"删除官网新闻图片：{result['title'][:80]}")
     return {"article": result}
 
@@ -7005,36 +7915,40 @@ async def api_admin_news_edit(news_id: str, request: Request) -> dict[str, Any]:
             raise HTTPException(400, str(exc)) from exc
     if not changes:
         raise HTTPException(400, "没有可保存的新闻字段")
-    with db() as conn:
-        article = conn.execute("SELECT * FROM news_articles WHERE id = ?", (news_id,)).fetchone()
-        if not article:
-            raise HTTPException(404, "新闻不存在")
-        if payload.get("updated_at") and payload["updated_at"] != article["updated_at"]:
-            raise HTTPException(409, "新闻已被其他操作更新，请重新加载后编辑")
-        if "tags_json" in changes:
-            tag_values = payload.get("tag_ids") if "tag_ids" in payload else decode_json(changes["tags_json"], [])
-            tag_keys, _, invalid_tags = resolve_news_tag_values(conn, tag_values)
-            if invalid_tags:
-                raise HTTPException(400, f"新闻标签不存在：{'、'.join(invalid_tags[:5])}")
-            changes["tags_json"] = json.dumps(tag_keys, ensure_ascii=False)
-        changes = {field: value for field, value in changes.items() if value != article[field]}
-        if not changes:
-            return {"article": news_article_payload(conn, article, detail=True)}
-        manual_fields = set(decode_json(article["manual_fields_json"], []))
-        manual_fields.update(changes)
-        assignments = ", ".join(f"{field} = ?" for field in changes)
-        values = list(changes.values())
-        values.extend(
-            [json.dumps(sorted(manual_fields), ensure_ascii=False), datetime.now(timezone.utc).isoformat(), news_id]
-        )
-        conn.execute(
-            f"UPDATE news_articles SET {assignments}, manual_fields_json = ?, updated_at = ? WHERE id = ?",
-            values,
-        )
-        if "tags_json" in changes:
-            sync_news_article_tags(conn, news_id, decode_json(changes["tags_json"], []))
-        updated = conn.execute("SELECT * FROM news_articles WHERE id = ?", (news_id,)).fetchone()
-        result = news_article_payload(conn, updated, detail=True)
+    if news_run_lock.locked():
+        raise HTTPException(409, "新闻检查正在进行，请稍后再试")
+    async with news_run_lock:
+        async with sync_lock:
+            with db() as conn:
+                article = conn.execute("SELECT * FROM news_articles WHERE id = ?", (news_id,)).fetchone()
+                if not article:
+                    raise HTTPException(404, "新闻不存在")
+                if payload.get("updated_at") and payload["updated_at"] != article["updated_at"]:
+                    raise HTTPException(409, "新闻已被其他操作更新，请重新加载后编辑")
+                if "tags_json" in changes:
+                    tag_values = payload.get("tag_ids") if "tag_ids" in payload else decode_json(changes["tags_json"], [])
+                    tag_keys, _, invalid_tags = resolve_news_tag_values(conn, tag_values)
+                    if invalid_tags:
+                        raise HTTPException(400, f"新闻标签不存在：{'、'.join(invalid_tags[:5])}")
+                    changes["tags_json"] = json.dumps(tag_keys, ensure_ascii=False)
+                changes = {field: value for field, value in changes.items() if value != article[field]}
+                if not changes:
+                    return {"article": news_article_payload(conn, article, detail=True)}
+                manual_fields = set(decode_json(article["manual_fields_json"], []))
+                manual_fields.update(changes)
+                assignments = ", ".join(f"{field} = ?" for field in changes)
+                values = list(changes.values())
+                values.extend(
+                    [json.dumps(sorted(manual_fields), ensure_ascii=False), datetime.now(timezone.utc).isoformat(), news_id]
+                )
+                conn.execute(
+                    f"UPDATE news_articles SET {assignments}, manual_fields_json = ?, updated_at = ? WHERE id = ?",
+                    values,
+                )
+                if "tags_json" in changes:
+                    sync_news_article_tags(conn, news_id, decode_json(changes["tags_json"], []))
+                updated = conn.execute("SELECT * FROM news_articles WHERE id = ?", (news_id,)).fetchone()
+                result = news_article_payload(conn, updated, detail=True)
     log_database_activity("news", f"更新官网新闻：{result['title'][:80]}")
     return {"article": result}
 
@@ -7095,7 +8009,7 @@ async def api_admin_collabo_upload(request: Request) -> dict[str, list[dict[str,
     if len(uploads) > max_files:
         raise HTTPException(413, "每批最多上传 16 张联动图片")
 
-    prepared: list[tuple[str, bytes, str, str, str]] = []
+    prepared: list[tuple[str, bytes, str, str, str, int, int]] = []
     for filename, content_type, content in uploads:
         if len(content) > max_bytes:
             raise HTTPException(413, "单张联动图片不能超过 20 MB")
@@ -7103,22 +8017,20 @@ async def api_admin_collabo_upload(request: Request) -> dict[str, list[dict[str,
         extension = collaboration_upload_extension(content_type, content, filename)
         if not extension:
             raise HTTPException(415, "只支持 JPEG、PNG、GIF、WebP 或 BMP 图片")
+        dimensions = image_dimensions_from_bytes(content)
+        if not dimensions or any(value > 10000 for value in dimensions):
+            raise HTTPException(415, "图片内容或尺寸无效")
         digest = hashlib.sha256(content).hexdigest()
         relative = Path("assets") / f"{digest}{extension}"
-        prepared.append((filename, content, content_type, digest, relative.as_posix()))
+        prepared.append((filename, content, content_type, digest, relative.as_posix(), *dimensions))
 
     images: list[dict[str, Any]] = []
-    for filename, content, _, digest, relative_text in prepared:
+    for filename, content, _, digest, relative_text, width, height in prepared:
         relative = Path(relative_text)
-        target = ILLUSTRATION_RUNTIME_DIR / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.exists():
-            temporary = target.with_name(f".{target.name}.{secrets.token_hex(6)}.tmp")
-            try:
-                temporary.write_bytes(content)
-                temporary.replace(target)
-            finally:
-                temporary.unlink(missing_ok=True)
+        try:
+            target, _ = write_new_local_file(ILLUSTRATION_RUNTIME_DIR, relative, content)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(400, "联动图片保存目录不能包含符号链接") from exc
         local_url = f"/api/collabo/assets/{quote(relative_text, safe='/')}"
         r2_relative = (Path("illustrations") / relative).as_posix()
         r2_url = ""
@@ -7144,8 +8056,8 @@ async def api_admin_collabo_upload(request: Request) -> dict[str, list[dict[str,
             "source_title": "",
             "caption": "",
             "alt": filename[:500],
-            "width": 0,
-            "height": 0,
+            "width": width,
+            "height": height,
             "bytes": len(content),
             "sha256": digest,
             "kind": "manual",
@@ -7239,7 +8151,15 @@ async def api_download_stored_backup(filename: str, request: Request) -> FileRes
         raise HTTPException(404, "数据库备份不存在") from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    return FileResponse(backup_path, media_type="application/vnd.sqlite3", filename=backup_path.name)
+    response = secure_file_response(
+        backup_path,
+        BACKUP_DIR,
+        media_type="application/vnd.sqlite3",
+        filename=backup_path.name,
+    )
+    if not response:
+        raise HTTPException(404, "数据库备份不存在")
+    return response
 
 
 @app.post("/api/admin/backups/{filename}/restore")
@@ -7253,7 +8173,15 @@ async def api_download_backup(request: Request) -> FileResponse:
     require_api_admin(request)
     async with sync_lock:
         backup_path = create_persistent_database_backup("manual")
-    return FileResponse(backup_path, media_type="application/vnd.sqlite3", filename=backup_path.name)
+    response = secure_file_response(
+        backup_path,
+        BACKUP_DIR,
+        media_type="application/vnd.sqlite3",
+        filename=backup_path.name,
+    )
+    if not response:
+        raise HTTPException(404, "数据库备份不存在")
+    return response
 
 
 @app.post("/api/admin/backup/restore")
@@ -7274,7 +8202,13 @@ async def api_test_onebot(request: Request) -> dict[str, str]:
     config = settings()
     for key in ("onebot_url", "onebot_token", "onebot_target", "onebot_profile"):
         if key in payload:
-            config[key] = str(payload[key] or "").strip()
+            value = str(payload[key] or "").strip()
+            # The browser deliberately does not receive the stored token. An
+            # empty token in a test request therefore means "use the stored
+            # token", while a non-empty value can test a replacement token.
+            if key == "onebot_token" and not value:
+                continue
+            config[key] = value
     config["onebot_profile"] = config.get("onebot_profile") or "bot"
     try:
         await send_onebot("[虹咲音乐资料]\nOneBot 测试消息发送成功。", config)
@@ -7689,6 +8623,8 @@ async def api_add_program_occurrence_image(
     alt_text = ""
     total = 0
     digest = ""
+    width = 0
+    height = 0
     if content_type == "application/json" or content_type.endswith("+json"):
         try:
             payload = await request.json()
@@ -7723,24 +8659,24 @@ async def api_add_program_occurrence_image(
         extension = news_upload_extension(content_type, content, filename)
         if not extension:
             raise HTTPException(415, "只支持 JPEG、PNG、GIF、WebP、BMP 或 AVIF 图片")
+        dimensions = image_dimensions_from_bytes(content)
+        if not dimensions or any(value > 10000 for value in dimensions):
+            raise HTTPException(415, "图片内容或尺寸无效")
+        width, height = dimensions
         kind = "upload"
         digest = hashlib.sha256(content).hexdigest()
         relative = Path("programs") / f"{digest}{extension}"
         local_path = relative.as_posix()
-        target = MEDIA_DIR / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.exists():
-            temporary = target.with_name(f".{target.name}.{secrets.token_hex(6)}.tmp")
-            try:
-                temporary.write_bytes(content)
-                temporary.replace(target)
-            finally:
-                temporary.unlink(missing_ok=True)
+        try:
+            target, target_created = write_new_local_file(MEDIA_DIR, relative, content)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(400, "节目返图保存目录不能包含符号链接") from exc
         if r2_upload_is_configured():
             try:
                 await asyncio.to_thread(upload_image_to_r2, target, local_path)
             except Exception as exc:
-                await cleanup_program_image_storage([local_path])
+                if target_created:
+                    await cleanup_program_image_storage([local_path])
                 raise HTTPException(502, "节目返图上传到 R2 失败，请稍后重试") from exc
             if r2_is_configured():
                 public_url = r2_public_image_url(local_path)
@@ -7775,8 +8711,21 @@ async def api_add_program_occurrence_image(
             image_id = conn.execute(
                 """INSERT INTO program_occurrence_images
                    (occurrence_id, position, kind, local_path, public_url, source_url, alt_text, width, height, bytes, sha256, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)""",
-                (occurrence_id, position, kind, local_path, public_url, source_url, alt_text, total, digest, now),
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    occurrence_id,
+                    position,
+                    kind,
+                    local_path,
+                    public_url,
+                    source_url,
+                    alt_text,
+                    width,
+                    height,
+                    total,
+                    digest,
+                    now,
+                ),
             ).lastrowid
         conn.execute("UPDATE program_occurrences SET updated_at = ? WHERE id = ?", (now, occurrence_id))
         image_row = conn.execute(

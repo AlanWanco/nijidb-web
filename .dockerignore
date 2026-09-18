@@ -8,3 +8,9 @@ frontend/dist
 *.sqlite3
 .env
 .env.*
+# Poller runtime mounts may contain node credentials and API/R2 keys.
+poller/*.env
+poller/mihomo/*.env
+poller/mihomo/config.yaml
+poller/mihomo/*.dat
+poller/mihomo/*.metadb

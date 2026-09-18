@@ -29,9 +29,28 @@
         "MIHOMO_SUB_STATE": "/state/subscription.json",
         "MIHOMO_CONTROLLER": "http://mihomo:9090",
         "MIHOMO_PROXY": "http://mihomo:7890",
-        "MIHOMO_GROUP_TYPE": "url-test",
+        "MIHOMO_GROUP_TYPE": "fallback",
         "MIHOMO_CN_DIRECT": "1",
         "MIHOMO_LISTENERS": "1"
+      }
+    },
+    {
+      "name": "proxy-speed",
+      "script": "proxy_speed_selector.py",
+      "mode": "once",
+      "interval_minutes": 30,
+      "env": {
+        "MIHOMO_SPEED_CONFIG": "/config/config.yaml",
+        "MIHOMO_SPEED_STATE": "/state/proxy-speed.json",
+        "MIHOMO_SPEED_NODES": "/state/nodes.json",
+        "MIHOMO_SPEED_CONTROLLER": "http://mihomo:9090",
+        "MIHOMO_SPEED_GROUP": "PROXY",
+        "MIHOMO_SPEED_PROXY_HOST": "mihomo",
+        "MIHOMO_SPEED_CANDIDATES": "8",
+        "MIHOMO_SPEED_BYTES": "524288",
+        "MIHOMO_SPEED_TIMEOUT_SECONDS": "25",
+        "MIHOMO_SPEED_MIN_GAIN": "0.15",
+        "MIHOMO_SPEED_START_DELAY_SECONDS": "30"
       }
     }
   ]

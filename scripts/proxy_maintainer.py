@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import signal
 import subprocess
@@ -58,8 +59,13 @@ class Task:
         if not name or not script:
             raise ValueError("任务必须包含 name 与 script")
         self.name = name
-        self.script = (script_dir / script).resolve()
-        if not self.script.exists():
+        script_root = script_dir.resolve()
+        self.script = (script_root / script).resolve()
+        try:
+            self.script.relative_to(script_root)
+        except ValueError as exc:
+            raise ValueError(f"任务脚本必须位于脚本目录内：{script}") from exc
+        if not self.script.is_file():
             raise ValueError(f"任务脚本不存在：{self.script}")
         self.mode = str(spec.get("mode") or "loop").strip()
         if self.mode not in {"loop", "once"}:
@@ -74,7 +80,12 @@ class Task:
         self.args = [str(item) for item in args]
         if self.mode == "once" and "--once" not in self.args:
             self.args.append("--once")
-        interval_minutes = float(spec.get("interval_minutes") or 0)
+        try:
+            interval_minutes = float(spec.get("interval_minutes") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"任务 {name} 的 interval_minutes 必须是数字") from exc
+        if not math.isfinite(interval_minutes) or interval_minutes < 0:
+            raise ValueError(f"任务 {name} 的 interval_minutes 必须是非负有限数字")
         self.interval_seconds = max(ONCE_MIN_INTERVAL_SECONDS, interval_minutes * 60)
         self.process: subprocess.Popen[bytes] | None = None
         self.last_start = 0.0
@@ -131,11 +142,15 @@ class Task:
         if not self.running() or self.process is None:
             return
         log(f"正在停止任务 {self.name}（pid={self.process.pid}）")
-        self.process.terminate()
+        try:
+            self.process.terminate()
+        except ProcessLookupError:
+            pass
         try:
             self.process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             self.process.kill()
+            self.process.wait(timeout=5)
 
 
 def load_tasks(path: Path, script_dir: Path) -> list[Task]:

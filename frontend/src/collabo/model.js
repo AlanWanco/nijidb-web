@@ -9,14 +9,35 @@ import {
 export const PAGE_SIZE = 24;
 export const SLUG_PATTERN = /^\d{8}-[a-f0-9]{6}$/;
 
+function hasEmptyPort(raw) {
+  const match = raw.match(/^(?:[a-z][a-z\d+.-]*:)?\/\/([^/?#]*)/i);
+  return Boolean(match?.[1]?.endsWith(":"));
+}
+
+function safePath(raw) {
+  try {
+    const decoded = decodeURIComponent(raw);
+    if (/[\u0000-\u001f\u007f\\]/.test(decoded)) return false;
+    const parts = decoded.split("/");
+    return !parts.some((part, index) => part === "." || part === ".." || (index > 0 && index < parts.length - 1 && !part));
+  } catch {
+    return false;
+  }
+}
+
 export function safeUrl(value, local = false) {
   if (typeof value !== "string" || !value.trim()) return "";
   const raw = value.trim();
-  if (raw.includes("\\")) return "";
-  if (local && /^\/(?:media|api\/(?:collabo|collaboration-illustrations)\/assets)\//.test(raw) && !raw.includes("\\")) return raw;
+  if (/[\u0000-\u001f\u007f\\]/.test(raw) || raw.includes("#") || local && raw.includes("?") || hasEmptyPort(raw)) return "";
+  if (local && /^\/(?:media|api\/(?:collabo|collaboration-illustrations)\/assets)\//.test(raw) && safePath(raw)) return raw;
   try {
     const url = new URL(raw);
-    return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password ? url.href : "";
+    const port = url.port ? Number(url.port) : null;
+    return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password && safePath(url.pathname)
+      && !(raw.includes("?") && !url.search)
+      && (port === null || Number.isInteger(port) && port > 0 && port <= 65535)
+      ? url.href
+      : "";
   } catch {
     return "";
   }
@@ -57,6 +78,7 @@ export function normalizeImage(image, index = 0) {
     thumbnail_url: safeUrl(image.thumbnail_url, true),
     source_url: safeUrl(image.source_url),
     source_page: safeUrl(image.source_page),
+    public_url: safeUrl(image.public_url),
     source_title: String(image.source_title || ""),
     caption: String(image.caption || ""),
     alt: String(image.alt || ""),
@@ -66,10 +88,12 @@ export function normalizeImage(image, index = 0) {
 }
 
 export function normalizeItem(item) {
-  const links = (item.links || item.official_links || []).map((link) => ({
-    title: String(link.title || ""),
-    url: safeUrl(link.url),
-  }));
+  const links = (item.links || item.official_links || [])
+    .map((link) => ({
+      title: String(link.title || ""),
+      url: safeUrl(link.url),
+    }))
+    .filter((link) => link.url);
   const images = (item.images || []).map(normalizeImage).filter((image) => image.url);
   return {
     ...item,

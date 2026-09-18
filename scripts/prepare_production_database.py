@@ -19,15 +19,38 @@ import sqlite3
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 
 def valid_external_url(value: str) -> bool:
-    try:
-        parsed = urlparse(str(value or "").strip())
-    except ValueError:
+    raw = str(value or "").strip()
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in raw) or "\\" in raw:
         return False
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+    try:
+        parsed = urlparse(raw)
+        parsed.port
+        decoded_path = unquote(parsed.path)
+        path_parts = decoded_path.split("/")
+    except (TypeError, ValueError):
+        return False
+    return (
+        parsed.scheme in {"http", "https"}
+        and bool(parsed.hostname)
+        and not any(character.isspace() for character in parsed.hostname)
+        and not parsed.netloc.endswith(":")
+        and (parsed.port is None or 1 <= parsed.port <= 65535)
+        and not parsed.username
+        and not parsed.password
+        and not any(ord(character) < 0x20 or ord(character) == 0x7F for character in decoded_path)
+        and "?" not in decoded_path
+        and "#" not in decoded_path
+        and "\\" not in decoded_path
+        and all(part not in {".", ".."} for part in path_parts if part)
+        and all(path_part for path_part in path_parts[1:-1])
+        and not ("?" in raw and not parsed.query)
+        and not parsed.fragment
+        and "#" not in raw
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,20 +67,26 @@ def backup_database(database: Path) -> Path:
         suffix=database.suffix or ".sqlite3",
         dir=database.parent,
     )
-    os.close(handle)
     backup = Path(raw_path)
-    source = sqlite3.connect(database)
-    destination = sqlite3.connect(backup)
+    source = None
     try:
-        source.backup(destination)
-        destination.commit()
+        source = sqlite3.connect(database)
+        payload = source.serialize()
+        view = memoryview(payload)
+        while view:
+            written = os.write(handle, view)
+            if written <= 0:
+                raise OSError("数据库备份写入失败")
+            view = view[written:]
+        os.fsync(handle)
         os.chmod(backup, 0o600)
     except Exception:
         backup.unlink(missing_ok=True)
         raise
     finally:
-        destination.close()
-        source.close()
+        os.close(handle)
+        if source is not None:
+            source.close()
     return backup
 
 

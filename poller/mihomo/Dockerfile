@@ -22,12 +22,18 @@ RUN apk add --no-cache ca-certificates curl tzdata \
 
 # 预置 geo 数据（GeoSite / GeoIP），避免运行时下载：容器里的下载会超时，
 # 而且一旦文件损坏，GEOSITE 规则会让整个配置加载失败。
+# The release tag is refreshed upstream, so pin the downloaded bytes as well as
+# the source tag. Update these three values together when refreshing geo data.
 ARG GEO_RELEASE=latest
+ARG GEOSITE_SHA256=9e37f1c1e764a1772f5331b69b20f741944b033f0584aec4fc358330e2d869dd
+ARG GEOIP_METADB_SHA256=2483ea23514052425a64538aa502fc37263db797150c62bd2f6ad147ae61372b
 RUN set -eux; \
-    for name in geosite.dat geoip.metadb; do \
-        curl -fsSL --retry 3 --retry-delay 3 --max-time 300 -o "/tmp/${name}" \
-            "https://github.com/MetaCubeX/meta-rules-dat/releases/download/${GEO_RELEASE}/${name}"; \
-    done; \
+    curl -fsSL --retry 3 --retry-delay 3 --max-time 300 -o /tmp/geosite.dat \
+        "https://github.com/MetaCubeX/meta-rules-dat/releases/download/${GEO_RELEASE}/geosite.dat"; \
+    curl -fsSL --retry 3 --retry-delay 3 --max-time 300 -o /tmp/geoip.metadb \
+        "https://github.com/MetaCubeX/meta-rules-dat/releases/download/${GEO_RELEASE}/geoip.metadb"; \
+    echo "${GEOSITE_SHA256}  /tmp/geosite.dat" | sha256sum -c -; \
+    echo "${GEOIP_METADB_SHA256}  /tmp/geoip.metadb" | sha256sum -c -; \
     adduser -D -u 1000 -h /home/mihomo mihomo; \
     mkdir -p /home/mihomo/.config/mihomo; \
     mv /tmp/geosite.dat /home/mihomo/.config/mihomo/GeoSite.dat; \

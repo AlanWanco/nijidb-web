@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urljoin, urlparse, urlunparse
@@ -68,7 +69,7 @@ NEWS_IMAGE_MAX_WIDTH = 10000
 NEWS_IMAGE_MAX_HEIGHT = 10000
 NEWS_SUMMARY_MAX_LENGTH = 200
 NEWS_FILENAME_RE = re.compile(r"^\[(\d{8})\](niji_topics|niji_news|as_news)_(?:\d+)_([^/]+)\.md$")
-NEWS_PAGE_ID_RE = re.compile(r"^\d+_[^/]+$")
+NEWS_PAGE_ID_RE = re.compile(r"^\d+_[^/\\?#\x00-\x1f\x7f]{1,127}$")
 NEWS_CHROME_LINES = NEWS_CATEGORIES | {
     "ニュース",
     "全てのニュース",
@@ -214,6 +215,8 @@ CREATE TABLE IF NOT EXISTS news_articles (
 );
 CREATE INDEX IF NOT EXISTS idx_news_articles_date ON news_articles(published_at DESC, id);
 CREATE INDEX IF NOT EXISTS idx_news_articles_source ON news_articles(source, published_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_news_article_source_page
+  ON news_articles(source, page_name) WHERE page_name <> '';
 CREATE TABLE IF NOT EXISTS news_tags (
   id TEXT PRIMARY KEY,
   slug TEXT NOT NULL UNIQUE,
@@ -551,20 +554,31 @@ def news_tag_catalog(conn, counts: dict[str, int] | None = None, include_inactiv
 
 
 def normalize_news_date(value: Any, fallback: str = "") -> str:
-    raw = str(value or "").strip()
-    match = NEWS_DATE_RE.search(raw)
-    if match:
+    def normalize_match(match: re.Match[str] | None) -> str:
+        if not match:
+            return ""
         year, month, day = match.groups()
-        return f"{year}-{int(month):02d}-{int(day):02d}"
+        try:
+            return date(int(year), int(month), int(day)).isoformat()
+        except ValueError:
+            return ""
+
+    raw = str(value or "").strip()
+    normalized = normalize_match(NEWS_DATE_RE.search(raw))
+    if normalized:
+        return normalized
     digits = re.sub(r"\D", "", raw)
     if len(digits) == 8:
-        return f"{digits[:4]}-{digits[4:6]}-{digits[6:]}"
-    fallback_match = NEWS_DATE_RE.search(str(fallback or ""))
-    if fallback_match:
-        year, month, day = fallback_match.groups()
-        return f"{year}-{int(month):02d}-{int(day):02d}"
+        normalized = normalize_match(NEWS_DATE_RE.search(f"{digits[:4]}-{digits[4:6]}-{digits[6:]}"))
+        if normalized:
+            return normalized
+    normalized = normalize_match(NEWS_DATE_RE.search(str(fallback or "")))
+    if normalized:
+        return normalized
     fallback_digits = re.sub(r"\D", "", str(fallback or ""))
-    return f"{fallback_digits[:4]}-{fallback_digits[4:6]}-{fallback_digits[6:8]}" if len(fallback_digits) == 8 else ""
+    if len(fallback_digits) != 8:
+        return ""
+    return normalize_match(NEWS_DATE_RE.search(f"{fallback_digits[:4]}-{fallback_digits[4:6]}-{fallback_digits[6:]}"))
 
 
 def metadata_field(text: str, name: str) -> str:
@@ -758,7 +772,12 @@ def inferred_topic_tags(title: str, category: str, body: str = "") -> list[str]:
 
 def _parse_image_dimension(value: Any) -> int | None:
     match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*(?:px)?\s*", str(value or ""), re.IGNORECASE)
-    return int(float(match.group(1))) if match else None
+    if not match:
+        return None
+    try:
+        return int(float(match.group(1)))
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def news_image_tag_dimensions(image) -> tuple[int | None, int | None]:
@@ -795,9 +814,12 @@ def page_name_from_url(url: str) -> str:
     query = parse_qs(parsed.query)
     value = str((query.get("p") or query.get("id") or [""])[0]).strip()
     if value:
-        return value
+        if len(value) <= 128 and (NEWS_PAGE_ID_RE.fullmatch(value) or value.isdigit()):
+            return value
+        return ""
     match = re.search(r"/(\d+_[^/?.#]+)\.html$", parsed.path)
-    return match.group(1) if match else ""
+    value = match.group(1) if match else ""
+    return value if len(value) <= 128 and NEWS_PAGE_ID_RE.fullmatch(value) else ""
 
 
 def _is_topic_detail_url(url: str, base_url: str = NEWS_TOPICS_URL) -> bool:
@@ -1046,6 +1068,18 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _bounded_image_integer(value: Any, maximum: int) -> int:
+    if value in (None, "") or isinstance(value, bool):
+        return 0
+    if isinstance(value, float) and (not math.isfinite(value) or not value.is_integer()):
+        return 0
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return number if 0 <= number <= maximum else 0
+
+
 def upsert_news_record(conn, record: dict[str, Any], now: str | None = None) -> tuple[bool, bool]:
     """Store one source record and return (changed, created).
 
@@ -1053,12 +1087,30 @@ def upsert_news_record(conn, record: dict[str, Any], now: str | None = None) -> 
     import or topics crawl supplies a new source version.
     """
     timestamp = now or _now()
+    # Serialize the identity lookup with the write across processes. Without
+    # this, two concurrent workers can both miss the source/page row and insert
+    # duplicates with different source URLs/IDs.
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     source = str(record.get("source") or "niji_news")
     if source not in NEWS_SOURCES:
         source = "niji_news"
     record_id = str(
         record.get("id") or news_id(source, str(record.get("page_name") or ""), str(record.get("source_url") or ""))
     )
+    page_name = str(record.get("page_name") or "").strip()
+    old = conn.execute("SELECT * FROM news_articles WHERE id = ?", (record_id,)).fetchone()
+    if old and (old["source"] != source or old["page_name"] != page_name):
+        raise ValueError("新闻 ID 与来源信息不匹配")
+    if not old and page_name:
+        identity_old = conn.execute(
+            "SELECT * FROM news_articles WHERE source = ? AND page_name = ? ORDER BY updated_at DESC, id LIMIT 1",
+            (source, page_name),
+        ).fetchone()
+        if identity_old:
+            record_id = str(identity_old["id"])
+            old = identity_old
+    record["id"] = record_id
     tags = normalized_tags(record.get("tags", []))
     incoming = {
         "id": record_id,
@@ -1074,7 +1126,6 @@ def upsert_news_record(conn, record: dict[str, Any], now: str | None = None) -> 
         "source_file": str(record.get("source_file") or "").strip(),
         "source_hash": str(record.get("source_hash") or "").strip(),
     }
-    old = conn.execute("SELECT * FROM news_articles WHERE id = ?", (record_id,)).fetchone()
     manual_fields = set(decode_json(old["manual_fields_json"], []) if old else [])
     values = dict(incoming)
     if old:
@@ -1162,9 +1213,9 @@ def upsert_news_record(conn, record: dict[str, Any], now: str | None = None) -> 
                 "source_url": source_url,
                 "public_url": str(image.get("public_url") or "").strip(),
                 "alt_text": str(image.get("alt_text") or "").strip(),
-                "width": int(image.get("width") or 0),
-                "height": int(image.get("height") or 0),
-                "bytes": int(image.get("bytes") or 0),
+                "width": _bounded_image_integer(image.get("width"), NEWS_IMAGE_MAX_WIDTH),
+                "height": _bounded_image_integer(image.get("height"), NEWS_IMAGE_MAX_HEIGHT),
+                "bytes": _bounded_image_integer(image.get("bytes"), 20 * 1024 * 1024),
                 "sha256": str(image.get("sha256") or ""),
             }
             duplicate = next(
@@ -1177,6 +1228,13 @@ def upsert_news_record(conn, record: dict[str, Any], now: str | None = None) -> 
                 # explicitly supplied.
                 if not values["public_url"]:
                     values["public_url"] = str(duplicate["public_url"] or "")
+                    # A failed remote re-archive is represented by a
+                    # placeholder with zero byte/hash metadata. Keep the
+                    # metadata belonging to an already archived object too;
+                    # the next retry can still replace it with fresh values.
+                    for field in ("width", "height", "bytes", "sha256"):
+                        if not values[field]:
+                            values[field] = duplicate[field]
                 if any(duplicate[key] != value for key, value in values.items()):
                     assignments = ", ".join(f"{key} = ?" for key in values)
                     conn.execute(

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -51,7 +52,7 @@ def parse_args() -> argparse.Namespace:
         "--group-type",
         choices=GROUP_TYPES,
         default=DEFAULT_GROUP_TYPE,
-        help="出口组类型：select / fallback / url-test（默认自动择优）",
+        help="出口组类型：select / fallback / url-test（默认 fallback，配合 worker 吞吐测速）",
     )
     parser.add_argument("--cn-direct", action="store_true", help="国内与内网地址直连，其余走代理（通用客户端用）")
     parser.add_argument("--no-listeners", action="store_true", help="不生成 per-node 入口端口（只保留一个 mixed-port）")
@@ -82,6 +83,8 @@ def main() -> int:
         if not args.out:
             print("需要 --out 指定输出路径（或使用 --list）", file=sys.stderr)
             return 2
+        if not os.getenv("MIHOMO_CONTROLLER_SECRET", "").strip():
+            raise ConfigError("MIHOMO_CONTROLLER_SECRET 未配置，拒绝生成未认证的 mihomo 控制接口")
         text = render(
             names,
             proxies,

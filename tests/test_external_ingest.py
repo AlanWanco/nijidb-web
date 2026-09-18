@@ -139,6 +139,81 @@ class ExternalIngestApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(program["title"], "更新后的节目")
         self.assertEqual(count, 1)
 
+    async def test_news_api_reuses_existing_page_when_id_is_omitted(self):
+        payload = {
+            "article": {
+                "source": "niji_topics",
+                "page_name": "01_123",
+                "title": "外部同步新闻",
+                "source_url": "https://www.lovelive-anime.jp/nijigasaki/news/01_123.html",
+                "body_markdown": "正文",
+            }
+        }
+        with patch.dict(os.environ, {"NIJIDB_INGEST_API_KEY": "news-test-key"}):
+            first = await self.client.post(
+                "/api/ingest/news",
+                json=payload,
+                headers={"X-Nijidb-API-Key": "news-test-key"},
+            )
+            payload["article"]["source_url"] = "https://www.lovelive-anime.jp/nijigasaki/news/01_123-updated.html"
+            second = await self.client.post(
+                "/api/ingest/news",
+                json=payload,
+                headers={"X-Nijidb-API-Key": "news-test-key"},
+            )
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertTrue(first.json()["created"])
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertFalse(second.json()["created"])
+        self.assertEqual(second.json()["id"], first.json()["id"])
+        with main.db() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM news_articles").fetchone()[0], 1)
+            row = conn.execute("SELECT source_url FROM news_articles").fetchone()
+        self.assertEqual(row["source_url"], payload["article"]["source_url"])
+
+    async def test_external_json_rejects_nonstandard_numeric_constants(self):
+        with patch.dict(os.environ, {"NIJIDB_MUSIC_INGEST_API_KEY": "music-test-key"}):
+            response = await self.client.post(
+                "/api/ingest/music",
+                content='{"release":{"id":"cd_nan","title":"外部音乐","position":NaN}}'.encode("utf-8"),
+                headers={"X-Nijidb-API-Key": "music-test-key", "Content-Type": "application/json"},
+            )
+        self.assertEqual(response.status_code, 400)
+
+    async def test_collabo_api_preserves_explicit_source_url_when_display_url_differs(self):
+        payload = {
+            "item": {
+                "source_id": "campaign-distinct-url",
+                "title": "外部联动",
+                "date": "2026-09-20",
+                "images": [
+                    {
+                        "url": "https://cdn.example.com/display/campaign.webp",
+                        "source_url": "https://source.example.com/original/campaign.webp",
+                        "public_url": "https://images.example.test/images/collabo/campaign.webp",
+                    }
+                ],
+            }
+        }
+        with patch.dict(os.environ, {"NIJIDB_COLLABO_INGEST_API_KEY": "collabo-test-key"}):
+            response = await self.client.post(
+                "/api/ingest/collabo",
+                json=payload,
+                headers={"X-Nijidb-API-Key": "collabo-test-key"},
+            )
+            payload["item"]["title"] = "更新后的联动"
+            updated = await self.client.post(
+                "/api/ingest/collabo",
+                json=payload,
+                headers={"X-Nijidb-API-Key": "collabo-test-key"},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(updated.status_code, 200, updated.text)
+        with main.db() as conn:
+            image = conn.execute("SELECT source_url, public_url FROM collaboration_images").fetchone()
+        self.assertEqual(image["source_url"], payload["item"]["images"][0]["source_url"])
+        self.assertEqual(image["public_url"], payload["item"]["images"][0]["public_url"])
+
     async def test_collabo_api_accepts_r2_image_and_stable_source_id(self):
         payload = {
             "item": {

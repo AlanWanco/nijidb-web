@@ -148,6 +148,9 @@ function showError(requestError) {
 
 function setSettings(values) {
   Object.assign(settings, values);
+  if (!Object.prototype.hasOwnProperty.call(values, "onebot_token")) {
+    settings.onebot_token = "";
+  }
 }
 
 const manualSourceTargetUrl = computed(() =>
@@ -367,9 +370,15 @@ async function saveSettings() {
         : section.value === "bot"
           ? ["onebot_url", "onebot_token", "onebot_target", "onebot_profile"]
           : ["music_auto_sync", "interval_minutes", "detail_interval_minutes"];
+    const body = Object.fromEntries(keys.map((key) => [key, settings[key]]));
+    // The server never sends the stored OneBot token back to the browser.
+    // Keep it unchanged when the password field is left blank.
+    if (section.value === "bot" && !String(body.onebot_token || "").trim()) {
+      delete body.onebot_token;
+    }
     const data = await api("/api/admin/settings", {
       method: "PATCH",
-      body: Object.fromEntries(keys.map((key) => [key, settings[key]])),
+      body,
     });
     setSettings(data.settings);
     message.value = t("设置已保存");
@@ -385,9 +394,11 @@ async function testOnebot() {
   message.value = "";
   error.value = "";
   try {
+    const body = { ...settings };
+    if (!String(body.onebot_token || "").trim()) delete body.onebot_token;
     await api("/api/admin/test-onebot", {
       method: "POST",
-      body: { ...settings },
+      body,
     });
     message.value = t("测试消息已发送");
   } catch (requestError) {

@@ -19,5 +19,7 @@ data/
 
 # 容器化轮询部署的本地凭据（不要提交）
 poller/mihomo/config.yaml
+poller/mihomo/controller.env
+!poller/mihomo/controller.env.example
 poller/news-poller.env
 poller/*.env

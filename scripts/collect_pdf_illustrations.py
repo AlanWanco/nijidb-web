@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -20,6 +22,7 @@ PDF_CACHE_ROOT = ROOT / "data/illustration-pdf-cache"
 IMAGE_ROOT = collector.IMAGE_ROOT
 MIN_PDF_IMAGE_BYTES = 8 * 1024
 MAX_PDF_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_PDF_BYTES = 100 * 1024 * 1024
 
 
 def pdf_urls(items: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -36,21 +39,56 @@ def pdf_cache_path(url: str) -> Path:
     return PDF_CACHE_ROOT / f"{collector.cache_key(url)}.pdf"
 
 
+def bounded_download(client: httpx.Client, url: str, maximum: int) -> tuple[int, str, bytes]:
+    with client.stream("GET", url, follow_redirects=False, timeout=90) as response:
+        try:
+            announced_length = int(response.headers.get("content-length", "0") or 0)
+        except (TypeError, ValueError, OverflowError):
+            announced_length = 0
+        if announced_length > maximum:
+            raise ValueError(f"响应超过 {maximum} bytes")
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in response.iter_bytes(chunk_size=64 * 1024):
+            total += len(chunk)
+            if total > maximum:
+                raise ValueError(f"响应超过 {maximum} bytes")
+            chunks.append(chunk)
+        return response.status_code, response.headers.get("content-type", ""), b"".join(chunks)
+
+
 def download_pdf(client: httpx.Client, url: str) -> Path | None:
     path = pdf_cache_path(url)
-    if path.exists() and path.stat().st_size >= 1024:
-        return path
+    if not collector.public_fetch_url(url):
+        print(f"PDF 地址被阻止：{url}")
+        return None
     try:
-        response = client.get(url, follow_redirects=True, timeout=90)
-        content_type = response.headers.get("content-type", "")
-        if not response.is_success or not response.content.startswith(b"%PDF"):
-            print(f"PDF 失败 {response.status_code} {content_type}: {url}")
+        if path.is_symlink():
+            return None
+        if path.is_file() and path.stat().st_size >= 1024:
+            return path
+        status_code, content_type, content = bounded_download(client, url, MAX_PDF_BYTES)
+        if not 200 <= status_code < 300 or not content.startswith(b"%PDF"):
+            print(f"PDF 失败 {status_code} {content_type}: {url}")
+            return None
+        if PDF_CACHE_ROOT.is_symlink() or path.is_symlink():
             return None
         PDF_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(response.content)
-        print(f"PDF 下载 {len(response.content)} bytes: {url}")
+        if PDF_CACHE_ROOT.is_symlink() or path.is_symlink():
+            return None
+        descriptor, raw_temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=PDF_CACHE_ROOT)
+        temporary = Path(raw_temporary)
+        try:
+            with open(descriptor, "wb", closefd=True) as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        print(f"PDF 下载 {len(content)} bytes: {url}")
         return path
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, OSError, ValueError) as exc:
         print(f"PDF 异常 {exc}: {url}")
         return None
 
@@ -58,9 +96,31 @@ def download_pdf(client: httpx.Client, url: str) -> Path | None:
 def pdf_image_records(pdf_path: Path) -> list[dict[str, Any]]:
     with tempfile.TemporaryDirectory(prefix="nijidb-pdf-images-") as temporary:
         prefix = Path(temporary) / "image"
+        safe_pdf = Path(temporary) / "input.pdf"
+        source_fd = -1
+        try:
+            source_fd = os.open(pdf_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            metadata = os.fstat(source_fd)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_PDF_BYTES:
+                return []
+            with open(safe_pdf, "wb") as handle:
+                remaining = metadata.st_size
+                while remaining:
+                    chunk = os.read(source_fd, min(64 * 1024, remaining))
+                    if not chunk:
+                        return []
+                    handle.write(chunk)
+                    remaining -= len(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError:
+            return []
+        finally:
+            if source_fd >= 0:
+                os.close(source_fd)
         try:
             subprocess.run(
-                ["pdfimages", "-all", str(pdf_path), str(prefix)],
+                ["pdfimages", "-all", str(safe_pdf), str(prefix)],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -71,15 +131,19 @@ def pdf_image_records(pdf_path: Path) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         for path in sorted(Path(temporary).glob("image-*")):
             try:
+                metadata = path.lstat()
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_PDF_IMAGE_BYTES:
+                    continue
                 data = path.read_bytes()
             except OSError:
                 continue
             if len(data) < MIN_PDF_IMAGE_BYTES or len(data) > MAX_PDF_IMAGE_BYTES:
                 continue
-            width, height = collector.image_dimensions(data)
-            if min(width, height) < collector.MIN_IMAGE_SIDE:
+            dimensions = collector.image_dimensions_from_bytes(data)
+            if not dimensions:
                 continue
-            if not width or not height:
+            width, height = dimensions
+            if min(width, height) < collector.MIN_IMAGE_SIDE or max(width, height) > 10000:
                 continue
             try:
                 number = int(path.stem.rsplit("-", 1)[1])
@@ -144,9 +208,7 @@ def add_pdf_images(
                 extension = asset_extension(record)
                 relative_path = f"assets/{digest}{extension}"
                 local_path = IMAGE_ROOT / relative_path
-                if not local_path.exists():
-                    local_path.parent.mkdir(parents=True, exist_ok=True)
-                    local_path.write_bytes(record["data"])
+                collector.publish_asset(local_path, record["data"], digest)
                 manifest["assets"].setdefault(
                     digest,
                     {
@@ -156,7 +218,7 @@ def add_pdf_images(
                         "bytes": record["bytes"],
                     },
                 )
-                source_url = f"{pdf_url}#page-image-{record['number']}"
+                source_url = pdf_url
                 images.append(
                     {
                         "path": f"/media/illustrations/{relative_path}",
@@ -190,7 +252,12 @@ def main() -> None:
     items = collector.load_items()
     items_by_pdf = pdf_urls(items)
     manifest = collector.load_existing_manifest()
-    with httpx.Client(headers={"User-Agent": collector.USER_AGENT, "Accept-Language": "ja,en;q=0.8"}) as client:
+    with httpx.Client(
+        headers={"User-Agent": collector.USER_AGENT, "Accept-Language": "ja,en;q=0.8"},
+        trust_env=False,
+        follow_redirects=False,
+        transport=collector.PublicOnlySyncTransport(httpx.Limits(max_connections=4, max_keepalive_connections=4)),
+    ) as client:
         records_by_pdf = {}
         for url in items_by_pdf:
             pdf_path = download_pdf(client, url)

@@ -12,15 +12,25 @@ import argparse
 import asyncio
 import hashlib
 import json
+import ipaddress
+import os
 import re
+import secrets
+import socket
+import stat
+import sys
+import tempfile
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urljoin, urlparse
 
+import httpcore
 import httpx
 from bs4 import BeautifulSoup
+from httpcore._backends.auto import AutoBackend
+from httpcore._backends.sync import SyncBackend
 
 try:
     from .collaboration_urls import canonical_url, dedupe_page_urls, page_identity
@@ -28,12 +38,17 @@ except ImportError:  # pragma: no cover - supports running this file directly
     from collaboration_urls import canonical_url, dedupe_page_urls, page_identity
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from app.news_fetch import image_dimensions_from_bytes  # noqa: E402
+
 INDEX_PATH = ROOT / "frontend/src/content/collaborationIllustrations.json"
 IMAGE_ROOT = ROOT / "data/images/illustrations"
 PAGE_CACHE_ROOT = ROOT / "data/illustration-page-cache"
 MANIFEST_PATH = IMAGE_ROOT / "manifest.json"
 USER_AGENT = "nijidb-collaboration-illustration-collector/1.0"
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_PAGE_BYTES = 8 * 1024 * 1024
 MIN_IMAGE_BYTES = 8 * 1024
 MIN_IMAGE_SIDE = 160
 
@@ -105,6 +120,165 @@ def item_keywords(item: dict[str, Any]) -> list[str]:
     return keywords
 
 
+def public_addresses(host: str, port: int) -> list[str]:
+    try:
+        records = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise OSError("目标主机解析失败") from exc
+    addresses: list[str] = []
+    for record in records:
+        try:
+            address = ipaddress.ip_address(record[4][0])
+        except (IndexError, ValueError):
+            raise OSError("目标主机解析结果无效") from None
+        if not address.is_global:
+            raise OSError("目标主机解析到非公网地址")
+        text = str(address)
+        if text not in addresses:
+            addresses.append(text)
+    if not addresses:
+        raise OSError("目标主机没有公网地址")
+    return addresses
+
+
+class PublicOnlyNetworkBackend(httpcore.AsyncNetworkBackend):
+    """Resolve and connect to the same globally routable address set."""
+
+    def __init__(self) -> None:
+        self._backend = AutoBackend()
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options=None,
+    ):
+        last_error: Exception | None = None
+        for address in public_addresses(host, port):
+            try:
+                return await self._backend.connect_tcp(
+                    address,
+                    port,
+                    timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except (OSError, httpcore.ConnectError) as exc:
+                last_error = exc
+        raise OSError("无法连接到目标公网地址") from last_error
+
+
+class PublicOnlySyncNetworkBackend(httpcore.NetworkBackend):
+    def __init__(self) -> None:
+        self._backend = SyncBackend()
+
+    def connect_tcp(
+        self, host: str, port: int, timeout: float | None = None, local_address=None, socket_options=None
+    ):
+        last_error: Exception | None = None
+        for address in public_addresses(host, port):
+            try:
+                return self._backend.connect_tcp(
+                    address,
+                    port,
+                    timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except (OSError, httpcore.ConnectError) as exc:
+                last_error = exc
+        raise OSError("无法连接到目标公网地址") from last_error
+
+
+class PublicOnlySyncTransport(httpx.HTTPTransport):
+    def __init__(self, limits: httpx.Limits) -> None:
+        super().__init__(trust_env=False, limits=limits)
+        old_pool = self._pool
+        self._pool = httpcore.ConnectionPool(
+            ssl_context=old_pool._ssl_context,
+            max_connections=old_pool._max_connections,
+            max_keepalive_connections=old_pool._max_keepalive_connections,
+            keepalive_expiry=old_pool._keepalive_expiry,
+            http1=old_pool._http1,
+            http2=old_pool._http2,
+            retries=old_pool._retries,
+            local_address=old_pool._local_address,
+            uds=old_pool._uds,
+            socket_options=old_pool._socket_options,
+            network_backend=PublicOnlySyncNetworkBackend(),
+        )
+
+
+class PublicOnlyTransport(httpx.AsyncHTTPTransport):
+    def __init__(self, limits: httpx.Limits) -> None:
+        super().__init__(trust_env=False, limits=limits)
+        old_pool = self._pool
+        self._pool = httpcore.AsyncConnectionPool(
+            ssl_context=old_pool._ssl_context,
+            max_connections=old_pool._max_connections,
+            max_keepalive_connections=old_pool._max_keepalive_connections,
+            keepalive_expiry=old_pool._keepalive_expiry,
+            http1=old_pool._http1,
+            http2=old_pool._http2,
+            retries=old_pool._retries,
+            local_address=old_pool._local_address,
+            uds=old_pool._uds,
+            socket_options=old_pool._socket_options,
+            network_backend=PublicOnlyNetworkBackend(),
+        )
+
+
+def public_fetch_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        port = parsed.port
+        decoded_path = unquote(parsed.path)
+    except (TypeError, ValueError):
+        return False
+    host = parsed.hostname or ""
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not host
+        or any(character.isspace() for character in host)
+        or parsed.username
+        or parsed.password
+        or parsed.fragment
+        or "#" in url
+        or ("?" in url and not parsed.query)
+        or "\\" in url
+        or "?" in decoded_path
+        or "#" in decoded_path
+        or "\\" in decoded_path
+        or any(part in {".", ".."} for part in decoded_path.split("/") if part)
+        or parsed.netloc.endswith(":")
+        or port == 0
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in url)
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in decoded_path)
+        or host.lower() in {"localhost", "localhost.localdomain"}
+        or host.lower().endswith((".local", ".internal"))
+    ):
+        return False
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        return literal.is_global
+    try:
+        records = socket.getaddrinfo(host, port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+    except OSError:
+        return False
+    addresses = set()
+    for record in records:
+        try:
+            addresses.add(ipaddress.ip_address(record[4][0]))
+        except (IndexError, ValueError):
+            return False
+    return bool(addresses) and all(address.is_global for address in addresses)
+
+
 def is_image_url(url: str) -> bool:
     parsed = urlparse(url)
     path = parsed.path.lower()
@@ -144,54 +318,6 @@ def path_score(url: str) -> tuple[int, bool]:
     if "ogp" in path:
         score -= 8
     return score, bool(bad)
-
-
-def image_dimensions(data: bytes) -> tuple[int, int]:
-    if data[:2] == b"BM" and len(data) >= 26:
-        width = int.from_bytes(data[18:22], "little", signed=True)
-        height = abs(int.from_bytes(data[22:26], "little", signed=True))
-        return width, height
-    if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
-        return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
-    if data[:3] == b"GIF" and len(data) >= 10:
-        return int.from_bytes(data[6:8], "little"), int.from_bytes(data[8:10], "little")
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        if data[12:16] == b"VP8X" and len(data) >= 30:
-            width = 1 + int.from_bytes(data[24:27], "little")
-            height = 1 + int.from_bytes(data[27:30], "little")
-            return width, height
-        if data[12:16] == b"VP8 " and len(data) >= 30:
-            marker = data.find(b"\x9d\x01\x2a", 20, 40)
-            if marker >= 0 and len(data) >= marker + 7:
-                return int.from_bytes(data[marker + 3:marker + 5], "little") & 0x3FFF, int.from_bytes(
-                    data[marker + 5:marker + 7], "little"
-                ) & 0x3FFF
-        if data[12:16] == b"VP8L" and len(data) >= 25:
-            bits = int.from_bytes(data[21:25], "little")
-            return 1 + (bits & 0x3FFF), 1 + ((bits >> 14) & 0x3FFF)
-    if data[:2] == b"\xff\xd8":
-        offset = 2
-        while offset + 9 < len(data):
-            if data[offset] != 0xFF:
-                offset += 1
-                continue
-            marker = data[offset + 1]
-            offset += 2
-            if marker in {0xD8, 0xD9}:
-                continue
-            if offset + 2 > len(data):
-                break
-            length = int.from_bytes(data[offset:offset + 2], "big")
-            if marker in set(range(0xC0, 0xC4)) | set(range(0xC5, 0xC8)) | set(range(0xC9, 0xCC)) | set(
-                range(0xCD, 0xD0)
-            ):
-                if offset + 7 <= len(data):
-                    return int.from_bytes(data[offset + 5:offset + 7], "big"), int.from_bytes(
-                        data[offset + 3:offset + 5], "big"
-                    )
-                break
-            offset += length
-    return 0, 0
 
 
 def detected_content_type(data: bytes, content_type: str, url: str) -> str:
@@ -363,11 +489,16 @@ def read_page_cache(url: str) -> dict[str, Any] | None:
     if legacy_path not in paths:
         paths.append(legacy_path)
     for path in paths:
-        if not path.exists():
-            continue
         try:
-            cached = json.loads(path.read_text(encoding="utf-8"))
+            metadata = path.lstat()
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_PAGE_BYTES:
+                continue
+            cached = json.loads(path.read_bytes().decode("utf-8"))
+        except (OSError, UnicodeDecodeError):
+            continue
         except json.JSONDecodeError:
+            continue
+        if not isinstance(cached, dict):
             continue
         if cached.get("identity") == page_identity(url):
             return cached
@@ -379,17 +510,33 @@ def read_page_cache(url: str) -> dict[str, Any] | None:
 
 
 def write_page_cache(url: str, payload: dict[str, Any]) -> None:
+    if PAGE_CACHE_ROOT.is_symlink():
+        raise RuntimeError("页面缓存目录不能是符号链接")
     PAGE_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     path = PAGE_CACHE_ROOT / f"{cache_key(url)}.json"
-    path.write_text(
+    content = (
         json.dumps(
             {"url": canonical_url(url), "identity": page_identity(url), **payload},
             ensure_ascii=False,
             indent=2,
         )
-        + "\n",
-        encoding="utf-8",
+        + "\n"
     )
+    if len(content.encode("utf-8")) > MAX_PAGE_BYTES:
+        raise RuntimeError("页面缓存超过 8 MB 限制")
+    descriptor, raw_temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=PAGE_CACHE_ROOT)
+    temporary = Path(raw_temporary)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
 
 
 def x_status_id(url: str) -> str | None:
@@ -402,10 +549,14 @@ async def fetch_x_media(client: httpx.AsyncClient, page_url: str) -> list[dict[s
     if not status_id:
         return []
     try:
-        response = await client.get(f"https://api.fxtwitter.com/status/{status_id}", timeout=25)
-        if not response.is_success:
+        status, _, _, content = await bounded_get(
+            client,
+            f"https://api.fxtwitter.com/status/{status_id}",
+            2 * 1024 * 1024,
+        )
+        if not 200 <= status < 300:
             return []
-        tweet = response.json().get("tweet", {})
+        tweet = json.loads(content.decode("utf-8")).get("tweet", {})
         context = clean_text(tweet.get("text", ""))
         candidates = []
         for media in tweet.get("media", {}).get("photos", []):
@@ -420,36 +571,62 @@ async def fetch_x_media(client: httpx.AsyncClient, page_url: str) -> list[dict[s
                     }
                 )
         return candidates
-    except (httpx.HTTPError, json.JSONDecodeError, TypeError, AttributeError):
+    except (httpx.HTTPError, json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError, AttributeError):
         return []
 
 
+async def bounded_get(
+    client: httpx.AsyncClient, url: str, maximum: int, *, timeout: float = 30
+) -> tuple[int, dict[str, str], str, bytes]:
+    async with client.stream("GET", url, follow_redirects=False, timeout=timeout) as response:
+        try:
+            announced_length = int(response.headers.get("content-length", "0") or 0)
+        except (TypeError, ValueError, OverflowError):
+            announced_length = 0
+        if announced_length > maximum:
+            raise ValueError(f"response exceeds {maximum} bytes")
+        content = bytearray()
+        async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+            if len(content) + len(chunk) > maximum:
+                raise ValueError(f"response exceeds {maximum} bytes")
+            content.extend(chunk)
+        return response.status_code, dict(response.headers), str(response.url), bytes(content)
+
+
 async def fetch_page(client: httpx.AsyncClient, url: str, item: dict[str, Any], refresh: bool) -> dict[str, Any]:
+    if not public_fetch_url(url):
+        return {
+            "url": canonical_url(url),
+            "status": 0,
+            "content_type": "",
+            "page_title": "",
+            "candidates": [],
+            "error": "blocked URL",
+        }
     if not refresh:
         cached = read_page_cache(url)
         if cached:
             return cached
     try:
-        response = await client.get(url, follow_redirects=True, timeout=25)
-        content_type = response.headers.get("content-type", "")
+        status_code, response_headers, final_url, content = await bounded_get(client, url, MAX_PAGE_BYTES)
+        content_type = response_headers.get("content-type", "")
         if "image/" in content_type:
             payload = {
-                "status": response.status_code,
-                "final_url": str(response.url),
+                "status": status_code,
+                "final_url": final_url,
                 "content_type": content_type,
                 "page_title": "",
-                "candidates": [{"url": canonical_url(str(response.url)), "score": 60, "kind": "direct", "context": ""}],
-                "error": "" if response.is_success else f"HTTP {response.status_code}",
+                "candidates": [{"url": canonical_url(final_url), "score": 60, "kind": "direct", "context": ""}],
+                "error": "" if 200 <= status_code < 300 else f"HTTP {status_code}",
             }
-        elif response.is_success and "html" in content_type:
-            final_url = str(response.url)
-            page_title, candidates = extract_page_candidates(response.content, final_url, item)
+        elif 200 <= status_code < 300 and "html" in content_type:
+            page_title, candidates = extract_page_candidates(content, final_url, item)
             x_candidates = await fetch_x_media(client, final_url)
             known_urls = {candidate["url"] for candidate in candidates}
             candidates.extend(candidate for candidate in x_candidates if candidate["url"] not in known_urls)
             candidates.sort(key=lambda value: (-value["score"], value["url"]))
             payload = {
-                "status": response.status_code,
+                "status": status_code,
                 "final_url": final_url,
                 "content_type": content_type,
                 "page_title": page_title,
@@ -458,12 +635,12 @@ async def fetch_page(client: httpx.AsyncClient, url: str, item: dict[str, Any], 
             }
         else:
             payload = {
-                "status": response.status_code,
-                "final_url": str(response.url),
+                "status": status_code,
+                "final_url": final_url,
                 "content_type": content_type,
                 "page_title": "",
                 "candidates": [],
-                "error": f"HTTP {response.status_code}",
+                "error": f"HTTP {status_code}",
             }
     except Exception as exc:  # network failures are recorded per source page
         payload = {
@@ -501,7 +678,13 @@ async def fetch_all_pages(items: list[dict[str, Any]], refresh: bool, concurrenc
     limits = httpx.Limits(max_connections=concurrency, max_keepalive_connections=concurrency)
     headers = {"User-Agent": USER_AGENT, "Accept-Language": "ja,en;q=0.8"}
     semaphore = asyncio.Semaphore(concurrency)
-    async with httpx.AsyncClient(headers=headers, limits=limits) as client:
+    async with httpx.AsyncClient(
+        headers=headers,
+        limits=limits,
+        trust_env=False,
+        follow_redirects=False,
+        transport=PublicOnlyTransport(limits),
+    ) as client:
         async def fetch_one(identity: str, group: dict[str, Any], index: int) -> None:
             best: dict[str, Any] | None = None
             async with semaphore:
@@ -527,23 +710,41 @@ async def fetch_all_pages(items: list[dict[str, Any]], refresh: bool, concurrenc
 
 async def download_image(client: httpx.AsyncClient, candidate: dict[str, Any]) -> dict[str, Any]:
     url = candidate["url"]
+    if not public_fetch_url(url):
+        return {"ok": False, "error": "blocked URL"}
     try:
-        response = await client.get(url, follow_redirects=True, timeout=30)
-        content_type = response.headers.get("content-type", "")
-        data = response.content
+        async with client.stream("GET", url, follow_redirects=False, timeout=30) as response:
+            content_type = response.headers.get("content-type", "")
+            try:
+                announced_length = int(response.headers.get("content-length", "0") or 0)
+            except (TypeError, ValueError, OverflowError):
+                announced_length = 0
+            if announced_length > MAX_IMAGE_BYTES:
+                return {"ok": False, "error": f"size {announced_length}"}
+            content = bytearray()
+            async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                if len(content) + len(chunk) > MAX_IMAGE_BYTES:
+                    return {"ok": False, "error": f"size > {MAX_IMAGE_BYTES}"}
+                content.extend(chunk)
+            data = bytes(content)
+            status_code = response.status_code
+            final_url = str(response.url)
         effective_content_type = detected_content_type(data, content_type, url)
-        if not response.is_success or not data or "image/" not in effective_content_type.lower():
-            return {"ok": False, "error": f"HTTP {response.status_code} {content_type}"}
+        if not 200 <= status_code < 300 or not data or "image/" not in effective_content_type.lower():
+            return {"ok": False, "error": f"HTTP {status_code} {content_type}"}
         if len(data) < MIN_IMAGE_BYTES or len(data) > MAX_IMAGE_BYTES:
             return {"ok": False, "error": f"size {len(data)}"}
-        width, height = image_dimensions(data)
-        if width and height and min(width, height) < MIN_IMAGE_SIDE:
+        dimensions = image_dimensions_from_bytes(data)
+        if not dimensions:
+            return {"ok": False, "error": "invalid dimensions"}
+        width, height = dimensions
+        if min(width, height) < MIN_IMAGE_SIDE or max(width, height) > 10000:
             return {"ok": False, "error": f"dimensions {width}x{height}"}
         digest = hashlib.sha256(data).hexdigest()
         return {
             "ok": True,
             "url": url,
-            "final_url": canonical_url(str(response.url)),
+            "final_url": canonical_url(final_url),
             "content_type": effective_content_type,
             "data": data,
             "sha256": digest,
@@ -557,17 +758,138 @@ async def download_image(client: httpx.AsyncClient, candidate: dict[str, Any]) -
 
 
 def load_existing_manifest() -> dict[str, Any]:
-    if not MANIFEST_PATH.exists():
-        return {"schema_version": 1, "generated_at": "", "items": {}, "assets": {}}
     try:
-        return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+        metadata = MANIFEST_PATH.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_PAGE_BYTES:
+            return {"schema_version": 1, "generated_at": "", "items": {}, "assets": {}}
+        payload = json.loads(MANIFEST_PATH.read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return {"schema_version": 1, "generated_at": "", "items": {}, "assets": {}}
+    return payload if isinstance(payload, dict) else {"schema_version": 1, "generated_at": "", "items": {}, "assets": {}}
 
 
 def write_manifest(manifest: dict[str, Any]) -> None:
-    IMAGE_ROOT.mkdir(parents=True, exist_ok=True)
-    MANIFEST_PATH.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if IMAGE_ROOT.is_symlink() or MANIFEST_PATH.is_symlink():
+        raise RuntimeError("插画目录或清单不能是符号链接")
+    directory_fd = _open_asset_directory((), create=True)
+    temporary_name = f".{MANIFEST_PATH.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, MANIFEST_PATH.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        os.close(directory_fd)
+
+
+def _open_asset_directory(parts: tuple[str, ...], *, create: bool) -> int:
+    if IMAGE_ROOT.is_symlink():
+        raise RuntimeError("插画保存目录不能是符号链接")
+    if create:
+        IMAGE_ROOT.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(IMAGE_ROOT, flags)
+    try:
+        for part in parts:
+            if create:
+                try:
+                    os.mkdir(part, 0o755, dir_fd=directory_fd)
+                except FileExistsError:
+                    pass
+            next_fd = os.open(part, flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        return directory_fd
+    except Exception:
+        os.close(directory_fd)
+        raise
+
+
+def _asset_digest(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    total = 0
+    while True:
+        chunk = os.read(descriptor, min(64 * 1024, MAX_IMAGE_BYTES + 1 - total))
+        if not chunk:
+            return digest.hexdigest()
+        total += len(chunk)
+        if total > MAX_IMAGE_BYTES:
+            return ""
+        digest.update(chunk)
+
+
+def publish_asset(path: Path, data: bytes, expected_digest: str) -> None:
+    try:
+        relative = path.relative_to(IMAGE_ROOT)
+    except ValueError as exc:
+        raise RuntimeError("插画路径不在允许的目录内") from exc
+    parts = tuple(relative.parts)
+    if not parts or any(not part or part in {".", ".."} for part in parts):
+        raise RuntimeError("插画路径格式无效")
+    directory_fd = _open_asset_directory(parts[:-1], create=True)
+    temporary_name = f".{parts[-1]}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    descriptor = -1
+    try:
+        try:
+            existing_fd = os.open(parts[-1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd)
+        except FileNotFoundError:
+            existing_fd = -1
+        if existing_fd >= 0:
+            try:
+                metadata = os.fstat(existing_fd)
+                if not stat.S_ISREG(metadata.st_mode) or _asset_digest(existing_fd) != expected_digest:
+                    raise RuntimeError(f"已有插画文件内容与摘要不匹配：{path}")
+            finally:
+                os.close(existing_fd)
+            return
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("插画文件写入失败")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.fchmod(descriptor, 0o644)
+        try:
+            os.link(temporary_name, parts[-1], src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        except FileExistsError:
+            existing_fd = os.open(parts[-1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd)
+            try:
+                if not stat.S_ISREG(os.fstat(existing_fd).st_mode) or _asset_digest(existing_fd) != expected_digest:
+                    raise RuntimeError(f"已有插画文件内容与摘要不匹配：{path}")
+            finally:
+                os.close(existing_fd)
+        os.fsync(directory_fd)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        os.close(directory_fd)
 
 
 def local_asset_exists(image: dict[str, Any]) -> bool:
@@ -575,7 +897,16 @@ def local_asset_exists(image: dict[str, Any]) -> bool:
     prefix = "/media/illustrations/"
     if not path.startswith(prefix):
         return False
-    return (IMAGE_ROOT / path.removeprefix(prefix)).is_file()
+    if IMAGE_ROOT.is_symlink():
+        return False
+    relative = Path(path.removeprefix(prefix))
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        return False
+    try:
+        metadata = (IMAGE_ROOT / relative).lstat()
+    except OSError:
+        return False
+    return stat.S_ISREG(metadata.st_mode)
 
 
 async def collect_images(
@@ -602,7 +933,13 @@ async def collect_images(
     headers = {"User-Agent": USER_AGENT, "Accept-Language": "ja,en;q=0.8"}
     semaphore = asyncio.Semaphore(concurrency)
 
-    async with httpx.AsyncClient(headers=headers, limits=limits) as client:
+    async with httpx.AsyncClient(
+        headers=headers,
+        limits=limits,
+        trust_env=False,
+        follow_redirects=False,
+        transport=PublicOnlyTransport(limits),
+    ) as client:
         async def collect_one(item: dict[str, Any], index: int) -> None:
             page_urls = dedupe_page_urls([link["url"] for link in item["official_links"]])
             candidates: dict[str, dict[str, Any]] = {}
@@ -643,9 +980,7 @@ async def collect_images(
                     continue
                 asset_path = f"assets/{result['sha256']}{result['extension']}"
                 absolute_path = IMAGE_ROOT / asset_path
-                if not absolute_path.exists():
-                    absolute_path.parent.mkdir(parents=True, exist_ok=True)
-                    absolute_path.write_bytes(result["data"])
+                publish_asset(absolute_path, result["data"], result["sha256"])
                 async with asset_lock:
                     manifest["assets"].setdefault(
                         result["sha256"],

@@ -7,9 +7,37 @@ function bilibiliId(value) {
   return match ? `BV${match[1].slice(2)}` : "";
 }
 
+function hasEmptyPort(raw) {
+  const match = raw.match(/^(?:[a-z][a-z\d+.-]*:)?\/\/([^/?#]*)/i);
+  return Boolean(match?.[1]?.endsWith(":"));
+}
+
+function safePath(raw) {
+  try {
+    const decoded = decodeURIComponent(raw);
+    if (/[\u0000-\u001f\u007f\\]/.test(decoded)) return false;
+    const parts = decoded.split("/");
+    return !parts.some((part, index) => part === "." || part === ".." || (index > 0 && index < parts.length - 1 && !part));
+  } catch {
+    return false;
+  }
+}
+
 function externalUrl(value) {
   const raw = String(value || "").trim();
-  return /^https?:\/\//i.test(raw) ? raw : "";
+  if (!raw || /[\u0000-\u001f\u007f\\]/.test(raw) || raw.includes("#") || hasEmptyPort(raw)) return "";
+  try {
+    const url = new URL(raw);
+    const port = url.port ? Number(url.port) : null;
+    return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password && url.hostname
+      && safePath(url.pathname)
+      && !(raw.includes("?") && !url.search)
+      && (port === null || Number.isInteger(port) && port > 0 && port <= 65535)
+      ? url.href
+      : "";
+  } catch {
+    return "";
+  }
 }
 
 function linkValue(item, source) {

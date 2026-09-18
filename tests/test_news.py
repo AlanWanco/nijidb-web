@@ -9,9 +9,10 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+from botocore.exceptions import ClientError
 
 from app.news import (
     NEWS_SUMMARY_MAX_LENGTH,
@@ -19,13 +20,14 @@ from app.news import (
     ensure_news_schema,
     image_references,
     news_id,
+    normalize_news_date,
     normalized_tags,
     parse_local_markdown,
     parse_topic_detail,
     truncate_news_summary,
     upsert_news_record,
 )
-from app.news_fetch import fetch_news_page, filter_news_images
+from app.news_fetch import fetch_news_page, filter_news_images, image_dimensions_from_bytes, is_avif_bytes
 
 # main creates its runtime directories at import time.
 _import_dir = tempfile.TemporaryDirectory()
@@ -34,6 +36,11 @@ with patch.dict(os.environ, {"DATA_DIR": _import_dir.name, "ADMIN_SECRET": "test
 
 URL = "https://www.lovelive-anime.jp/news/01_123.html"
 HTML = '<main><h2>新しいお知らせ</h2><p>2026.09.11</p><h3>詳細</h3><p><strong>更新本文</strong> <a href="/link">リンク</a></p><ul><li>項目</li></ul></main>'
+JPEG_640X360 = (
+    b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+    b"\xff\xc0\x00\x11\x08\x01\x68\x02\x80\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00"
+    b"\xff\xd9"
+)
 
 
 def record(**changes):
@@ -47,7 +54,11 @@ def record(**changes):
         "body_markdown": "old",
         "source_hash": "hash1",
         "images": [
-            {"kind": "remote", "source_url": "https://example.com/image.jpg", "alt_text": "一枚"},
+            {
+                "kind": "remote",
+                "source_url": "https://www.lovelive-anime.jp/nijigasaki/images/image.jpg",
+                "alt_text": "一枚",
+            },
         ],
         **changes,
     }
@@ -61,6 +72,23 @@ class NewsStorageTests(unittest.TestCase):
 
     def tearDown(self):
         self.conn.close()
+
+    def test_image_dimension_parser_rejects_malformed_data_and_accepts_compatible_avif(self):
+        self.assertEqual(image_dimensions_from_bytes(JPEG_640X360), (640, 360))
+        self.assertIsNone(image_dimensions_from_bytes(b"\xff\xd8\xff"))
+        ispe = (20).to_bytes(4, "big") + b"ispe" + b"\x00\x00\x00\x00" + (640).to_bytes(4, "big") + (360).to_bytes(4, "big")
+        ipco = (28).to_bytes(4, "big") + b"ipco" + ispe
+        iprp = (36).to_bytes(4, "big") + b"iprp" + ipco
+        meta = (48).to_bytes(4, "big") + b"meta" + b"\x00\x00\x00\x00" + iprp
+        avif = (24).to_bytes(4, "big") + b"ftypisom" + b"\x00\x00\x00\x00" + b"avifmif1" + meta
+        self.assertTrue(is_avif_bytes(avif))
+        self.assertEqual(main.news_upload_extension("", avif, "cover.bin"), ".avif")
+        self.assertEqual(image_dimensions_from_bytes(avif), (640, 360))
+        self.assertIsNone(image_dimensions_from_bytes(avif[:40]))
+
+    def test_invalid_news_dates_are_rejected(self):
+        self.assertEqual(normalize_news_date("2026-02-31"), "")
+        self.assertEqual(normalize_news_date("20261301", "2026-09-11"), "2026-09-11")
 
     def test_editor_tags_are_limited_to_known_tokens(self):
         self.assertEqual(
@@ -80,6 +108,34 @@ class NewsStorageTests(unittest.TestCase):
             self.conn.execute("SELECT updated_at FROM news_articles").fetchone()[0], "2026-01-01T00:00:00+00:00"
         )
 
+    def test_source_page_identity_reuses_id_when_incoming_id_differs(self):
+        original = record()
+        upsert_news_record(self.conn, original)
+        incoming = record(
+            id="0123456789abcdef",
+            source_url="https://www.lovelive-anime.jp/news/01_123-updated.html",
+            title="更新标题",
+        )
+        changed, created = upsert_news_record(self.conn, incoming)
+        self.assertTrue(changed)
+        self.assertFalse(created)
+        row = self.conn.execute("SELECT id, title, source_url FROM news_articles").fetchone()
+        self.assertEqual(row["id"], original["id"])
+        self.assertEqual(row["title"], "更新标题")
+        self.assertEqual(row["source_url"], incoming["source_url"])
+
+    def test_news_id_cannot_overwrite_another_source_page(self):
+        first = record()
+        second = record(
+            id="fedcba9876543210",
+            page_name="02_456",
+            source_url="https://www.lovelive-anime.jp/news/02_456.html",
+        )
+        upsert_news_record(self.conn, first)
+        upsert_news_record(self.conn, second)
+        with self.assertRaisesRegex(ValueError, "新闻 ID 与来源信息不匹配"):
+            upsert_news_record(self.conn, record(id=second["id"]))
+
     def test_images_only_change_and_manual_protection(self):
         upsert_news_record(self.conn, record())
         self.conn.execute("UPDATE news_articles SET title='手動', manual_fields_json='[\"title\"]'")
@@ -97,13 +153,14 @@ class NewsStorageTests(unittest.TestCase):
             images=[
                 {
                     "kind": "remote",
-                    "source_url": "https://example.com/image.jpg",
+                    "source_url": "https://www.lovelive-anime.jp/nijigasaki/images/image.jpg",
                     "public_url": public_url,
                 }
             ]
         )
-        upsert_news_record(self.conn, with_public_url)
-        upsert_news_record(self.conn, record())
+        with patch.object(main, "R2_PUBLIC_BASE_URL", "https://images.example.test"):
+            upsert_news_record(self.conn, with_public_url)
+            upsert_news_record(self.conn, record())
         self.assertEqual(self.conn.execute("SELECT public_url FROM news_images").fetchone()[0], public_url)
 
     def test_local_import_stable_and_nested_headings(self):
@@ -182,6 +239,95 @@ class NewsStorageTests(unittest.TestCase):
         self.assertNotIn("全てのニュース", parsed["body_markdown"])
         self.assertNotIn("音楽商品", parsed["body_markdown"])
         self.assertNotIn("グッズ", parsed["body_markdown"])
+
+
+class SecureFileResponseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_descriptor_response_survives_path_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root"
+            root.mkdir()
+            target = root / "image.jpg"
+            target.write_bytes(b"original")
+            outside = Path(directory) / "outside.jpg"
+            outside.write_bytes(b"secret")
+            response = main.secure_file_response(target, root)
+            self.assertIsNotNone(response)
+            target.unlink()
+            target.symlink_to(outside)
+            messages = []
+
+            async def receive():
+                return {"type": "http.disconnect"}
+
+            async def send(message):
+                messages.append(message)
+
+            await response(
+                {
+                    "type": "http",
+                    "method": "GET",
+                    "path": "/image.jpg",
+                    "raw_path": b"/image.jpg",
+                    "query_string": b"",
+                    "headers": [],
+                    "scheme": "http",
+                    "http_version": "1.1",
+                    "extensions": {},
+                },
+                receive,
+                send,
+            )
+            body = b"".join(message.get("body", b"") for message in messages if message["type"] == "http.response.body")
+            self.assertEqual(body, b"original")
+
+    def test_atomic_upload_rejects_symlinked_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root"
+            root.mkdir()
+            outside = Path(directory) / "outside"
+            outside.mkdir()
+            (root / "nested").symlink_to(outside, target_is_directory=True)
+            with self.assertRaises((OSError, ValueError)):
+                main.write_new_local_file(root, Path("nested/image.jpg"), b"data")
+            self.assertFalse((outside / "image.jpg").exists())
+
+    def test_backup_resolution_ignores_symlinked_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir = Path(directory) / "backups"
+            backup_dir.mkdir()
+            outside = Path(directory) / "secret.sqlite3"
+            outside.write_bytes(b"secret")
+            link = backup_dir / "nijidb-backup-20260917T000000000000Z-test.sqlite3"
+            link.symlink_to(outside)
+            with patch.object(main, "BACKUP_DIR", backup_dir):
+                self.assertEqual(main.list_database_backups(), [])
+                with self.assertRaises(FileNotFoundError):
+                    main.resolve_database_backup(link.name)
+
+    def test_r2_upload_uses_open_descriptor_after_path_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            media = Path(directory)
+            target = media / "image.jpg"
+            outside = Path(directory) / "outside.jpg"
+            target.write_bytes(b"original")
+            outside.write_bytes(b"outside")
+            client = MagicMock()
+            captured = {}
+
+            def upload(handle, *args, **kwargs):
+                target.unlink()
+                target.symlink_to(outside)
+                captured["data"] = handle.read()
+
+            client.upload_fileobj.side_effect = upload
+            with (
+                patch.object(main, "MEDIA_DIR", media),
+                patch.object(main, "_r2_client", client),
+                patch.object(main, "R2_IMAGE_PREFIX", "images"),
+            ):
+                main.upload_image_to_r2(target)
+            self.assertEqual(captured["data"], b"original")
+            self.assertEqual(outside.read_bytes(), b"outside")
 
 
 class NotificationFormattingTests(unittest.TestCase):
@@ -266,7 +412,13 @@ class NotificationFormattingTests(unittest.TestCase):
 class NewsApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_official_images_are_filtered_by_real_dimensions(self):
         def png(width, height):
-            return b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + width.to_bytes(4, "big") + height.to_bytes(4, "big")
+            return (
+                b"\x89PNG\r\n\x1a\n"
+                + b"\x00\x00\x00\rIHDR"
+                + width.to_bytes(4, "big")
+                + height.to_bytes(4, "big")
+                + b"\x08\x02\x00\x00\x00\x00\x00\x00\x00"
+            )
 
         def handler(request):
             return httpx.Response(
@@ -278,6 +430,12 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
         images = [
             {"kind": "remote", "source_url": "https://www.lovelive-anime.jp/module/image.php?tiny=1"},
             {"kind": "remote", "source_url": "https://www.lovelive-anime.jp/module/image.php?large=1"},
+            {
+                "kind": "remote",
+                "source_url": "https://127.0.0.1/internal.png",
+                "width": 640,
+                "height": 360,
+            },
         ]
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             filtered = await filter_news_images(client, images)
@@ -309,6 +467,110 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
     def login(self):
         self.client.cookies.set("nijidb_admin", main.admin_cookie_value(main.settings()["admin_password_hash"]))
 
+    async def test_admin_settings_never_expose_onebot_token_and_preserve_blank_updates(self):
+        self.login()
+        main.save_settings({"onebot_token": "server-side-secret"})
+
+        response = await self.client.get("/api/admin/settings")
+        self.assertEqual(response.status_code, 200)
+        returned_settings = response.json()["settings"]
+        self.assertNotIn("onebot_token", returned_settings)
+
+        saved = await self.client.patch("/api/admin/settings", json={"onebot_url": "https://bot.example.test"})
+        self.assertEqual(saved.status_code, 200)
+        self.assertNotIn("onebot_token", saved.json()["settings"])
+        self.assertEqual(main.settings()["onebot_token"], "server-side-secret")
+        invalid_url = await self.client.patch("/api/admin/settings", json={"onebot_url": "http://bot:5700?x"})
+        self.assertEqual(invalid_url.status_code, 400)
+        invalid_target = await self.client.patch("/api/admin/settings", json={"onebot_target": "group:0"})
+        self.assertEqual(invalid_target.status_code, 400)
+
+    async def test_cover_r2_failure_preserves_existing_local_cover(self):
+        class FakeResponse:
+            status_code = 200
+            headers = {"content-type": "image/jpeg"}
+
+            async def aiter_bytes(self, chunk_size=65536):
+                del chunk_size
+                yield JPEG_640X360 + b"new-cover"
+
+            def raise_for_status(self):
+                return None
+
+        class FakeClient:
+            def stream(self, method, url, follow_redirects=False):
+                self.method = method
+                self.url = url
+                self.follow_redirects = follow_redirects
+                return self
+
+            async def __aenter__(self):
+                return FakeResponse()
+
+            async def __aexit__(self, *args):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            media = Path(directory)
+            target = media / "release-1.jpg"
+            previous = JPEG_640X360 + b"old-cover"
+            target.write_bytes(previous)
+            item = {
+                "id": "release-1",
+                "cover_url": "https://www.lovelive-anime.jp/nijigasaki/images/release-1.jpg",
+                "detail_html": "<img src='https://www.lovelive-anime.jp/nijigasaki/images/release-1.jpg'>",
+            }
+            with (
+                patch.object(main, "MEDIA_DIR", media),
+                patch.object(main, "r2_upload_is_configured", return_value=True),
+                patch.object(main, "upload_cover_to_r2", side_effect=RuntimeError("R2 down")),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "R2 down"):
+                    await main.cache_cover(item, FakeClient(), force_refresh=True)
+            self.assertEqual(target.read_bytes(), previous)
+
+    async def test_r2_object_exists_distinguishes_missing_from_access_failure(self):
+        class FakeR2:
+            def __init__(self, error=None):
+                self.error = error
+
+            def head_object(self, **kwargs):
+                if self.error:
+                    raise self.error
+                return {"ContentLength": 5}
+
+        with (
+            patch.object(main, "r2_upload_is_configured", return_value=True),
+            patch.object(main, "_r2_client", FakeR2()),
+        ):
+            self.assertTrue(main.r2_object_exists("release-1.jpg", 5))
+            self.assertFalse(main.r2_object_exists("release-1.jpg", 4))
+
+        missing = ClientError({"Error": {"Code": "404"}}, "HeadObject")
+        with (
+            patch.object(main, "r2_upload_is_configured", return_value=True),
+            patch.object(main, "_r2_client", FakeR2(missing)),
+        ):
+            self.assertFalse(main.r2_object_exists("release-1.jpg", 5))
+
+        denied = ClientError({"Error": {"Code": "403"}}, "HeadObject")
+        with (
+            patch.object(main, "r2_upload_is_configured", return_value=True),
+            patch.object(main, "_r2_client", FakeR2(denied)),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "R2 对象检查失败"):
+                main.r2_object_exists("release-1.jpg", 5)
+
+    async def test_news_image_target_rejects_symlinked_archive_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "archive"
+            archive.mkdir()
+            outside = Path(directory) / "outside.jpg"
+            outside.write_bytes(b"outside")
+            (archive / "link.jpg").symlink_to(outside)
+            with patch.object(main, "NEWS_ARCHIVE_DIR", archive):
+                self.assertIsNone(main.news_image_target({"local_path": "archive:link.jpg"}))
+
     async def test_official_source_url_remains_until_archived(self):
         with main.db() as conn:
             image = conn.execute(
@@ -333,7 +595,7 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
             "images": [
                 {
                     "kind": "remote",
-                    "source_url": "https://example.com/remote.jpg",
+                    "source_url": "https://www.lovelive-anime.jp/nijigasaki/images/remote.jpg",
                     "public_url": "https://images.example.test/images/news-remote/remote.jpg",
                     "width": 640,
                     "height": 360,
@@ -610,7 +872,7 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
         ):
             response = await self.client.post(
                 f"/api/admin/news/{record()['id']}/images",
-                content=b"\xff\xd8\xffnews-image",
+                content=JPEG_640X360,
                 headers={"content-type": "image/jpeg", "x-filename": "cover.jpg"},
             )
         self.assertEqual(response.status_code, 200)
@@ -633,7 +895,7 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
         ):
             uploaded = await self.client.post(
                 "/api/admin/collabo/assets",
-                content=b"\xff\xd8\xffcollabo-image",
+                content=JPEG_640X360,
                 headers={"content-type": "image/jpeg", "x-filename": "illustration.jpg"},
             )
             self.assertEqual(uploaded.status_code, 200)
@@ -831,6 +1093,36 @@ class NewsApiTests(unittest.IsolatedAsyncioTestCase):
             status = main.news_slow_refresh_status(conn)
         self.assertEqual(status["completed"], 1)
         self.assertEqual(status["total"], 3)
+
+    async def test_slow_refresh_does_not_overwrite_requeued_source(self):
+        article_id = news_id("niji_topics", "01_123")
+        replacement_url = "https://www.lovelive-anime.jp/news/01_124.html"
+        with main.db() as conn:
+            conn.execute("DELETE FROM news_refresh_queue WHERE news_id != ?", (article_id,))
+            conn.execute(
+                "UPDATE news_refresh_queue SET status = 'pending', source_url = ?, next_attempt_at = '' WHERE news_id = ?",
+                (URL, article_id),
+            )
+
+        async def requeue(*args, **kwargs):
+            del args, kwargs
+            with main.db() as conn:
+                conn.execute(
+                    "UPDATE news_refresh_queue SET source_url = ?, status = 'pending' WHERE news_id = ?",
+                    (replacement_url, article_id),
+                )
+            return False
+
+        with patch.object(main, "refresh_news_record", requeue):
+            result = await main.news_slow_refresh_once()
+        self.assertEqual(result["status"], "stale")
+        with main.db() as conn:
+            queue = conn.execute(
+                "SELECT status, source_url FROM news_refresh_queue WHERE news_id = ?",
+                (article_id,),
+            ).fetchone()
+        self.assertEqual(queue["status"], "pending")
+        self.assertEqual(queue["source_url"], replacement_url)
 
     async def test_slow_refresh_records_risk_failures_for_later_retry(self):
         request = httpx.Request("GET", URL)

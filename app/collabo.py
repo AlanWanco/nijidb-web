@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import secrets
 from datetime import date, datetime, timezone
@@ -250,7 +251,7 @@ def normalize_collaboration_periods(value: Any) -> list[dict[str, str]]:
     return periods
 
 
-def normalize_links(value: Any) -> list[dict[str, str]]:
+def normalize_links(value: Any, *, strict: bool = False) -> list[dict[str, str]]:
     parsed = decode_json(value, value)
     if not isinstance(parsed, (list, tuple)):
         return []
@@ -265,7 +266,17 @@ def normalize_links(value: Any) -> list[dict[str, str]]:
             title = str(entry.get("title") or entry.get("name") or "").strip()
         else:
             continue
-        if not url or url in seen:
+        if not url:
+            if strict:
+                raise ValueError("相关页面需要填写有效的 HTTP/HTTPS 地址")
+            continue
+        if url in seen:
+            continue
+        if not valid_external_url(url):
+            if strict:
+                raise ValueError("相关页面需要填写有效的 HTTP/HTTPS 地址")
+            # Legacy manifests are local input; never expose an invalid link
+            # through the public API even if one was imported in the past.
             continue
         seen.add(url)
         result.append({"title": title, "url": url})
@@ -290,15 +301,34 @@ def normalize_date(value: Any) -> str:
 
 
 def valid_external_url(value: Any) -> bool:
-    try:
-        parsed = urlparse(str(value or "").strip())
-    except ValueError:
+    raw = str(value or "").strip()
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in raw):
         return False
+    try:
+        parsed = urlparse(raw)
+        port = parsed.port
+        decoded_path = unquote(parsed.path)
+    except (TypeError, ValueError):
+        return False
+    hostname = parsed.hostname or ""
     return (
         parsed.scheme in {"http", "https"}
-        and bool(parsed.netloc)
+        and bool(hostname)
+        and not any(character.isspace() for character in hostname)
+        and (port is None or 1 <= port <= 65535)
+        and not parsed.netloc.endswith(":")
+        and not parsed.fragment
+        and "#" not in raw
+        and not ("?" in raw and not parsed.query)
         and not parsed.username
         and not parsed.password
+        and "\\" not in raw
+        and not any(ord(character) < 0x20 or ord(character) == 0x7F for character in decoded_path)
+        and "?" not in decoded_path
+        and "#" not in decoded_path
+        and "\\" not in decoded_path
+        and all(part not in {".", ".."} for part in decoded_path.split("/") if part)
+        and all(part for part in decoded_path.split("/")[1:-1])
     )
 
 
@@ -306,15 +336,53 @@ def valid_slug(value: Any) -> bool:
     return bool(re.fullmatch(r"\d{8}-[a-f0-9]{6}", str(value or "").strip()))
 
 
+def nonnegative_integer(value: Any, *, strict: bool = False) -> int:
+    if value in (None, ""):
+        return 0
+    if isinstance(value, bool) or (
+        isinstance(value, float) and (not math.isfinite(value) or not value.is_integer())
+    ):
+        if strict:
+            raise ValueError("图片数值格式无效")
+        return 0
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        if strict:
+            raise ValueError("图片数值格式无效") from exc
+        return 0
+    if number < 0 or number > 2**63 - 1:
+        if strict:
+            raise ValueError("图片数值超出范围")
+        return 0
+    return number
+
+
+def finite_number(value: Any, *, strict: bool = False) -> float:
+    if value in (None, ""):
+        return 0.0
+    if isinstance(value, bool):
+        if strict:
+            raise ValueError("图片评分格式无效")
+        return 0.0
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        if strict:
+            raise ValueError("图片评分格式无效") from exc
+        return 0.0
+    if not math.isfinite(number):
+        if strict:
+            raise ValueError("图片评分格式无效")
+        return 0.0
+    return number
+
+
 def image_asset_path(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
-    parsed = urlparse(raw)
-    if parsed.scheme or parsed.netloc:
-        return ""
-    raw = unquote(parsed.path or raw).replace("\\", "/")
-    for prefix in (
+    local_prefixes = (
         "/api/collabo/assets/",
         "/api/collaboration-illustrations/assets/",
         "/media/illustrations/",
@@ -323,12 +391,33 @@ def image_asset_path(value: Any) -> str:
         "media/illustrations/",
         "runtime:",
         "archive:",
-    ):
+    )
+    try:
+        parsed = urlparse(raw)
+    except (TypeError, ValueError):
+        return ""
+    local_uri = any(
+        raw.startswith(prefix) and not raw.startswith(f"{prefix}/")
+        for prefix in ("runtime:", "archive:")
+    )
+    if (parsed.scheme or parsed.netloc) and not local_uri:
+        return ""
+    if parsed.query or parsed.fragment or "?" in raw or "#" in raw or "\\" in raw:
+        return ""
+    raw = unquote(parsed.path or raw)
+    if "?" in raw or "#" in raw or "\\" in raw:
+        return ""
+    for prefix in local_prefixes:
         if raw.startswith(prefix):
             raw = raw.removeprefix(prefix)
             break
     raw = raw.lstrip("/")
-    if not raw or ".." in Path(raw).parts or "\x00" in raw:
+    parts = raw.split("/") if raw else []
+    if (
+        not raw
+        or any(part in {"", ".", ".."} for part in parts)
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in raw)
+    ):
         return ""
     return Path(raw).as_posix()
 
@@ -354,7 +443,7 @@ def source_url_from_image(image: dict[str, Any], path: str) -> str:
         value = str(image.get(key) or "").strip()
         if value and valid_external_url(value):
             return value
-    return "" if path else str(image.get("source_url") or "").strip()
+    return ""
 
 
 def manifest_image_record(item_id: str, image: dict[str, Any], position: int, timestamp: str) -> dict[str, Any] | None:
@@ -370,16 +459,20 @@ def manifest_image_record(item_id: str, image: dict[str, Any], position: int, ti
         "public_url": "",
         "thumbnail_path": image_asset_path(image.get("thumbnail_path") or image.get("thumbnail_url")),
         "source_url": source_url,
-        "source_page": str(image.get("source_page") or "").strip(),
+        "source_page": (
+            str(image.get("source_page") or "").strip()
+            if valid_external_url(image.get("source_page"))
+            else ""
+        ),
         "source_title": str(image.get("source_title") or "").strip(),
         "caption": str(image.get("caption") or "").strip(),
         "alt": str(image.get("alt") or image.get("alt_text") or "").strip(),
-        "width": max(0, int(image.get("width") or 0)),
-        "height": max(0, int(image.get("height") or 0)),
-        "bytes": max(0, int(image.get("bytes") or 0)),
+        "width": nonnegative_integer(image.get("width")),
+        "height": nonnegative_integer(image.get("height")),
+        "bytes": nonnegative_integer(image.get("bytes")),
         "sha256": str(image.get("sha256") or "").strip(),
         "kind": str(image.get("kind") or "").strip(),
-        "score": float(image.get("score") or 0),
+        "score": finite_number(image.get("score")),
         "context": str(image.get("context") or "").strip(),
         # Keep the legacy column consistent while treating every image as usable.
         "review_status": "approved",
@@ -682,7 +775,10 @@ def normalized_item_payload(payload: dict[str, Any], existing: Any = None) -> di
     collection_status = str(payload.get("collection_status") or (existing["collection_status"] if existing else "unavailable")).strip()
     if collection_status not in COLLABO_COLLECTION_STATUSES:
         collection_status = "unavailable"
-    links = normalize_links(payload.get("links") if "links" in payload else (existing["links_json"] if existing else []))
+    links = normalize_links(
+        payload.get("links") if "links" in payload else (existing["links_json"] if existing else []),
+        strict="links" in payload,
+    )
     for link in links:
         if len(link["title"]) > 500 or not valid_external_url(link["url"]):
             raise ValueError("相关页面需要填写有效的 HTTP/HTTPS 地址")
@@ -757,6 +853,15 @@ def upsert_collaboration_item(conn, payload: dict[str, Any]) -> str:
         stored_source_url = existing_image["source_url"] if existing_image else ""
         stored_public_url = existing_image["public_url"] if existing_image else ""
         source_url = str(raw_image.get("source_url") or "").strip()
+        if (
+            not source_url
+            and existing_image
+            and (
+                raw_url in {stored_public_url, stored_source_url}
+                or path and path == str(existing_image["path"] or "")
+            )
+        ):
+            source_url = stored_source_url
         public_url_value = str(
             raw_image["public_url"] if "public_url" in raw_image else stored_public_url or ""
         ).strip()
@@ -767,13 +872,20 @@ def upsert_collaboration_item(conn, payload: dict[str, Any]) -> str:
             or (existing_image and raw_url in {stored_public_url, stored_source_url})
         ):
             path = asset_path
-        if existing_image and stored_public_url and raw_url not in {stored_public_url, stored_source_url}:
+        # A display URL may intentionally differ from source_url. Only discard
+        # a cached public URL when the actual source identity changed, or when
+        # the caller explicitly supplied a replacement/empty public_url.
+        identity_url = source_url or raw_url
+        if (
+            existing_image
+            and stored_public_url
+            and "public_url" not in raw_image
+            and identity_url not in {stored_public_url, stored_source_url}
+        ):
             public_url_value = ""
         if public_url_value and not valid_external_url(public_url_value):
             raise ValueError("图片公开地址无效")
-        if not path and valid_external_url(raw_url) and raw_url != stored_source_url:
-            source_url = raw_url
-        elif not source_url and not path and valid_external_url(raw_url):
+        if not path and not source_url and valid_external_url(raw_url):
             source_url = raw_url
         source_page = str(raw_image.get("source_page") or "").strip()
         if source_url and not valid_external_url(source_url):
@@ -802,12 +914,12 @@ def upsert_collaboration_item(conn, payload: dict[str, Any]) -> str:
                 "source_title": str(raw_image.get("source_title") or "").strip(),
                 "caption": str(raw_image.get("caption") or "").strip(),
                 "alt": str(raw_image.get("alt") or "").strip(),
-                "width": max(0, int(raw_image.get("width") or 0)),
-                "height": max(0, int(raw_image.get("height") or 0)),
-                "bytes": max(0, int(raw_image.get("bytes") or 0)),
+                "width": nonnegative_integer(raw_image.get("width"), strict=True),
+                "height": nonnegative_integer(raw_image.get("height"), strict=True),
+                "bytes": nonnegative_integer(raw_image.get("bytes"), strict=True),
                 "sha256": str(raw_image.get("sha256") or "").strip(),
                 "kind": str(raw_image.get("kind") or "manual").strip(),
-                "score": float(raw_image.get("score") or 0),
+                "score": finite_number(raw_image.get("score"), strict=True),
                 "context": str(raw_image.get("context") or "").strip(),
                 # Kept only for compatibility with the existing SQLite schema.
                 "review_status": "approved",

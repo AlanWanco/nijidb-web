@@ -2,7 +2,7 @@
 #
 #   mihomo   唯一的代理实例：per-node 入口端口（7901 起，供轮询挑节点）
 #            + 共享端口 7890（规则：国内直连、其余走节点）供 bot 等客户端使用
-#   worker   新闻轮询（常驻）+ 定时维护（节点健康检查、订阅更新，跑完即退出）
+#   worker   新闻轮询（常驻）+ 定时维护（节点健康检查、吞吐测速、订阅更新，跑完即退出）
 #
 # 使用前：
 #   1. 生成初始节点配置：poller/mihomo/config.yaml（见 README，权限 600）
@@ -23,6 +23,10 @@ services:
     user: "${PUID:-1000}:${PGID:-1000}"
     # 配置只读挂载；SAFE_PATHS 允许订阅更新通过控制台按路径重载
     command: ["-f", "/config/config.yaml"]
+    env_file:
+      # 只向 mihomo 注入控制台密钥，不把站点/R2 凭据传进代理容器
+      - path: ./mihomo/controller.env
+        required: true
     environment:
       SAFE_PATHS: /config
       # 容器默认 UTC，显式指定时区让日志与运行环境一致
@@ -35,13 +39,13 @@ services:
     ports:
       - "127.0.0.1:9099:9090"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9090/version"]
+      test: ["CMD-SHELL", "curl -fsS -H 'Authorization: Bearer $${MIHOMO_CONTROLLER_SECRET}' -o /dev/null http://127.0.0.1:9090/version"]
       interval: 60s
       timeout: 10s
       retries: 3
       start_period: 20s
 
-  # 一个容器跑全部业务：新闻轮询常驻，健康检查与订阅更新定时执行（见 maintainer.json）
+  # 一个容器跑全部业务：新闻轮询常驻，健康检查、吞吐测速与订阅更新定时执行（见 maintainer.json）
   worker:
     build:
       context: ..
@@ -55,6 +59,8 @@ services:
     env_file:
       - path: ./news-poller.env
         required: false
+      - path: ./mihomo/controller.env
+        required: true
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       NIJIDB_LOG_TZ_OFFSET_HOURS: ${NIJIDB_LOG_TZ_OFFSET_HOURS:-8}

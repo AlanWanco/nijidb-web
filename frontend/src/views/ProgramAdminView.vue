@@ -1957,6 +1957,12 @@ onUnmounted(() => {
                <div class="inline-number"><input v-model.number="period.week_interval" type="number" min="1" max="52" required><span>{{ t("周一次") }}</span></div>
                <small>{{ t("填写 2 即为隔周更新。") }}</small>
             </div>
+            <div v-if="period.frequency === 'weekly'" class="program-form-field program-field-wide">
+               <span class="program-field-label">{{ t("星期") }}</span>
+               <div class="choice-tags weekday-tags" role="radiogroup" :aria-label="t('星期')">
+                <button v-for="(name, weekday) in weekdayNames" :key="name" type="button" :class="{ selected: period.weekday === weekday }" @click="period.weekday = weekday">{{ name }}</button>
+              </div>
+            </div>
             <div v-if="period.frequency === 'monthly'" class="program-form-field program-field-wide">
                <span class="program-field-label">{{ t("月更规律") }}</span>
                <div class="choice-tags" role="radiogroup" :aria-label="t('月更规律')">

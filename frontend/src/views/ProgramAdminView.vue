@@ -880,6 +880,28 @@ async function returnToParentProgram() {
   await editProgram(parent);
 }
 
+function weekdayFromIsoDate(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ""));
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year
+    || date.getUTCMonth() !== month - 1
+    || date.getUTCDate() !== day
+  ) return null;
+  return (date.getUTCDay() + 6) % 7;
+}
+
+function syncPeriodWeekday(period, value = period?.start_date) {
+  if (!period || !value) return;
+  if (period.frequency !== "weekly" && !(period.frequency === "monthly" && period.monthly_mode === "week")) return;
+  const weekday = weekdayFromIsoDate(value);
+  if (weekday !== null) period.weekday = weekday;
+}
+
 function setPeriodFrequency(period, value) {
   const previousFrequency = period.frequency;
   period.frequency = value;
@@ -904,6 +926,7 @@ function setPeriodFrequency(period, value) {
     period.day_index = 0;
     period.weekday = 0;
   }
+  syncPeriodWeekday(period);
 }
 
 function setMonthlyMode(period, value) {
@@ -922,6 +945,7 @@ function setMonthlyMode(period, value) {
     period.day_index = 0;
     period.week_number ||= 1;
     period.week_direction ||= "first";
+    syncPeriodWeekday(period);
   }
 }
 
@@ -1052,7 +1076,9 @@ function addPeriod() {
     parsed.setDate(parsed.getDate() + 1);
     startDate = parsed.toISOString().slice(0, 10);
   }
-  form.periods.push({ ...blankPeriod(), start_date: startDate });
+  const period = { ...blankPeriod(), start_date: startDate };
+  syncPeriodWeekday(period);
+  form.periods.push(period);
 }
 
 function removePeriod(index) {
@@ -2026,7 +2052,7 @@ onUnmounted(() => {
                <small>{{ t("默认使用东京时间。") }}</small>
             </div>
              <label v-if="period.frequency === 'single'" class="period-start-field">{{ t("播出日期") }}<VueDatePicker v-model="period.start_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" :locale="localeTag()" :enable-time-picker="false" auto-apply :clearable="false" :teleport="true" :placeholder="t('选择日期')" /></label>
-             <label v-else class="period-start-field">{{ t("时期开始") }}<VueDatePicker v-model="period.start_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" :locale="localeTag()" :enable-time-picker="false" auto-apply :clearable="false" :teleport="true" :placeholder="t('选择日期')" /></label>
+             <label v-else class="period-start-field">{{ t("时期开始") }}<VueDatePicker v-model="period.start_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" :locale="localeTag()" :enable-time-picker="false" auto-apply :clearable="false" :teleport="true" :placeholder="t('选择日期')" @update:model-value="syncPeriodWeekday(period, $event)" /></label>
              <label v-if="period.frequency !== 'single'" class="period-end-field">{{ t("时期结束") }}<VueDatePicker v-model="period.end_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" :locale="localeTag()" auto-apply :clearable="true" :teleport="true" :placeholder="t('留空表示进行中')" /><small>{{ index < form.periods.length - 1 ? t("用于划分下一个排期时期。") : t("填入结束日期后会自动标记为已完结；留空表示进行中。") }}</small></label>
              <label v-if="period.frequency !== 'individual' && period.frequency !== 'single'" class="period-auto-toggle program-field-wide">
                 <input :checked="period.auto_generate" type="checkbox" :disabled="saving || occurrenceSaving" @change="setPeriodAutoGeneration(period, $event.target.checked)">

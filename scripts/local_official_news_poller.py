@@ -80,6 +80,67 @@ STATE_MAX_BYTES = 4 * 1024 * 1024
 MAX_POLL_PAGES = 20
 OK_NODE_STATUSES = {200, 206}
 
+# 节点订阅没有标准化的地区字段，只能从名称识别主要出口地区。括号中的内容通常是
+# “香港中转”“台湾中转”或 IPv6 标记，先移除它们，避免把中转地误当成最终出口。
+REGION_ALIASES = (
+    ("hong-kong", ("香港", "hong kong", "hong-kong", "hk")),
+    ("taiwan", ("台湾", "台灣", "taiwan", "tw")),
+    ("japan", ("日本", "japan", "tokyo", "osaka", "jp")),
+    (
+        "united-states",
+        ("美国", "美國", "united states", "usa", "california", "los angeles", "san francisco", "new york", "us"),
+    ),
+    ("south-korea", ("韩国", "韓國", "south korea", "seoul", "korea", "kr")),
+    ("singapore", ("新加坡", "singapore", "sg")),
+    ("vietnam", ("越南", "vietnam", "vn")),
+    ("malaysia", ("马来西亚", "馬來西亞", "malaysia", "my")),
+    ("turkey", ("土耳其", "turkey", "türkiye", "tr")),
+    ("germany", ("德国", "德國", "germany", "berlin", "de")),
+    ("united-kingdom", ("英国", "英國", "united kingdom", "britain", "london", "uk", "gb")),
+    ("australia", ("澳大利亚", "澳洲", "australia", "sydney", "au")),
+    ("philippines", ("菲律宾", "菲律賓", "philippines", "ph")),
+    ("russia", ("俄罗斯", "俄羅斯", "russia", "moscow", "ru")),
+    ("thailand", ("泰国", "泰國", "thailand", "th")),
+    ("canada", ("加拿大", "canada", "toronto", "vancouver", "ca")),
+    ("france", ("法国", "法國", "france", "paris", "fr")),
+    ("netherlands", ("荷兰", "荷蘭", "netherlands", "amsterdam", "nl")),
+    ("india", ("印度", "india", "in")),
+)
+REGION_RELAY_PATTERN = re.compile(r"[\(\[【（].*?[\)\]】）]")
+
+
+def proxy_region(node_name: str) -> str:
+    """从节点名提取主要出口地区；无法识别时归入 unknown。"""
+    primary = REGION_RELAY_PATTERN.sub(" ", str(node_name or "")).casefold()
+    for region, aliases in REGION_ALIASES:
+        for alias in aliases:
+            normalized_alias = alias.casefold()
+            if normalized_alias.isascii():
+                pattern = rf"(?<![a-z0-9]){re.escape(normalized_alias)}(?![a-z0-9])"
+                if re.search(pattern, primary):
+                    return region
+            elif normalized_alias in primary:
+                return region
+    return "unknown"
+
+
+def region_aware_candidate_pool(
+    candidates: list[dict[str, Any]], last_node: str, last_region: str = ""
+) -> list[dict[str, Any]]:
+    """先避开上一节点，再优先避开上一地区；没有替代地区时保留可用节点。"""
+    if not candidates:
+        return []
+    node_pool = [item for item in candidates if str(item.get("node") or "") != last_node] or list(candidates)
+    previous_region = last_region or (proxy_region(last_node) if last_node else "")
+    if not previous_region:
+        return node_pool
+    region_pool = [
+        item
+        for item in node_pool
+        if proxy_region(str(item.get("node") or item.get("name") or "")) != previous_region
+    ]
+    return region_pool or node_pool
+
 
 class PollerConfigError(RuntimeError):
     """配置不完整或非法。"""
@@ -359,6 +420,8 @@ def default_state() -> dict[str, Any]:
         "backoff_until": 0.0,
         "last_pass_at": 0.0,
         "node_index": 0,
+        "last_node": "",
+        "last_region": "",
     }
 
 
@@ -430,6 +493,9 @@ def load_state(path: Path) -> dict[str, Any]:
     if state.get("last_node") is not None:
         last_node = str(state["last_node"])
         state["last_node"] = last_node[:256]
+    if state.get("last_region") is not None:
+        last_region = str(state["last_region"]).strip()
+        state["last_region"] = last_region[:64]
     return state
 
 
@@ -714,7 +780,7 @@ class OfficialNewsPoller:
             pass
 
     def choose_proxy(self) -> tuple[str, str]:
-        """每趟开始时选一个健康节点；没有可用列表时退回固定代理。"""
+        """每趟开始时选一个健康节点，优先避开上一趟的出口地区。"""
         candidates = [
             item
             for item in self.read_nodes()
@@ -723,10 +789,12 @@ class OfficialNewsPoller:
         if not candidates:
             return self.config.proxy, "固定代理"
         last = str(self.state.get("last_node") or "")
-        pool = [item for item in candidates if str(item.get("node")) != last] or candidates
+        last_region = str(self.state.get("last_region") or "")
+        pool = region_aware_candidate_pool(candidates, last, last_region)
         chosen = random.choice(pool)
         name = str(chosen.get("node") or chosen.get("name") or "未知")
         self.state["last_node"] = name
+        self.state["last_region"] = proxy_region(name)
         return f"http://{self.config.proxy_host}:{int(chosen['port'])}", name
 
     # ---------- 图片 ----------
@@ -1118,7 +1186,7 @@ class OfficialNewsPoller:
         handled = 0
         proxy_url, node_label = self.choose_proxy()
         self.current_node = node_label
-        log(f"本趟出口：{node_label}")
+        log(f"本趟出口：{node_label}（地区：{proxy_region(node_label)}）")
         proxy = proxy_url or None
         async with httpx.AsyncClient(
             timeout=config.timeout,

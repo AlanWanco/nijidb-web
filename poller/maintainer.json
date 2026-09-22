@@ -38,7 +38,7 @@
       "name": "proxy-speed",
       "script": "proxy_speed_selector.py",
       "mode": "once",
-      "interval_minutes": 30,
+      "interval_minutes": 10,
       "env": {
         "MIHOMO_SPEED_CONFIG": "/config/config.yaml",
         "MIHOMO_SPEED_STATE": "/state/proxy-speed.json",

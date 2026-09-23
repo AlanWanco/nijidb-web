@@ -31,7 +31,6 @@ import json
 import math
 import os
 import random
-import re
 import stat
 import sys
 import time
@@ -54,7 +53,6 @@ from app.news import (  # noqa: E402
     topic_next_offset,
 )
 from logfmt import format_message  # noqa: E402
-from mihomo_config import ConfigError as MihomoConfigError, validate_proxy_host  # noqa: E402
 from app.news_fetch import (  # noqa: E402
     NEWS_HEADERS,
     fetch_news_page,
@@ -78,68 +76,6 @@ INGEST_PATH = "/api/ingest/news"
 STATE_VERSION = 1
 STATE_MAX_BYTES = 4 * 1024 * 1024
 MAX_POLL_PAGES = 20
-OK_NODE_STATUSES = {200, 206}
-
-# 节点订阅没有标准化的地区字段，只能从名称识别主要出口地区。括号中的内容通常是
-# “香港中转”“台湾中转”或 IPv6 标记，先移除它们，避免把中转地误当成最终出口。
-REGION_ALIASES = (
-    ("hong-kong", ("香港", "hong kong", "hong-kong", "hk")),
-    ("taiwan", ("台湾", "台灣", "taiwan", "tw")),
-    ("japan", ("日本", "japan", "tokyo", "osaka", "jp")),
-    (
-        "united-states",
-        ("美国", "美國", "united states", "usa", "california", "los angeles", "san francisco", "new york", "us"),
-    ),
-    ("south-korea", ("韩国", "韓國", "south korea", "seoul", "korea", "kr")),
-    ("singapore", ("新加坡", "singapore", "sg")),
-    ("vietnam", ("越南", "vietnam", "vn")),
-    ("malaysia", ("马来西亚", "馬來西亞", "malaysia", "my")),
-    ("turkey", ("土耳其", "turkey", "türkiye", "tr")),
-    ("germany", ("德国", "德國", "germany", "berlin", "de")),
-    ("united-kingdom", ("英国", "英國", "united kingdom", "britain", "london", "uk", "gb")),
-    ("australia", ("澳大利亚", "澳洲", "australia", "sydney", "au")),
-    ("philippines", ("菲律宾", "菲律賓", "philippines", "ph")),
-    ("russia", ("俄罗斯", "俄羅斯", "russia", "moscow", "ru")),
-    ("thailand", ("泰国", "泰國", "thailand", "th")),
-    ("canada", ("加拿大", "canada", "toronto", "vancouver", "ca")),
-    ("france", ("法国", "法國", "france", "paris", "fr")),
-    ("netherlands", ("荷兰", "荷蘭", "netherlands", "amsterdam", "nl")),
-    ("india", ("印度", "india", "in")),
-)
-REGION_RELAY_PATTERN = re.compile(r"[\(\[【（].*?[\)\]】）]")
-
-
-def proxy_region(node_name: str) -> str:
-    """从节点名提取主要出口地区；无法识别时归入 unknown。"""
-    primary = REGION_RELAY_PATTERN.sub(" ", str(node_name or "")).casefold()
-    for region, aliases in REGION_ALIASES:
-        for alias in aliases:
-            normalized_alias = alias.casefold()
-            if normalized_alias.isascii():
-                pattern = rf"(?<![a-z0-9]){re.escape(normalized_alias)}(?![a-z0-9])"
-                if re.search(pattern, primary):
-                    return region
-            elif normalized_alias in primary:
-                return region
-    return "unknown"
-
-
-def region_aware_candidate_pool(
-    candidates: list[dict[str, Any]], last_node: str, last_region: str = ""
-) -> list[dict[str, Any]]:
-    """先避开上一节点，再优先避开上一地区；没有替代地区时保留可用节点。"""
-    if not candidates:
-        return []
-    node_pool = [item for item in candidates if str(item.get("node") or "") != last_node] or list(candidates)
-    previous_region = last_region or (proxy_region(last_node) if last_node else "")
-    if not previous_region:
-        return node_pool
-    region_pool = [
-        item
-        for item in node_pool
-        if proxy_region(str(item.get("node") or item.get("name") or "")) != previous_region
-    ]
-    return region_pool or node_pool
 
 
 class PollerConfigError(RuntimeError):
@@ -173,10 +109,6 @@ class PollerConfig:
     max_pages: int
     timeout: float
     backoff_seconds: float
-    nodes_file: Path | None = None
-    hints_file: Path | None = None
-    config_file: Path | None = None
-    proxy_host: str = "mihomo"
     dry_run: bool = False
     once: bool = False
     limit: int = 0
@@ -317,7 +249,6 @@ def build_config(args: argparse.Namespace) -> PollerConfig:
     ):
         raise PollerConfigError("R2_IMAGE_PREFIX 格式无效")
     state_raw = os.getenv("NEWS_POLL_STATE_FILE", "").strip()
-    config_file_raw = os.getenv("NEWS_POLL_CONFIG_FILE", "/config/config.yaml").strip()
 
     missing = [
         name
@@ -365,11 +296,6 @@ def build_config(args: argparse.Namespace) -> PollerConfig:
     rest_max = env_float("NEWS_POLL_REST_MAX_MINUTES", default_rest, 1) * 60
     if rest_max < rest_min:
         raise PollerConfigError("NEWS_POLL_REST_MAX_MINUTES 不能小于 NEWS_POLL_REST_MIN_MINUTES")
-    proxy_host = os.getenv("NEWS_POLL_PROXY_HOST", "mihomo").strip() or "mihomo"
-    try:
-        proxy_host = validate_proxy_host(proxy_host, "NEWS_POLL_PROXY_HOST")
-    except MihomoConfigError as exc:
-        raise PollerConfigError(str(exc)) from exc
     return PollerConfig(
         base_url=base_url,
         api_key=api_key,
@@ -388,18 +314,6 @@ def build_config(args: argparse.Namespace) -> PollerConfig:
         max_pages=pages,
         timeout=env_float("NEWS_POLL_TIMEOUT_SECONDS", 45, 5),
         backoff_seconds=env_float("NEWS_POLL_BACKOFF_MINUTES", 30, 1) * 60,
-        nodes_file=(
-            Path(os.environ["NEWS_POLL_NODES_FILE"]).expanduser()
-            if os.getenv("NEWS_POLL_NODES_FILE", "").strip()
-            else None
-        ),
-        hints_file=(
-            Path(os.environ["NEWS_POLL_HINTS_FILE"]).expanduser()
-            if os.getenv("NEWS_POLL_HINTS_FILE", "").strip()
-            else None
-        ),
-        config_file=Path(config_file_raw or "/config/config.yaml").expanduser(),
-        proxy_host=proxy_host,
         dry_run=args.dry_run,
         once=args.once,
         limit=args.limit,
@@ -419,9 +333,6 @@ def default_state() -> dict[str, Any]:
         "stats": {"passes": 0, "pushed": 0, "seeded": 0, "skipped_unchanged": 0, "skipped_existing": 0, "errors": 0},
         "backoff_until": 0.0,
         "last_pass_at": 0.0,
-        "node_index": 0,
-        "last_node": "",
-        "last_region": "",
     }
 
 
@@ -488,28 +399,8 @@ def load_state(path: Path) -> dict[str, Any]:
             except (TypeError, ValueError, OverflowError):
                 number = 0.0
         state[key] = number if math.isfinite(number) and number >= 0 else 0.0
-    node_index = state.get("node_index", 0)
-    state["node_index"] = node_index if type(node_index) is int and node_index >= 0 else 0
-    if state.get("last_node") is not None:
-        last_node = str(state["last_node"])
-        state["last_node"] = last_node[:256]
-    if state.get("last_region") is not None:
-        last_region = str(state["last_region"]).strip()
-        state["last_region"] = last_region[:64]
     return state
 
-
-def _read_json_file(path: Path) -> dict[str, Any]:
-    try:
-        raw = _read_state_bytes(path)
-        if raw is None:
-            return {}
-        if len(raw) > STATE_MAX_BYTES:
-            return {}
-        value = json.loads(raw.decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
-        return {}
-    return value if isinstance(value, dict) else {}
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -679,8 +570,6 @@ class OfficialNewsPoller:
         self.config = config
         self.state = load_state(config.state_file)
         self.production: dict[str, dict[str, Any]] = {}
-        self.current_node = ""
-        self.retry_count = 0
         self.s3 = None
         if not config.dry_run:
             self.s3 = boto3.client(
@@ -690,112 +579,6 @@ class OfficialNewsPoller:
                 aws_secret_access_key=config.r2_secret_access_key,
                 region_name="auto",
             )
-
-    # ---------- 出口节点 ----------
-
-    def read_nodes(self) -> list[dict[str, Any]]:
-        """读取健康检查产出的可用节点列表（含每个节点的独立入口端口）。"""
-        if not self.config.nodes_file or not self.config.nodes_file.exists():
-            return []
-        try:
-            with self.config.nodes_file.open("rb") as handle:
-                raw = handle.read(STATE_MAX_BYTES + 1)
-            if len(raw) > STATE_MAX_BYTES:
-                raise ValueError("节点状态文件过大")
-            payload = json.loads(raw.decode("utf-8"))
-        except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError, RecursionError) as exc:
-            log(f"读取节点列表失败：{type(exc).__name__}")
-            return []
-        if self.config.config_file:
-            if not self.config.config_file.is_file():
-                log("无法读取 mihomo 配置，忽略健康名单")
-                return []
-            expected_digest = str(payload.get("config_sha256") or "") if isinstance(payload, dict) else ""
-            if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
-                log("节点列表缺少有效的配置摘要，忽略健康名单")
-                return []
-            try:
-                actual_digest = hashlib.sha256(self.config.config_file.read_bytes()).hexdigest()
-            except OSError:
-                log("无法读取 mihomo 配置，忽略健康名单")
-                return []
-            if expected_digest != actual_digest:
-                log("节点列表与当前 mihomo 配置不匹配，忽略健康名单")
-                return []
-        nodes = payload.get("nodes") if isinstance(payload, dict) else None
-        valid_nodes: list[dict[str, Any]] = []
-        for item in nodes or []:
-            if not isinstance(item, dict) or not isinstance(item.get("node"), str) or not item["node"].strip():
-                continue
-            if type(item.get("port")) is not int or not 1 <= item["port"] <= 65535:
-                continue
-            valid_nodes.append({**item, "port": item["port"], "node": item["node"].strip()})
-        return valid_nodes
-
-    def node_has_recent_hint(self, name: str, checked_at: str) -> bool:
-        """本进程刚在这条节点上失败过，且失败晚于最近一次成功探测。"""
-        if not self.config.hints_file or not self.config.hints_file.exists():
-            return False
-        payload = _read_json_file(self.config.hints_file)
-        try:
-            hints = payload.get("nodes") if isinstance(payload, dict) else {}
-            raw_failed_at = hints.get(name) if isinstance(hints, dict) else 0
-            failed_at = float(raw_failed_at or 0)
-        except (OSError, ValueError, TypeError, OverflowError, json.JSONDecodeError):
-            return False
-        if not math.isfinite(failed_at) or failed_at <= 0:
-            return False
-        try:
-            checked = datetime.fromisoformat(checked_at).timestamp()
-        except (OSError, TypeError, ValueError, OverflowError):
-            checked = 0.0
-        return math.isfinite(checked) and failed_at > checked
-
-    def record_hint(self, name: str) -> None:
-        """记下失败节点，供健康检查优先重测、也供本进程避开。"""
-        if not self.config.hints_file or not name:
-            return
-        hints = _read_json_file(self.config.hints_file)
-        nodes = hints.get("nodes") if isinstance(hints.get("nodes"), dict) else {}
-        nodes[name] = time.time()
-        # 只保留最近一天的记录，避免文件无限增长
-        cutoff = time.time() - 86400
-        hints["nodes"] = {
-            str(key): value
-            for key, value in nodes.items()
-            if isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(float(value))
-            and float(value) > cutoff
-        }
-        self.config.hints_file.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(self.config.hints_file.parent, 0o700)
-        except OSError:
-            pass
-        _atomic_write_text(self.config.hints_file, json.dumps(hints, ensure_ascii=False, indent=2) + "\n")
-        try:
-            os.chmod(self.config.hints_file, 0o600)
-        except OSError:
-            pass
-
-    def choose_proxy(self) -> tuple[str, str]:
-        """每趟开始时选一个健康节点，优先避开上一趟的出口地区。"""
-        candidates = [
-            item
-            for item in self.read_nodes()
-            if item.get("status") in OK_NODE_STATUSES and not self.node_has_recent_hint(str(item.get("node") or ""), str(item.get("checked_at") or ""))
-        ]
-        if not candidates:
-            return self.config.proxy, "固定代理"
-        last = str(self.state.get("last_node") or "")
-        last_region = str(self.state.get("last_region") or "")
-        pool = region_aware_candidate_pool(candidates, last, last_region)
-        chosen = random.choice(pool)
-        name = str(chosen.get("node") or chosen.get("name") or "未知")
-        self.state["last_node"] = name
-        self.state["last_region"] = proxy_region(name)
-        return f"http://{self.config.proxy_host}:{int(chosen['port'])}", name
 
     # ---------- 图片 ----------
 
@@ -1184,10 +967,8 @@ class OfficialNewsPoller:
     async def run_pass(self) -> dict[str, Any]:
         config = self.config
         handled = 0
-        proxy_url, node_label = self.choose_proxy()
-        self.current_node = node_label
-        log(f"本趟出口：{node_label}（地区：{proxy_region(node_label)}）")
-        proxy = proxy_url or None
+        log("本趟使用固定共享代理")
+        proxy = config.proxy or None
         async with httpx.AsyncClient(
             timeout=config.timeout,
             headers=NEWS_HEADERS,
@@ -1263,7 +1044,6 @@ class OfficialNewsPoller:
             failed = False
             try:
                 result = await self.run_pass()
-                self.retry_count = 0
                 stats = self.state["stats"]
                 log(
                     f"本趟完成：检查 {result['handled']} 篇 | 累计提交 {stats['pushed']}"
@@ -1272,22 +1052,10 @@ class OfficialNewsPoller:
                 )
             except OfficialSiteBlocked:
                 failed = True
-                self.record_hint(self.current_node)
-                if self.config.nodes_file and self.retry_count < 1:
-                    self.retry_count += 1
-                    log(f"节点「{self.current_node}」返回 403，换一个节点立即重试")
-                    continue
-                self.retry_count = 0
                 self.state["backoff_until"] = time.time() + config.backoff_seconds
                 log(f"官网返回 403，进入 {config.backoff_seconds / 60:.0f} 分钟退避")
             except (httpx.HTTPError, PollerConfigError, RuntimeError, ValueError) as exc:
                 failed = True
-                if self.config.nodes_file and isinstance(exc, httpx.HTTPError) and self.retry_count < 1:
-                    self.record_hint(self.current_node)
-                    self.retry_count += 1
-                    log(f"节点「{self.current_node}」异常（{type(exc).__name__}），换一个节点立即重试")
-                    continue
-                self.retry_count = 0
                 log(f"本趟异常：{type(exc).__name__} {exc}")
             finally:
                 save_state(config.state_file, self.state)

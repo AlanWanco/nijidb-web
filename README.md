@@ -57,7 +57,7 @@ docker run -d --name nijidb-web -p 8000:8000 \
 | `scripts/local_official_news_poller.py` | 官网新闻内容检测与更新：抓列表 → 解析详情 → 图片上传 R2 → `POST /api/ingest/news` |
 | `scripts/remote_news_image_worker.py` | 历史新闻图片的批量归档（补档），按站点新闻索引顺序处理 |
 
-容器化部署（独立出口代理 + 轮询服务）见 [`poller/README.md`](poller/README.md)，支持以后追加音乐等其它轮询服务。
+容器化部署（新闻轮询 / 图片补档 + 外部固定代理）见 [`poller/README.md`](poller/README.md)。代理核心与节点维护由独立 Compose 项目管理，本项目只依赖固定代理地址。
 
 ### 轮询行为
 
@@ -66,7 +66,7 @@ docker run -d --name nijidb-web -p 8000:8000 \
 - 站点已有、官网内容变化 → 重新归档图片并提交更新。
 - 站点已有、内容未变 → 跳过，不写入。
 - 站点已有但图片尚未归档（封面不是当前实例的 R2 地址、站点图片数量不足，或上次仅部分图片成功）→ 补归档后提交。
-- 官网返回 403 → 退避（默认 30 分钟），并可通过控制接口自动切换出口节点。
+- 官网返回 403 → 退避（默认 30 分钟）；上游代理故障切换由独立代理服务处理。
 - 两趟之间随机等待 30–60 分钟，避免固定节奏。
 
 ### 变更判断
@@ -81,7 +81,7 @@ docker run -d --name nijidb-web -p 8000:8000 \
 | --- | --- |
 | `NIJIDB_BASE_URL` | 站点地址，必填，无默认值 |
 | `NIJIDB_INGEST_API_KEY` | 新闻资源密钥，必填；已生成数据库密钥时用数据库密钥，否则回退到该环境变量 |
-| `NEWS_POLL_PROXY` | 访问官网使用的**单条固定代理**（容器部署使用 `http://mihomo:7890`）；生产轮询配置必填，不做轮换 |
+| `NEWS_POLL_PROXY` | 访问官网使用的**单条固定代理**；生产轮询配置必填，不做代理轮换 |
 | `R2_ENDPOINT` / `R2_BUCKET` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_PUBLIC_BASE_URL` | R2 凭据与公开地址 |
 | `R2_IMAGE_PREFIX` | 默认 `images`；图片写入 `<prefix>/news-remote/<sha256>.<ext>` |
 | `NEWS_POLL_STATE_FILE` | 状态文件（基线、计数），默认 `~/.local/state/nijidb-news-poller/state.json` |
@@ -89,7 +89,6 @@ docker run -d --name nijidb-web -p 8000:8000 \
 | `NEWS_POLL_ARTICLE_DELAY_SECONDS` / `NEWS_POLL_IMAGE_DELAY_SECONDS` | 篇间/图间间隔，默认 30 / 10 |
 | `NEWS_POLL_REST_MIN_MINUTES` / `NEWS_POLL_REST_MAX_MINUTES` | 两趟之间的随机间隔区间，默认 30 / 60 |
 | `NEWS_POLL_BACKOFF_MINUTES` | 官网 403 后的退避时长，默认 30 |
-| `NEWS_POLL_NODES_FILE` / `NEWS_POLL_HINTS_FILE` | 可选：健康节点状态与本轮失败提示文件；配置后每趟从最近探测成功的 per-node 入口随机选一个 |
 
 站点密钥与 R2 凭据只放在运行机器上权限为 `600` 的环境文件里，不要写进仓库、状态文件或日志；
 状态文件只保存内容指纹与计数。密钥通过 HTTPS 请求头发送，不要放进 URL。
@@ -110,8 +109,8 @@ uv run --locked python scripts/local_official_news_poller.py
 其他参数：`--only PAGE_NAME` 只处理指定文章，`--refresh-existing` 忽略跳过条件重新提交
 （对账用），`--limit N` 限制每趟检查篇数。
 
-官网请求保持串行、低频、固定 UA，不使用 Cookie、UA 轮换或并发抓取；代理只允许配置
-**单条固定出口**，不做轮换。
+官网请求保持串行、低频、固定 UA，不使用 Cookie、UA 轮换或并发抓取；新闻轮询只使用配置的
+**单条固定代理地址**，不读取 Mihomo 配置、节点状态或控制器接口。
 
 ## 开发调试
 

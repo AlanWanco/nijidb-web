@@ -35,9 +35,10 @@ services:
       - ./mihomo:/config:ro
     networks:
       - proxy
-    # 控制台只在本机可见；共享代理端口不发布到宿主，客户端通过 compose 网络访问 mihomo:7890
+    # 控制台只在本机可见；共享代理端口仅绑定树莓派有线 LAN 地址，不暴露到所有网卡
     ports:
       - "127.0.0.1:9099:9090"
+      - "${MIHOMO_LAN_BIND_IP:-192.168.10.75}:7890:7890"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -H \"Authorization: Bearer $${MIHOMO_CONTROLLER_SECRET}\" -o /dev/null http://127.0.0.1:9090/version"]
       interval: 60s

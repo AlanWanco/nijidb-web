@@ -2830,6 +2830,10 @@ footer {
   font-weight: 800;
 }
 
+.programs-page .programs-topline h1.program-archive-title-fallback {
+  font-family: var(--display-font);
+}
+
 .programs-intro {
   max-width: 560px;
   margin: 0;

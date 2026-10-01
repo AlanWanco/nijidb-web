@@ -197,7 +197,7 @@ PLAYWRIGHT_MODULE=/path/to/playwright node frontend/tests/program-period-browser
 - [x] 官网新闻页：本地 Markdown 归档、Topics 自动检查、tags 筛选和页面内编辑。
 - [x] 节目档案页：整理官方和个人节目资料。
 - [x] 联动立绘页：整理联动视觉和相关出处。
-- [ ] 艺术家详情页：关联作品、曲目和 credit。
+- [ ] Staff 数据库前端：按 ANIME/CD/BD、年份和 Love Live 六个子企划使用可多选的药丸标签筛选；作品可关联多个子企划以支持跨企划发行；staff 详情关联作品、曲目和 credit。数据由用户整理后导入，CD/BD 数据后续逐步规划。
 - [ ] 跨平台账号映射和艺术家关系表。
 - [ ] 补充同步、解析和数据迁移测试。
 

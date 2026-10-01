@@ -332,7 +332,9 @@ onUnmounted(() => window.clearTimeout(programSearchTimer));
     <div class="programs-topline">
       <div>
         <p class="eyebrow">PROGRAM ARCHIVE / READ ONLY</p>
-         <h1>{{ detailMode ? t("节目详情") : t("节目列表") }}</h1>
+        <h1 :class="{ 'program-archive-title-fallback': detailMode && locale !== 'en' }">
+          {{ detailMode ? t("节目详情") : t("节目列表") }}
+        </h1>
          <p class="programs-intro">{{ t("查看节目资料、排期时期和单集记录；编辑操作需要管理员登录。") }}</p>
        </div>
        <RouterLink class="back" to="/programs">← {{ t("返回播出日历") }}</RouterLink>

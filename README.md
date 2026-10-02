@@ -131,6 +131,12 @@ npm run dev
 
 打开 `http://localhost:5173`。Vite 会把 `/api` 和 `/media` 请求代理到 `http://127.0.0.1:8000`；如果后端使用其他地址，可设置 `VITE_BACKEND_URL`。生产 Docker 镜像会自动构建 `frontend/dist`，无需手动执行前端构建。
 
+## 节目完结期
+
+单集编辑页在“清空列表”右侧提供“本集完结”。确认后保存本期的 `is_final` 标记，所属时期的结束日期自动取有效完结期中最新的实际播出日期；改期使用调整日期，隔周顺延使用生效后的日期。后续修改完结期日期会同步更新时期结束，多时期互不影响。自动排期止于完结期的原始排期锚点，延后的完结日不会额外生成单集；已保存单集不删除、不补造。
+
+旧记录默认不标记完结；没有有效完结标记时保留手动填写的时期结束日期。节目 JSON 格式版本 7 增加可选字段 `occurrences[].is_final`，仍兼容旧版本。图片直链归档必须有完整 R2 配置；上传文件和剪贴板图片在未配置 R2 时只保存到本地。
+
 ## 联动立绘档案
 
 `/collabo` 使用 SQLite 中的联动记录和图片元数据，管理员可在 `/admin/collabo` 编辑资料、角色标签、多个带标题/描述的开始—结束日期时间段、排序图片、设置封面、标记整条记录状态和上传本地图片。公开页支持按角色标签筛选，“全员”表示选中全部角色。应用启动时会从本地 `frontend/src/content/collaborationIllustrations.json` 与 `data/images/illustrations/manifest.json` 导入尚未入库的记录；容器部署可使用 `scripts/seed_collabo_database.py` 对数据卷执行同样的导入。原有 `/illustrations` 和 `/api/collaboration-illustrations` 保留兼容。图片文件仍保存在 Git 忽略的 `data/` / `/data` 下，不写入 SQLite；若需要在容器中启用本地图片，将该目录复制到数据卷的 `/data/images/illustrations/`，然后重启应用即可。采集脚本包括：
@@ -181,6 +187,7 @@ uv run --locked python scripts/import_official_news.py \
 uv run --locked python -m unittest discover -s tests -v
 PLAYWRIGHT_MODULE=/path/to/playwright node frontend/tests/news-browser.cjs
 PLAYWRIGHT_MODULE=/path/to/playwright node frontend/tests/program-period-browser.cjs
+PLAYWRIGHT_MODULE=/path/to/playwright node frontend/tests/program-final-episode-browser.cjs
 ```
 
 浏览器测试自动启动临时 Vite，并使用无头 Chrome 验证 Markdown、灯箱、新闻切换、设置分页、节目时期自动生成开关及移动端布局。

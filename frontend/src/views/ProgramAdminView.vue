@@ -152,6 +152,7 @@ function blankOccurrence() {
     subtitle_url: "",
     status: "scheduled",
     special: "",
+    is_final: false,
     adjusted_date: "",
     adjusted_time: "",
     note: "",
@@ -233,6 +234,9 @@ const canShiftFollowing = computed(() => occurrencePeriod.value?.frequency === "
 const occurrenceRescheduleBaseDate = computed(() => occurrenceDraft.original_date
   ? addDays(occurrenceDraft.original_date, Number(occurrenceDraft.schedule_shift_days) || 0)
   : occurrenceDraft.effective_date || occurrenceDraft.adjusted_date || "");
+const occurrenceCompletionDate = computed(() => occurrenceDraft.status === "rescheduled"
+  ? occurrenceDraft.adjusted_date
+  : occurrenceDraft.original_date ? addDays(occurrenceDraft.original_date, Number(occurrenceDraft.schedule_shift_days) || 0) : "");
 const occurrenceDeleteLabel = computed(() => occurrenceDraft.status === "deleted" ? t("恢复单集") : t("删除单集"));
 const occurrenceAutoSaveEnabled = computed(() => Boolean(editingId.value && (occurrenceDraft.id || occurrenceDraft.generated || occurrenceDraft.materialized)));
 const selectedOccurrenceIndex = computed(() => {
@@ -332,7 +336,8 @@ function occurrenceStatus(row) {
   if (row.status === "deleted") return t("已删除");
   if (row.status === "cancelled") return t("已取消");
   const airStatus = row.aired ? t("已播出") : t("未播出");
-  return row.status === "rescheduled" ? `${t("已改期")} · ${airStatus}` : airStatus;
+  const status = row.status === "rescheduled" ? `${t("已改期")} · ${airStatus}` : airStatus;
+  return row.is_final ? `${status} · ${t("完结期")}` : status;
 }
 
 function episodeLabel(episode, special = "") {
@@ -1223,6 +1228,7 @@ async function applyRescheduledToOriginal() {
   try {
     const data = await api(`/api/admin/programs/${editingId.value}/occurrences/restore-rescheduled`, { method: "POST" });
     await Promise.all([loadPrograms(), loadOccurrences(editingId.value)]);
+    syncFinalPeriodEndDates(editingId.value);
     resetOccurrenceDraft();
     message.value = t("已将 {count} 期改期时间覆盖为新的原定播出时间", { count: data.count });
   } catch (requestError) {
@@ -1257,6 +1263,7 @@ function editOccurrence(row) {
     subtitle_url: row.subtitle_url || "",
     status: row.status || "scheduled",
     special: row.special || "",
+    is_final: Boolean(row.is_final),
     adjusted_date: row.adjusted_date || (row.status === "rescheduled" ? row.original_date || "" : ""),
      adjusted_time: row.adjusted_time || (row.status === "rescheduled" ? row.original_time || "" : ""),
      note: row.note || "",
@@ -1541,6 +1548,7 @@ function occurrenceBody(overrides = {}) {
     subtitle_url: occurrenceDraft.subtitle_url,
     status: occurrenceDraft.status,
     special: occurrenceDraft.special,
+    is_final: occurrenceDraft.is_final,
     adjusted_date: occurrenceDraft.adjusted_date,
     adjusted_time: occurrenceDraft.adjusted_time,
     note: occurrenceDraft.note,
@@ -1612,6 +1620,22 @@ function occurrenceDraftSignature() {
   return JSON.stringify(occurrenceBody());
 }
 
+function syncFinalPeriodEndDates(programId, affectedOccurrences = []) {
+  if (editingId.value !== programId) return;
+  const program = programs.value.find(item => item.id === programId);
+  const periods = [...(program?.periods || [])].sort((left, right) => right.start_date.localeCompare(left.start_date));
+  const affectedStarts = new Set([...affectedOccurrences, ...occurrenceRows.value].filter(row => row?.is_final).map(row => {
+    const anchor = row.generated_date || row.original_date;
+    return periods.find(period => period.start_date && period.start_date <= anchor)?.start_date;
+  }).filter(Boolean));
+  // Refresh only final-related end dates without losing other unsaved form edits.
+  form.periods.forEach(period => {
+    if (!affectedStarts.has(period.start_date)) return;
+    const saved = periods.find(item => item.start_date === period.start_date);
+    if (saved) period.end_date = saved.end_date || "";
+  });
+}
+
 function queueOccurrenceAutoSave(delay = 400) {
   window.clearTimeout(occurrenceAutoSaveTimer);
   occurrenceAutoSaveState.value = "pending";
@@ -1621,7 +1645,7 @@ function queueOccurrenceAutoSave(delay = 400) {
   }, delay);
 }
 
-async function saveOccurrence({ auto = false } = {}) {
+async function saveOccurrence({ auto = false, complete = false } = {}) {
   if (!editingId.value) return;
   if (occurrenceSaving.value) {
     if (auto) occurrenceAutoSaveQueued = true;
@@ -1630,10 +1654,12 @@ async function saveOccurrence({ auto = false } = {}) {
   window.clearTimeout(occurrenceAutoSaveTimer);
   occurrenceAutoSaveTimer = 0;
   const position = captureOccurrencePosition();
+  const programId = editingId.value;
   const rowKey = occurrenceEditingRowKey.value || occurrenceRowKey(occurrenceDraft);
   const draftId = occurrenceDraft.id;
-  const body = occurrenceBody();
-  const draftSignature = JSON.stringify(body);
+  const body = occurrenceBody(complete ? { is_final: true } : {});
+  const previous = { ...occurrenceDraft };
+  const draftSignature = occurrenceDraftSignature();
   occurrenceSaving.value = true;
   if (!auto) {
     message.value = "";
@@ -1643,28 +1669,37 @@ async function saveOccurrence({ auto = false } = {}) {
   }
   try {
     const path = draftId
-      ? `/api/admin/programs/${editingId.value}/occurrences/${draftId}`
-      : `/api/admin/programs/${editingId.value}/occurrences`;
+      ? `/api/admin/programs/${programId}/occurrences/${draftId}`
+      : `/api/admin/programs/${programId}/occurrences`;
     const data = await api(path, { method: draftId ? "PATCH" : "POST", body });
     const saved = data.occurrence;
-    const wasCurrent = occurrenceEditingRowKey.value === rowKey;
+    const wasCurrent = editingId.value === programId && occurrenceEditingRowKey.value === rowKey;
     const draftUnchanged = wasCurrent && occurrenceDraftSignature() === draftSignature;
-    if (saved) updateSavedOccurrence(rowKey, saved);
+    if (saved && editingId.value === programId) updateSavedOccurrence(rowKey, saved);
     if (wasCurrent && saved) {
       occurrenceDraft.id = saved.id || occurrenceDraft.id;
       occurrenceDraft.generated = false;
       occurrenceDraft.materialized = Boolean(saved.materialized);
       occurrenceDraft._draft = false;
       occurrenceDraft._draftKey = "";
+      if (complete) {
+        // Keep the final marker if other episode fields changed in flight and
+        // trigger a queued auto-save; that follow-up must not undo completion.
+        occurrenceDraftHydrating = true;
+        occurrenceDraft.is_final = Boolean(saved.is_final);
+        await nextTick();
+        occurrenceDraftHydrating = false;
+      }
     }
 
     // The mutation response only describes this row. Reload the generated list as well,
     // because a status/date change can affect episode numbers and following weekly slots.
-    await Promise.all([refreshPrograms(), refreshOccurrences(editingId.value)]);
+    await Promise.all([refreshPrograms(), editingId.value === programId ? refreshOccurrences(programId) : Promise.resolve()]);
+    syncFinalPeriodEndDates(programId, [previous, body]);
     const refreshed = saved
       ? occurrenceRows.value.find(row => (saved.id && String(row.id) === String(saved.id)) || occurrenceRowKey(row) === rowKey)
       : null;
-    const currentSelection = wasCurrent && occurrenceEditingRowKey.value === rowKey;
+    const currentSelection = wasCurrent && editingId.value === programId && occurrenceEditingRowKey.value === rowKey;
     if (currentSelection && saved) {
       occurrenceEditingRowKey.value = refreshed ? occurrenceRowKey(refreshed) : occurrenceEditingRowKey.value;
       if (draftUnchanged && refreshed) editOccurrence(refreshed);
@@ -1693,6 +1728,16 @@ async function saveOccurrence({ auto = false } = {}) {
   }
 }
 
+async function completeOccurrence() {
+  if (occurrenceSaving.value || saving.value || occurrenceImageUploading.value || occurrenceDraft.is_final
+    || !occurrenceCompletionDate.value || ["cancelled", "deleted"].includes(occurrenceDraft.status)) return;
+  const date = occurrenceCompletionDate.value;
+  if (!window.confirm(t("将本期标记为完结期，并按实际播出日期 {date} 更新所属时期的结束日期？已有单集记录不会删除。", { date }))) return;
+  if (await saveOccurrence({ complete: true })) {
+    message.value = t("本期已标记为完结期，时期结束日期已同步");
+  }
+}
+
 async function deleteOccurrence() {
   if ((!occurrenceDraft.id && !occurrenceDraft.generated) || !editingId.value) return;
   if (!window.confirm(t("删除后，这条单集不会再显示在生成列表和日历中；如需保留请使用“因故取消”。继续吗？"))) return;
@@ -1700,19 +1745,22 @@ async function deleteOccurrence() {
   occurrenceAutoSaveTimer = 0;
   occurrenceAutoSaveQueued = false;
   const position = captureOccurrencePosition();
+  const programId = editingId.value;
+  const previous = { ...occurrenceDraft };
   const draftId = occurrenceDraft.id;
   occurrenceSaving.value = true;
   try {
     if (draftId) {
-      await api(`/api/admin/programs/${editingId.value}/occurrences/${draftId}`, { method: "DELETE" });
+      await api(`/api/admin/programs/${programId}/occurrences/${draftId}`, { method: "DELETE" });
     } else {
-      await api(`/api/admin/programs/${editingId.value}/occurrences`, {
+      await api(`/api/admin/programs/${programId}/occurrences`, {
         method: "POST",
         body: occurrenceBody({ status: "deleted", adjusted_date: "", adjusted_time: "", shift_following_days: 0 }),
       });
     }
-    await Promise.all([refreshPrograms(), refreshOccurrences(editingId.value)]);
-    resetOccurrenceDraft();
+    await Promise.all([refreshPrograms(), editingId.value === programId ? refreshOccurrences(programId) : Promise.resolve()]);
+    syncFinalPeriodEndDates(programId, [previous]);
+    if (editingId.value === programId) resetOccurrenceDraft();
     await restoreOccurrencePosition(position);
     message.value = t("单集已删除");
   } catch (requestError) {
@@ -2207,6 +2255,7 @@ onUnmounted(() => {
                <button v-if="!occurrenceAutoSaveEnabled" class="program-action-button" :disabled="occurrenceSaving">{{ occurrenceSaving ? t("保存中……") : t("保存本期调整") }}</button>
                <button v-if="occurrenceDraft.id || occurrenceDraft.generated" type="button" class="program-action-button" :class="occurrenceDraft.status === 'deleted' ? 'secondary' : 'danger'" :disabled="occurrenceSaving" @click="toggleOccurrenceDeletion">{{ occurrenceDeleteLabel }}</button>
                <button type="button" class="danger program-action-button" :disabled="occurrenceSaving" @click="clearOccurrenceList">{{ t("清空列表") }}</button>
+               <button type="button" class="secondary program-action-button occurrence-complete-button" :disabled="occurrenceSaving || saving || occurrenceImageUploading || occurrenceDraft.is_final || !occurrenceCompletionDate || ['cancelled', 'deleted'].includes(occurrenceDraft.status)" @click="completeOccurrence">{{ occurrenceDraft.is_final ? t("本集已完结") : t("本集完结") }}</button>
           </div>
         </form>
       </div>

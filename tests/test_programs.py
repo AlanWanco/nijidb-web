@@ -738,6 +738,358 @@ class IndividualProgramApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(occurrences[0]["generated"])
         self.assertTrue(occurrences[0]["manual"])
 
+    async def create_final_test_program(self, periods=None, auto_generate=False):
+        response = await self.client.post(
+            "/api/admin/programs",
+            json={
+                "title": "完结期测试节目",
+                "auto_generate": auto_generate,
+                "periods": periods or [{"start_date": "2026-01-01", "frequency": "individual"}],
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()["program"]
+
+    async def get_final_test_program(self, program_id):
+        response = await self.client.get("/api/programs")
+        return next(program for program in response.json()["programs"] if program["id"] == program_id)
+
+    async def test_final_episode_updates_period_and_program_at_actual_date(self):
+        program = await self.create_final_test_program()
+        program_id = program["id"]
+        endpoint = f"/api/admin/programs/{program_id}/occurrences"
+        before = (await self.client.get(endpoint)).json()["occurrences"]
+        response = await self.client.post(
+            endpoint,
+            json={
+                "original_date": "2026-02-03",
+                "status": "rescheduled",
+                "adjusted_date": "2026-02-10",
+                "is_final": True,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        final = response.json()["occurrence"]
+        self.assertTrue(final["is_final"])
+        self.assertEqual(final["date"], "2026-02-10")
+        saved = await self.get_final_test_program(program_id)
+        self.assertEqual(saved["periods"][0]["end_date"], "2026-02-10")
+        self.assertEqual(saved["end_date"], "2026-02-10")
+        self.assertEqual(saved["status"], "completed")
+        with main.db() as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM program_occurrences WHERE program_id = ?", (program_id,)).fetchone()[
+                    0
+                ],
+                len(before) + 1,
+            )
+            self.assertEqual(
+                conn.execute("SELECT end_date FROM program_periods WHERE program_id = ?", (program_id,)).fetchone()[0],
+                "2026-02-10",
+            )
+        updated = await self.client.patch(f"{endpoint}/{final['id']}", json={"adjusted_date": "2026-02-17"})
+        self.assertEqual(updated.status_code, 200, updated.text)
+        saved = await self.get_final_test_program(program_id)
+        self.assertEqual(saved["periods"][0]["end_date"], "2026-02-17")
+        # A stale program editor cannot overwrite the authoritative final date.
+        stale = await self.client.patch(
+            f"/api/admin/programs/{program_id}",
+            json={
+                "end_date": "",
+                "periods": [{"start_date": "2026-01-01", "end_date": "", "frequency": "individual"}],
+            },
+        )
+        self.assertEqual(stale.status_code, 200, stale.text)
+        self.assertEqual(stale.json()["program"]["periods"][0]["end_date"], "2026-02-17")
+
+    async def test_period_end_uses_latest_marked_final_not_latest_unmarked_episode(self):
+        program_id = (await self.create_final_test_program())["id"]
+        endpoint = f"/api/admin/programs/{program_id}/occurrences"
+        finals = []
+        for day in ("2026-02-01", "2026-03-01"):
+            response = await self.client.post(endpoint, json={"original_date": day, "is_final": True})
+            self.assertEqual(response.status_code, 200, response.text)
+            finals.append(response.json()["occurrence"])
+        unmarked = await self.client.post(endpoint, json={"original_date": "2026-04-01"})
+        self.assertEqual(unmarked.status_code, 200, unmarked.text)
+        self.assertFalse(unmarked.json()["occurrence"]["is_final"])
+        saved = await self.get_final_test_program(program_id)
+        self.assertEqual(saved["periods"][0]["end_date"], "2026-03-01")
+        deleted = await self.client.delete(f"{endpoint}/{finals[-1]['id']}")
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        saved = await self.get_final_test_program(program_id)
+        self.assertEqual(saved["periods"][0]["end_date"], "2026-02-01")
+        with main.db() as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM program_occurrences WHERE program_id = ?", (program_id,)).fetchone()[
+                    0
+                ],
+                4,
+            )
+
+    async def test_final_episode_only_closes_its_own_period(self):
+        program_id = (
+            await self.create_final_test_program(
+                periods=[
+                    {"start_date": "2026-01-01", "frequency": "individual"},
+                    {"start_date": "2026-07-01", "frequency": "individual"},
+                ]
+            )
+        )["id"]
+        endpoint = f"/api/admin/programs/{program_id}/occurrences"
+        earlier = await self.client.post(endpoint, json={"original_date": "2026-05-01", "is_final": True})
+        self.assertEqual(earlier.status_code, 200, earlier.text)
+        saved = await self.get_final_test_program(program_id)
+        self.assertEqual([period["end_date"] for period in saved["periods"]], ["2026-05-01", ""])
+        self.assertEqual(saved["status"], "ongoing")
+        later = await self.client.post(endpoint, json={"original_date": "2026-08-01", "is_final": True})
+        self.assertEqual(later.status_code, 200, later.text)
+        moved = await self.client.patch(
+            f"{endpoint}/{later.json()['occurrence']['id']}", json={"original_date": "2026-08-08"}
+        )
+        self.assertEqual(moved.status_code, 200, moved.text)
+        saved = await self.get_final_test_program(program_id)
+        self.assertEqual([period["end_date"] for period in saved["periods"]], ["2026-05-01", "2026-08-08"])
+        self.assertEqual(saved["end_date"], "2026-08-08")
+
+    async def test_delayed_weekly_final_stops_generation_at_anchor_and_keeps_stored_rows(self):
+        start = main.datetime.now(main.JAPAN_TZ).date() + timedelta(days=7)
+        program_id = (
+            await self.create_final_test_program(
+                periods=[
+                    {
+                        "start_date": start.isoformat(),
+                        "frequency": "weekly",
+                        "auto_generate": True,
+                        "weekday": start.weekday(),
+                        "schedule_time": "20:00",
+                    }
+                ],
+                auto_generate=True,
+            )
+        )["id"]
+        endpoint = f"/api/admin/programs/{program_id}/occurrences"
+        kept_date = (start + timedelta(days=49)).isoformat()
+        kept = await self.client.post(
+            endpoint, json={"original_date": kept_date, "original_time": "20:00", "note": "已保存，不能删除"}
+        )
+        self.assertEqual(kept.status_code, 200, kept.text)
+        anchor = (start + timedelta(days=7)).isoformat()
+        actual = (start + timedelta(days=35)).isoformat()
+        final = await self.client.post(
+            endpoint,
+            json={
+                "original_date": anchor,
+                "original_time": "20:00",
+                "status": "rescheduled",
+                "adjusted_date": actual,
+                "is_final": True,
+            },
+        )
+        self.assertEqual(final.status_code, 200, final.text)
+        records = (await self.client.get(endpoint)).json()["occurrences"]
+        self.assertEqual([row["original_date"] for row in records if row["generated"]], [start.isoformat()])
+        self.assertTrue(any(row["id"] == kept.json()["occurrence"]["id"] for row in records))
+        saved = await self.get_final_test_program(program_id)
+        self.assertEqual(saved["end_date"], actual)
+        moved = await self.client.patch(
+            f"{endpoint}/{final.json()['occurrence']['id']}",
+            json={"adjusted_date": (start + timedelta(days=42)).isoformat()},
+        )
+        self.assertEqual(moved.status_code, 200, moved.text)
+        saved = await self.get_final_test_program(program_id)
+        self.assertEqual(saved["end_date"], (start + timedelta(days=42)).isoformat())
+        with main.db() as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM program_occurrences WHERE program_id = ?", (program_id,)).fetchone()[
+                    0
+                ],
+                2,
+            )
+
+    async def test_single_final_reschedule_uses_actual_end_without_seeding_more_rows(self):
+        today = main.datetime.now(main.JAPAN_TZ).date()
+        start = (today - timedelta(days=7)).isoformat()
+        actual = (today + timedelta(days=7)).isoformat()
+        program_id = (
+            await self.create_final_test_program(
+                periods=[
+                    {
+                        "start_date": start,
+                        "frequency": "single",
+                        "timezone": "Asia/Tokyo",
+                    }
+                ]
+            )
+        )["id"]
+        endpoint = f"/api/admin/programs/{program_id}/occurrences"
+        initial = (await self.client.get(endpoint)).json()["occurrences"][0]
+        response = await self.client.patch(
+            f"{endpoint}/{initial['id']}",
+            json={
+                "status": "rescheduled",
+                "adjusted_date": actual,
+                "is_final": True,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        saved = await self.get_final_test_program(program_id)
+        self.assertEqual(saved["periods"][0]["end_date"], actual)
+        self.assertEqual(saved["status"], "ongoing")
+        self.assertEqual(len((await self.client.get(endpoint)).json()["occurrences"]), 1)
+
+    async def test_early_final_keeps_its_second_period_timezone_and_schedule_type(self):
+        program_id = (
+            await self.create_final_test_program(
+                periods=[
+                    {
+                        "start_date": "2026-01-01",
+                        "frequency": "weekly",
+                        "auto_generate": False,
+                        "timezone": "Asia/Tokyo",
+                    },
+                    {"start_date": "2026-07-01", "frequency": "individual", "timezone": "UTC"},
+                ]
+            )
+        )["id"]
+        endpoint = f"/api/admin/programs/{program_id}/occurrences"
+        response = await self.client.post(
+            endpoint,
+            json={
+                "original_date": "2026-07-20",
+                "status": "rescheduled",
+                "adjusted_date": "2026-07-18",
+                "is_final": True,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        occurrence = response.json()["occurrence"]
+        self.assertEqual(occurrence["date"], "2026-07-18")
+        self.assertEqual(occurrence["timezone"], "UTC")
+        self.assertTrue(occurrence["individual"])
+        refreshed = (await self.client.get(endpoint)).json()["occurrences"]
+        self.assertEqual(next(row for row in refreshed if row["id"] == occurrence["id"])["timezone"], "UTC")
+        saved = await self.get_final_test_program(program_id)
+        self.assertEqual(saved["periods"][1]["end_date"], "2026-07-18")
+
+    async def test_final_episode_uses_effective_date_from_prior_biweekly_shift(self):
+        start = main.datetime.now(main.JAPAN_TZ).date() + timedelta(days=7)
+        program_id = (
+            await self.create_final_test_program(
+                periods=[
+                    {
+                        "start_date": start.isoformat(),
+                        "frequency": "weekly",
+                        "auto_generate": True,
+                        "week_interval": 2,
+                        "weekday": start.weekday(),
+                        "schedule_time": "20:00",
+                    }
+                ],
+                auto_generate=True,
+            )
+        )["id"]
+        endpoint = f"/api/admin/programs/{program_id}/occurrences"
+        shifted = await self.client.post(
+            endpoint,
+            json={
+                "original_date": start.isoformat(),
+                "original_time": "20:00",
+                "status": "rescheduled",
+                "adjusted_date": (start + timedelta(days=7)).isoformat(),
+                "shift_following_days": 7,
+            },
+        )
+        self.assertEqual(shifted.status_code, 200, shifted.text)
+        final = await self.client.post(
+            endpoint,
+            json={
+                "original_date": (start + timedelta(days=28)).isoformat(),
+                "original_time": "20:00",
+                "is_final": True,
+            },
+        )
+        self.assertEqual(final.status_code, 200, final.text)
+        actual = (start + timedelta(days=35)).isoformat()
+        self.assertEqual(final.json()["occurrence"]["date"], actual)
+        saved = await self.get_final_test_program(program_id)
+        self.assertEqual(saved["end_date"], actual)
+        records = (await self.client.get(endpoint)).json()["occurrences"]
+        self.assertEqual(len(records), 3)
+        self.assertEqual(
+            [row["date"] for row in records], [(start + timedelta(days=day)).isoformat() for day in (7, 21, 35)]
+        )
+
+    async def test_migration_defaults_final_marker_without_inferring_or_creating_episodes(self):
+        program_id = (await self.create_final_test_program())["id"]
+        with main.db() as conn:
+            conn.execute("UPDATE program_periods SET end_date = '2026-01-01' WHERE program_id = ?", (program_id,))
+            conn.execute("ALTER TABLE program_occurrences DROP COLUMN is_final")
+        main.init_db()
+        with main.db() as conn:
+            rows = conn.execute(
+                "SELECT is_final FROM program_occurrences WHERE program_id = ?", (program_id,)
+            ).fetchall()
+            self.assertEqual([row["is_final"] for row in rows], [0])
+            self.assertEqual(
+                conn.execute("SELECT end_date FROM program_periods WHERE program_id = ?", (program_id,)).fetchone()[0],
+                "2026-01-01",
+            )
+
+    async def test_final_date_outside_its_period_is_rejected_without_writes(self):
+        program_id = (
+            await self.create_final_test_program(
+                periods=[
+                    {"start_date": "2026-01-01", "frequency": "individual"},
+                    {"start_date": "2026-07-01", "frequency": "individual"},
+                ]
+            )
+        )["id"]
+        endpoint = f"/api/admin/programs/{program_id}/occurrences"
+        for original, actual in (("2026-06-01", "2026-07-02"), ("2026-01-02", "2025-12-31")):
+            response = await self.client.post(
+                endpoint,
+                json={
+                    "original_date": original,
+                    "status": "rescheduled",
+                    "adjusted_date": actual,
+                    "is_final": True,
+                },
+            )
+            self.assertEqual(response.status_code, 409, response.text)
+        with main.db() as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM program_occurrences WHERE program_id = ?", (program_id,)).fetchone()[
+                    0
+                ],
+                2,
+            )
+
+    async def test_final_marker_round_trips_json_and_does_not_infer_legacy_finals(self):
+        program_id = (await self.create_final_test_program())["id"]
+        endpoint = f"/api/admin/programs/{program_id}/occurrences"
+        initial = (await self.client.get(endpoint)).json()["occurrences"][0]
+        self.assertFalse(initial["is_final"])
+        response = await self.client.patch(f"{endpoint}/{initial['id']}", json={"is_final": True})
+        self.assertEqual(response.status_code, 200, response.text)
+        saved = main.program_rows(program_ids={program_id})[0]
+        exported = main.program_json_export(saved)
+        self.assertEqual(exported["_version"], 7)
+        self.assertTrue(exported["occurrences"][0]["is_final"])
+        entries, _ = main.normalize_import_bundle(exported)
+        self.assertTrue(entries[0]["occurrences"][0]["is_final"])
+        self.assertEqual(entries[0]["program"]["periods"][0]["end_date"], initial["original_date"])
+        generated_payload = {
+            "_version": 7,
+            "import_options": {"schedule_mode": "generated"},
+            "program": {"title": "自动完结导入", "periods": [{"start_date": "2026-01-01", "frequency": "individual"}]},
+            "occurrences": [{"original_date": "2026-01-15", "generated": True, "is_final": True}],
+        }
+        entries, _ = main.normalize_import_bundle(generated_payload)
+        self.assertEqual(len(entries[0]["occurrences"]), 1)
+        self.assertTrue(entries[0]["occurrences"][0]["is_final"])
+        self.assertEqual(entries[0]["program"]["end_date"], "2026-01-15")
+
 
 class MusicSyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_deferred_detail_preserves_existing_record(self):
@@ -904,6 +1256,26 @@ class ProgramImageApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(deleted.status_code, 200)
         self.assertEqual(len(deleted.json()["occurrence"]["images"]), 1)
         self.assertFalse((self.media_directory / uploaded_image["local_path"]).exists())
+
+    async def test_missing_r2_blocks_direct_url_but_binary_upload_remains_local(self):
+        endpoint = f"/api/admin/programs/program-image-test/occurrences/{self.occurrence_id}/images"
+        with patch.object(main, "fetch_public_image_bytes", new_callable=AsyncMock) as fetcher:
+            direct = await self.client.post(
+                endpoint, json={"url": "https://pbs.twimg.com/media/test.jpg?format=jpg&name=orig"}
+            )
+        self.assertEqual(direct.status_code, 503)
+        self.assertEqual(direct.json()["detail"], "R2 未配置，无法归档图片直链")
+        fetcher.assert_not_awaited()
+        content = (
+            b"\x89PNG\r\n\x1a\n"
+            + b"\x00\x00\x00\rIHDR"
+            + (4).to_bytes(4, "big")
+            + (3).to_bytes(4, "big")
+            + b"\x08\x02\x00\x00\x00test"
+        )
+        uploaded = await self.client.post(endpoint, content=content, headers={"Content-Type": "image/png"})
+        self.assertEqual(uploaded.status_code, 200, uploaded.text)
+        self.assertTrue(uploaded.json()["image"]["url"].startswith("/media/"))
 
 
 class MusicCoverApiTests(unittest.IsolatedAsyncioTestCase):

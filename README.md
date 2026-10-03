@@ -137,6 +137,14 @@ npm run dev
 
 旧记录默认不标记完结；没有有效完结标记时保留手动填写的时期结束日期。节目 JSON 格式版本 7 增加可选字段 `occurrences[].is_final`，仍兼容旧版本。图片直链归档必须有完整 R2 配置；上传文件和剪贴板图片在未配置 R2 时只保存到本地。
 
+## 节目日历加载与缓存
+
+节目列表和月历在工作线程中处理，避免排期计算占用主事件循环。同一请求中每个节目只构建一次轻量排期，共用于期数、更新状态和日历；链接、嘉宾、备注及图片仅批量加载当前日历窗口内的已保存单集。历史记录仍参与编号和改期/顺延计算，不按窗口截断或补造单集。
+
+公开列表/月历支持弱 ETag、`If-None-Match` 和 `304`，版本检查发生在排期计算之前。进程缓存最多保留 8 个响应、每个不超过 2 MiB，SQLite 主文件、WAL/journal 文件变化或分钟切换会使版本失效；外部导入、数据库替换、单集编辑和时间驱动的已播状态均可重新校验。缓存不写数据库，也不用于管理员接口。
+
+月历在浏览器 IndexedDB 中最多保留 6 个公开窗口、最长 24 小时，每次打开先显示已有缓存再后台校验；储存被禁用时退回内存/普通请求。更新失败会明确提示正在显示缓存，切月会取消旧请求。月份网格立即可见，初次等待显示骨架提示；数据到达后一次性布局，条目仅在首次进入可视区域时短暂淡入上滑，不人为拖延数据、不逐条重排整个月历。减弱动态效果、打印和日历截图不会隐藏条目。本版本仍使用完整 JSON 快照及条件请求，不是网络流式或逐条增量协议。
+
 ## 联动立绘档案
 
 `/collabo` 使用 SQLite 中的联动记录和图片元数据，管理员可在 `/admin/collabo` 编辑资料、角色标签、多个带标题/描述的开始—结束日期时间段、排序图片、设置封面、标记整条记录状态和上传本地图片。公开页支持按角色标签筛选，“全员”表示选中全部角色。应用启动时会从本地 `frontend/src/content/collaborationIllustrations.json` 与 `data/images/illustrations/manifest.json` 导入尚未入库的记录；容器部署可使用 `scripts/seed_collabo_database.py` 对数据卷执行同样的导入。原有 `/illustrations` 和 `/api/collaboration-illustrations` 保留兼容。图片文件仍保存在 Git 忽略的 `data/` / `/data` 下，不写入 SQLite；若需要在容器中启用本地图片，将该目录复制到数据卷的 `/data/images/illustrations/`，然后重启应用即可。采集脚本包括：
@@ -188,6 +196,8 @@ uv run --locked python -m unittest discover -s tests -v
 PLAYWRIGHT_MODULE=/path/to/playwright node frontend/tests/news-browser.cjs
 PLAYWRIGHT_MODULE=/path/to/playwright node frontend/tests/program-period-browser.cjs
 PLAYWRIGHT_MODULE=/path/to/playwright node frontend/tests/program-final-episode-browser.cjs
+node --test frontend/tests/program-calendar-cache.test.mjs
+PLAYWRIGHT_MODULE=/path/to/playwright node frontend/tests/program-calendar-progressive-browser.cjs
 ```
 
 浏览器测试自动启动临时 Vite，并使用无头 Chrome 验证 Markdown、灯箱、新闻切换、设置分页、节目时期自动生成开关及移动端布局。

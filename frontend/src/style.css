@@ -3593,6 +3593,83 @@ footer {
   min-width: 0;
 }
 
+.program-calendar-load-status {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.program-calendar .program-day-skeleton {
+  display: none;
+  position: absolute;
+  top: 44px;
+  right: 9px;
+  left: 9px;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.program-calendar-initial-loading .program-day-skeleton {
+  display: grid;
+}
+
+.program-day-skeleton span {
+  height: 9px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface-alt));
+  animation: program-calendar-skeleton 1000ms ease-in-out infinite alternate;
+}
+
+.program-day-skeleton span:nth-child(2) {
+  width: 65%;
+}
+
+@keyframes program-calendar-skeleton {
+  from { opacity: .45; }
+  to { opacity: .85; }
+}
+
+.program-calendar .fc-event.program-event-reveal-pending {
+  opacity: 0;
+  transform: translateY(5px);
+}
+
+.program-calendar .program-event-enter {
+  animation: program-event-enter 180ms cubic-bezier(.22, .7, .2, 1) var(--program-event-enter-delay, 0ms) both;
+}
+
+@keyframes program-event-enter {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: var(--program-event-final-opacity, 1); transform: translateY(0); }
+}
+
+.program-calendar .program-event-upcoming {
+  --program-event-final-opacity: .7;
+}
+
+.program-calendar .program-event-cancelled {
+  --program-event-final-opacity: .72;
+}
+
+body.program-screenshot-capturing .program-event-reveal-pending,
+body.program-screenshot-capturing .program-event-enter {
+  animation: none !important;
+  opacity: var(--program-event-final-opacity, 1) !important;
+  transform: none !important;
+}
+
+@media (prefers-reduced-motion: reduce), print {
+  .program-calendar .fc-event.program-event-reveal-pending,
+  .program-calendar .fc-event.program-event-enter {
+    animation: none;
+    opacity: var(--program-event-final-opacity, 1);
+    transform: none;
+  }
+
+  .program-day-skeleton span {
+    animation: none;
+  }
+}
+
 @keyframes program-calendar-enter-next {
   from {
     opacity: .35;

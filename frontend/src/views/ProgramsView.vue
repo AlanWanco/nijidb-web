@@ -8,6 +8,8 @@ import enGbLocale from "@fullcalendar/core/locales/en-gb";
 import jaLocale from "@fullcalendar/core/locales/ja";
 import { useRoute, useRouter } from "vue-router";
 import { api } from "../api";
+import { calendarCache, requestCalendarSnapshot } from "../programCalendarCache";
+import { createCalendarReveal } from "../programCalendarReveal";
 import { locale, localeTag, t } from "../i18n";
 import { NIJIGASAKI_CAST, castColorSegments } from "../programCast";
 import { occurrenceLinkItems, programAdminPath, relatedLinkItem } from "../programLinks";
@@ -34,6 +36,9 @@ const drawerOpen = ref(false);
 const lightboxImages = ref([]);
 const lightboxIndex = ref(-1);
 const loading = ref(true);
+const calendarRefreshing = ref(false);
+const calendarHasSnapshot = ref(false);
+const calendarFromCache = ref(false);
 const error = ref("");
 const eventernoteLoading = ref(false);
 const eventernoteError = ref("");
@@ -112,6 +117,9 @@ let html2canvasLoader = null;
 let screenshotRendererLoader = null;
 let eventernoteRequestId = 0;
 let calendarLoadRequestId = 0;
+let calendarAbortController = null;
+let calendarWindowKey = "";
+const eventReveal = createCalendarReveal();
 const calendarRequestRange = ref(null);
 const requestedMonth = computed(() => routeMonth(route.params.month));
 const initialMonth = requestedMonth.value || monthKey(today);
@@ -207,8 +215,10 @@ const calendarOptions = reactive({
     el.style.setProperty("--program-event-color", cast[0]?.color || fallback);
     el.setAttribute("aria-label", event.title);
     el.title = event.title;
+    eventReveal.register(el, `${event.id}:${event.startStr}`);
   },
-  dayCellDidMount: addDayScreenshotButton,
+  eventWillUnmount: ({ el }) => eventReveal.unregister(el),
+  dayCellDidMount: mountCalendarDay,
   eventClassNames: ({ event }) => {
     const props = event.extendedProps || {};
     return [
@@ -812,7 +822,7 @@ function screenshotDayHeight(target) {
 }
 
 async function captureCalendarImage(target, fileName, copyToClipboard = false, screenshotLabel = "") {
-  if (!target || screenshotBusy.value) return;
+  if (!target || screenshotBusy.value || loading.value) return;
   screenshotBusy.value = true;
   screenshotMessage.value = "";
   document.body.classList.add("program-screenshot-capturing");
@@ -915,6 +925,18 @@ function copyCalendarScreenshot() {
 function screenshotFileName(value) {
   const timestamp = String(Math.floor(Date.now() / 1000)).padStart(10, "0");
   return `nijidb-calendar-${String(value || visibleMonth.value).replace(/[^\d-]/g, "")}-${timestamp}.png`;
+}
+
+function mountCalendarDay(info) {
+  addDayScreenshotButton(info);
+  const frame = info.el.querySelector(".fc-daygrid-day-frame");
+  if (!frame || frame.querySelector(".program-day-skeleton")) return;
+  const skeleton = document.createElement("div");
+  skeleton.className = "program-day-skeleton";
+  skeleton.setAttribute("aria-hidden", "true");
+  skeleton.dataset.screenshotControl = "true";
+  for (let index = 0; index < 2; index += 1) skeleton.append(document.createElement("span"));
+  frame.append(skeleton);
 }
 
 function addDayScreenshotButton({ date, el }) {
@@ -1025,32 +1047,68 @@ async function loadCalendar(info) {
   updateVisibleMonth(info?.view?.currentStart);
   const viewMonth = info?.view?.currentStart instanceof Date ? monthKey(info.view.currentStart) : "";
   const requestId = ++calendarLoadRequestId;
-  loading.value = true;
+  calendarAbortController?.abort();
+  const controller = new AbortController();
+  calendarAbortController = controller;
+  const params = new URLSearchParams({
+    start: shiftCalendarDate(info?.startStr, -2),
+    end: shiftCalendarDate(info?.endStr, 2),
+  });
+  const path = `/api/programs/calendar?${params}`;
+  if (calendarWindowKey !== path) {
+    calendarWindowKey = path;
+    eventReveal.reset();
+    allEvents.value = [];
+    eventernoteEvents.value = [];
+    eventernoteRequestId += 1;
+    calendarHasSnapshot.value = false;
+    calendarFromCache.value = false;
+  }
+  loading.value = !calendarHasSnapshot.value;
+  calendarRefreshing.value = true;
   error.value = "";
+  calendarRequestRange.value = { fromDate: params.get("start"), toDate: params.get("end") };
+  // Optional external events do not hold the main calendar's ready state hostage.
+  if (eventernoteSelected.value) void loadEventernoteEvents();
   try {
-    const params = new URLSearchParams({
-      start: shiftCalendarDate(info?.startStr, -2),
-      end: shiftCalendarDate(info?.endStr, 2),
-    });
-    calendarRequestRange.value = { fromDate: params.get("start"), toDate: params.get("end") };
-    const data = await api(`/api/programs/calendar?${params}`);
+    const cached = await calendarCache.get(path);
     if (requestId !== calendarLoadRequestId) return;
-    programs.value = data.programs;
-    allEvents.value = data.events;
-    if (eventernoteSelected.value) await loadEventernoteEvents();
-    else eventernoteEvents.value = [];
+    if (cached) {
+      applyCalendarSnapshot(cached.payload);
+      calendarFromCache.value = true;
+      loading.value = false;
+    }
+    const result = await requestCalendarSnapshot(path, { cached, signal: controller.signal });
+    if (requestId !== calendarLoadRequestId) return;
+    if (!result.notModified) applyCalendarSnapshot(result.entry.payload);
+    calendarFromCache.value = false;
+    if (result.cacheable) void calendarCache.put(path, result.entry).catch(() => {});
+    else void calendarCache.remove(path);
     if (selectedEvent.value && !selectedProgram.value && !selectedEvent.value.isEventernote) closeDrawer();
   } catch (requestError) {
-    if (requestId !== calendarLoadRequestId) return;
-    error.value = requestError.message || t("节目日历加载失败");
+    if (requestId !== calendarLoadRequestId || controller.signal.aborted) return;
+    error.value = t(requestError.message || "节目日历加载失败");
+    if (requestError.status === 401 || requestError.status === 403 || requestError.status === 404) {
+      void calendarCache.remove(path);
+      calendarHasSnapshot.value = false;
+      calendarFromCache.value = false;
+      allEvents.value = [];
+    }
   } finally {
     if (requestId !== calendarLoadRequestId) return;
     loading.value = false;
+    calendarRefreshing.value = false;
     const pending = pendingCalendarScroll;
     if (pending && pending.id === calendarScrollRequestId && pending.month === viewMonth) {
       void scrollCalendarToDate(pending.date, pending.id);
     }
   }
+}
+
+function applyCalendarSnapshot(data) {
+  programs.value = data.programs;
+  allEvents.value = data.events;
+  calendarHasSnapshot.value = true;
 }
 
 function selectEvent(info) {
@@ -1146,6 +1204,8 @@ onUnmounted(() => {
   document.removeEventListener("click", closeProgramCategoryFilter);
   cancelPendingCalendarScroll();
   calendarLoadRequestId += 1;
+  calendarAbortController?.abort();
+  eventReveal.destroy();
   window.cancelAnimationFrame(calendarAnimationFrame);
   window.clearTimeout(calendarAnimationTimer);
   window.clearTimeout(screenshotMessageTimer);
@@ -1166,7 +1226,7 @@ onUnmounted(() => {
 
       <p v-if="displayError" class="state error">{{ displayError }}</p>
       <div class="program-layout">
-        <section class="program-calendar-card">
+        <section class="program-calendar-card" :class="{ 'program-calendar-initial-loading': loading && !calendarHasSnapshot }" :aria-busy="loading">
           <div class="section-heading">
             <div><p class="eyebrow">SCHEDULE / CALENDAR</p><h2>{{ t("播出日历") }}</h2></div>
            <div class="program-calendar-heading-actions">
@@ -1230,6 +1290,9 @@ onUnmounted(() => {
           <div class="program-calendar-summary">
             <span>{{ filteredProgramCount }} {{ t("个节目") }} · {{ monthEvents.length }} {{ t("期") }}</span>
             <span v-if="activeFilterCount">{{ t("已应用 {count} 项筛选", { count: activeFilterCount }) }}</span>
+            <span v-if="loading" class="program-calendar-load-status" role="status">{{ t("正在加载日历……") }}</span>
+            <span v-else-if="calendarFromCache" class="program-calendar-load-status" role="status">{{ calendarRefreshing ? t("已显示缓存，正在检查更新……") : t("更新失败，暂时显示缓存") }}</span>
+            <span v-else-if="calendarRefreshing" class="program-calendar-load-status" role="status">{{ t("正在检查日历更新……") }}</span>
         </div>
         <div class="program-calendar-note">
           <span><i class="program-legend-dot official"></i>{{ t("官方节目") }}</span>
@@ -1251,7 +1314,7 @@ onUnmounted(() => {
                 <button type="button" :aria-label="t('下个月')" :title="t('下个月')" @click="nextMonth">→</button>
              </div>
              <div class="program-calendar-sticky-month">
-               <button v-if="viewMode === 'calendar'" type="button" class="program-calendar-screenshot" :aria-label="t('截图')" :title="t('下载整张日历截图；右键复制到剪贴板')" :disabled="screenshotBusy" data-screenshot-control @click="downloadCalendarScreenshot" @contextmenu.prevent="copyCalendarScreenshot"><span aria-hidden="true">▣</span><span>{{ t("截图") }}</span></button>
+               <button v-if="viewMode === 'calendar'" type="button" class="program-calendar-screenshot" :aria-label="t('截图')" :title="t('下载整张日历截图；右键复制到剪贴板')" :disabled="screenshotBusy || loading" data-screenshot-control @click="downloadCalendarScreenshot" @contextmenu.prevent="copyCalendarScreenshot"><span aria-hidden="true">▣</span><span>{{ t("截图") }}</span></button>
                <strong>{{ visibleMonthLabel }}</strong>
              </div>
            </div>
@@ -1263,7 +1326,7 @@ onUnmounted(() => {
             <div class="program-calendar-touch-zone" :class="calendarAnimationClass" @touchstart.passive="handleCalendarTouchStart" @touchend.passive="handleCalendarTouchEnd" @touchcancel.passive="handleCalendarTouchCancel">
               <FullCalendar ref="calendarRef" class="program-calendar" :options="calendarOptions" />
             </div>
-             <p v-if="!filteredEvents.length && !loading" class="muted program-empty">{{ t("当前筛选没有匹配的节目。") }}</p>
+             <p v-if="!filteredEvents.length && !loading && calendarHasSnapshot" class="muted program-empty">{{ t("当前筛选没有匹配的节目。") }}</p>
           </div>
          </div>
         <div v-if="viewMode === 'list'" class="program-list-view">
@@ -1271,7 +1334,7 @@ onUnmounted(() => {
              <div><p class="eyebrow">MONTHLY RUNNING ORDER</p><h3>{{ visibleMonthLabel }}{{ t("节目列表") }}</h3></div>
             <span class="section-count">{{ monthEvents.length }} EVENTS</span>
           </div>
-           <p v-if="!listGroups.length" class="muted program-empty">{{ t("这个月没有符合筛选条件的节目。") }}</p>
+           <p v-if="!listGroups.length && !loading && calendarHasSnapshot" class="muted program-empty">{{ t("这个月没有符合筛选条件的节目。") }}</p>
           <section v-for="group in listGroups" :key="group.date" :data-date="group.date" class="program-list-date-group">
              <div class="program-list-date"><strong>{{ listDateLabel(group.date) }}</strong><span>{{ group.events.length }} {{ t("期") }}</span></div>
              <button v-for="event in group.events" :key="event.id" type="button" class="program-list-event" :class="eventStateClass(event)" @click="openEvent(event)">

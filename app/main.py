@@ -14,6 +14,7 @@ import secrets
 import stat
 import sqlite3
 import time as time_module
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -26,7 +27,7 @@ from botocore.exceptions import ClientError
 import httpx
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 
@@ -84,6 +85,8 @@ from app.news_fetch import (
     is_avif_bytes,
     validate_news_url,
 )
+
+from app.program_api_cache import PublicProgramCache, database_revision
 
 SOURCE_URL = "https://www.lovelive-anime.jp/nijigasaki/cd.php"
 EVENTERNOTE_EVENTS_URL = "https://events.nijigaku.fans/api/events"
@@ -1336,8 +1339,19 @@ def program_occurrence_image_payload(row: sqlite3.Row | dict[str, Any]) -> dict[
     }
 
 
-def occurrence_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+def occurrence_payload(row: sqlite3.Row | dict[str, Any], *, include_details: bool = True) -> dict[str, Any]:
     payload = dict(row)
+    if not include_details:
+        # Summary queries already select only schedule/numbering fields. Do not
+        # decode guest JSON or validate nonexistent links for every stored row.
+        payload["title"] = str(payload.get("title") or "").strip()
+        payload["special"] = str(payload.get("special") or "").strip().upper()
+        payload["is_final"] = boolean_value(payload.get("is_final"), False)
+        payload["materialized"] = boolean_value(payload.get("materialized"), False)
+        payload["shift_following_days"] = occurrence_shift_days(payload.get("shift_following_days"))
+        if payload.get("status") == "scheduled" and payload.get("adjusted_date"):
+            payload["status"] = "rescheduled"
+        return payload
     payload["images"] = [item for item in payload.get("images", []) if isinstance(item, dict)]
     payload["title"] = str(payload.get("title") or "").strip()
     payload["guests"] = program_people(payload.get("guests", "[]"))
@@ -1477,6 +1491,8 @@ def program_payload(
     occurrences: list[dict[str, Any]] | None = None,
     periods: list[dict[str, Any]] | None = None,
     include_occurrences: bool = True,
+    record_range_end: date | None = None,
+    record_sets: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     payload = dict(row)
     payload.pop("duration_minutes", None)
@@ -1501,8 +1517,13 @@ def program_payload(
     payload["periods"] = periods if periods else ([legacy_period(payload)] if payload.get("start_date") else [])
     payload["timezone"] = payload["periods"][0].get("timezone", "Asia/Tokyo") if payload["periods"] else "Asia/Tokyo"
     payload["status"] = inferred_program_status(payload)
-    payload["episode_count"] = program_episode_count(payload)
-    payload["update_status"] = program_update_status(payload)
+    records = program_statistic_records(payload, record_range_end)
+    payload["episode_count"] = program_episode_count(payload, records)
+    payload["update_status"] = program_update_status(payload, records)
+    if record_sets is not None:
+        record_sets[str(payload["id"])] = (
+            project_program_records(payload, records, record_range_end) if record_range_end is not None else records
+        )
     if not include_occurrences:
         payload.pop("occurrences", None)
         payload.pop("created_at", None)
@@ -2665,6 +2686,7 @@ def occurrence_record(
     manual: bool = False,
     schedule_shift_days: int = 0,
     monthly_mode: str = "week",
+    include_details: bool = True,
 ) -> dict[str, Any]:
     has_override = bool(override)
     override = override or {}
@@ -2703,9 +2725,9 @@ def occurrence_record(
         "shift_following_days": shift_following_days,
         "schedule_shift_days": schedule_shift_days,
         "shifted_by_reschedule": shifted_by_reschedule,
-        "source_url": safe_program_link(override.get("source_url")),
-        "mirror_url": safe_program_link(override.get("mirror_url"), True),
-        "subtitle_url": safe_program_link(override.get("subtitle_url"), True),
+        "source_url": safe_program_link(override.get("source_url")) if include_details else "",
+        "mirror_url": safe_program_link(override.get("mirror_url"), True) if include_details else "",
+        "subtitle_url": safe_program_link(override.get("subtitle_url"), True) if include_details else "",
         "date": date.fromisoformat(event_date),
         "time": event_time,
         "timezone": timezone or program.get("timezone", "Asia/Tokyo"),
@@ -2714,10 +2736,10 @@ def occurrence_record(
         "is_final": boolean_value(override.get("is_final"), False),
         "adjusted_date": override.get("adjusted_date", ""),
         "adjusted_time": override.get("adjusted_time", ""),
-        "note": override.get("note", ""),
-        "guests": program_people(override.get("guests", [])),
-        "absent_members": program_people(override.get("absent_members", [])),
-        "images": [item for item in override.get("images", []) if isinstance(item, dict)],
+        "note": override.get("note", "") if include_details else "",
+        "guests": program_people(override.get("guests", [])) if include_details else [],
+        "absent_members": program_people(override.get("absent_members", [])) if include_details else [],
+        "images": [item for item in override.get("images", []) if isinstance(item, dict)] if include_details else [],
         "materialized": boolean_value(override.get("materialized"), False),
         "manual": manual,
     }
@@ -2811,7 +2833,72 @@ def sync_final_occurrence_dates(conn: sqlite3.Connection, program_id: str, updat
         )
 
 
-def program_occurrence_records(program: dict[str, Any], range_start: date, range_end: date) -> list[dict[str, Any]]:
+def stored_occurrence_record(
+    program: dict[str, Any], row: dict[str, Any], periods: list[dict[str, Any]], *, include_details: bool = True
+) -> dict[str, Any]:
+    stored_anchor = str(row.get("generated_date") or "").strip()
+    generated_date = stored_anchor or row["original_date"]
+    anchor = date.fromisoformat(generated_date)
+    final_index = occurrence_period_index(periods, row) if boolean_value(row.get("is_final"), False) else None
+    period = (
+        periods[final_index]
+        if final_index is not None
+        else next(
+            (
+                item
+                for item in periods
+                if date.fromisoformat(item["start_date"]) <= anchor
+                and (not item.get("end_date") or anchor <= date.fromisoformat(item["end_date"]))
+            ),
+            periods[0] if periods else {},
+        )
+    )
+    return occurrence_record(
+        program,
+        date.fromisoformat(row["original_date"]),
+        row,
+        period.get("schedule_time", ""),
+        period.get("timezone", "Asia/Tokyo"),
+        period.get("frequency", "weekly"),
+        manual=not stored_anchor and not boolean_value(row.get("materialized"), False),
+        monthly_mode=period.get("monthly_mode", "week"),
+        include_details=include_details,
+    )
+
+
+def project_program_records(
+    program: dict[str, Any], records: list[dict[str, Any]], range_end: date
+) -> list[dict[str, Any]]:
+    """Preserve how saved future anchors are exposed by a shorter generation window.
+
+    A saved override consumed in the shared horizon can instead be an unconsumed
+    stored row in the original short-window algorithm. Rebuild only those rows
+    with its original fallback semantics (not a later inherited weekly shift).
+    """
+    end = range_end.isoformat()
+    rows_by_id = None
+    periods = program.get("periods") or ([legacy_period(program)] if program.get("start_date") else [])
+    projected = []
+    for record in records:
+        slot = record.get("_generation_slot")
+        if slot is not None and slot > end:
+            if not record["id"]:
+                continue
+            if rows_by_id is None:
+                rows_by_id = {row.get("id"): row for row in program.get("occurrences", [])}
+            row = rows_by_id.get(record["id"])
+            if row is not None:
+                projected.append(stored_occurrence_record(program, row, periods, include_details=False))
+                continue
+        elif record["generated"] and record["original_date"] > end:
+            continue
+        projected.append(record)
+    return projected
+
+
+def program_occurrence_records(
+    program: dict[str, Any], range_start: date, range_end: date, *, include_details: bool = True
+) -> list[dict[str, Any]]:
     program_start = date.fromisoformat(program["start_date"]) if program.get("start_date") else range_start
     program_end = date.fromisoformat(program["end_date"]) if program.get("end_date") else None
     forecast_end = datetime.now(occurrence_timezone(program.get("timezone"))).date() + timedelta(days=PROGRAM_FORECAST_DAYS)
@@ -2892,7 +2979,10 @@ def program_occurrence_records(program: dict[str, Any], range_start: date, range
                 period.get("frequency", "weekly"),
                 schedule_shift_days=schedule_shift_days,
                 monthly_mode=period.get("monthly_mode", "week"),
+                include_details=include_details,
             )
+            if not include_details:
+                record["_generation_slot"] = original.isoformat()
             records.append(record)
             if can_shift_following and record["status"] == "rescheduled":
                 schedule_shift_days += record.get("shift_following_days", 0)
@@ -2904,35 +2994,24 @@ def program_occurrence_records(program: dict[str, Any], range_start: date, range
             date_value == generated_date for date_value, _ in base_date_keys
         )):
             continue
-        original = date.fromisoformat(row["original_date"])
-        anchor = date.fromisoformat(generated_date)
-        final_period_index = occurrence_period_index(periods, row) if boolean_value(row.get("is_final"), False) else None
-        period = periods[final_period_index] if final_period_index is not None else next(
-            (
-                item
-                for item in periods
-                if date.fromisoformat(item["start_date"]) <= anchor
-                and (not item.get("end_date") or anchor <= date.fromisoformat(item["end_date"]))
-            ),
-            periods[0] if periods else {},
-        )
-        records.append(occurrence_record(
-            program,
-            original,
-            row,
-            period.get("schedule_time", ""),
-            period.get("timezone", "Asia/Tokyo"),
-            period.get("frequency", "weekly"),
-            manual=not stored_generated_date and not boolean_value(row.get("materialized"), False),
-            monthly_mode=period.get("monthly_mode", "week"),
-        ))
+        records.append(stored_occurrence_record(program, row, periods, include_details=include_details))
     return records
 
 
-def effective_program_occurrences(program: dict[str, Any], range_start: date, range_end: date) -> list[dict[str, Any]]:
-    records = program_occurrence_records(program, range_start, range_end)
+def effective_program_occurrences(
+    program: dict[str, Any], range_start: date, range_end: date,
+    records: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    if records is None:
+        records = program_occurrence_records(program, range_start, range_end)
+    else:
+        records = project_program_records(program, records, range_end)
     return sorted(
-        [record for record in records if record["status"] not in {"cancelled", "deleted"} and range_start <= record["date"] <= range_end],
+        [
+            record for record in records
+            if record["status"] not in {"cancelled", "deleted"}
+            and range_start <= record["date"] <= range_end
+        ],
         key=lambda record: (record["date"], record["time"], record["original_date"]),
     )
 
@@ -3060,14 +3139,29 @@ def program_episode_start(program: dict[str, Any]) -> int:
     return stored_episode_start(program.get("episode_start", 1))
 
 
-def program_update_status(program: dict[str, Any]) -> str:
+def program_statistic_records(program: dict[str, Any], range_end: date | None = None) -> list[dict[str, Any]]:
+    if not program.get("start_date"):
+        return []
+    today = datetime.now(occurrence_timezone(program.get("timezone"))).date()
+    limit = (
+        date.fromisoformat(program["end_date"])
+        if program.get("status") == "completed" and program.get("end_date")
+        else today
+    )
+    horizon = max(limit, range_end) if range_end is not None else limit
+    return program_occurrence_records(
+        program, date.fromisoformat(program["start_date"]), horizon, include_details=False
+    )
+
+
+def program_update_status(program: dict[str, Any], records: list[dict[str, Any]] | None = None) -> str:
     if program.get("status") == "completed" or not program.get("start_date"):
         return "completed" if program.get("status") == "completed" else "not_updated"
     today = datetime.now(occurrence_timezone(program.get("timezone"))).date()
     start = date.fromisoformat(program["start_date"])
     if today < start:
         return "not_updated"
-    occurrences = effective_program_occurrences(program, start, today)
+    occurrences = effective_program_occurrences(program, start, today, records)
     if not occurrences:
         return "not_updated"
     latest = max(occurrences, key=lambda item: item["date"])
@@ -3094,11 +3188,12 @@ def program_update_status(program: dict[str, Any]) -> str:
 def occurrence_has_passed(occurrence: dict[str, Any]) -> bool:
     current = datetime.now(occurrence_timezone(occurrence["timezone"]))
     return occurrence["date"] < current.date() or (
-        occurrence["date"] == current.date() and (not occurrence["time"] or occurrence["time"] <= current.strftime("%H:%M"))
+        occurrence["date"] == current.date()
+        and (not occurrence["time"] or occurrence["time"] <= current.strftime("%H:%M"))
     )
 
 
-def program_episode_count(program: dict[str, Any]) -> int:
+def program_episode_count(program: dict[str, Any], records: list[dict[str, Any]] | None = None) -> int:
     if not program.get("start_date"):
         return 0
     program_start = date.fromisoformat(program["start_date"])
@@ -3109,14 +3204,10 @@ def program_episode_count(program: dict[str, Any]) -> int:
         limit = min(limit, program_end)
     if limit < program_start:
         return 0
-    occurrences = effective_program_occurrences(program, program_start, limit)
+    occurrences = effective_program_occurrences(program, program_start, limit, records)
     if program.get("status") == "completed":
         return sum(1 for item in occurrences if item.get("special") != "EX")
-    return sum(
-        1
-        for item in occurrences
-        if item.get("special") != "EX" and occurrence_has_passed(item)
-    )
+    return sum(1 for item in occurrences if item.get("special") != "EX" and item["aired"])
 
 
 def materialize_generated_occurrences(conn: sqlite3.Connection, program: dict[str, Any]) -> int:
@@ -3372,6 +3463,8 @@ def program_rows(
     *,
     include_occurrences: bool = True,
     program_ids: set[str] | None = None,
+    record_range_end: date | None = None,
+    record_sets: dict[str, list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
     search = query.strip()
     program_search_sql = text_search_sql("p", ("title", "subprogram_name", "description", "people", "official_url"))
@@ -3447,7 +3540,7 @@ def program_rows(
         images_grouped.setdefault(row["occurrence_id"], []).append(program_occurrence_image_payload(row))
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in occurrence_rows:
-        occurrence = occurrence_payload(row)
+        occurrence = occurrence_payload(row, include_details=include_occurrences)
         occurrence["images"] = images_grouped.get(row["id"], [])
         grouped.setdefault(row["program_id"], []).append(occurrence)
     results = []
@@ -3458,6 +3551,8 @@ def program_rows(
             occurrence_values,
             periods_grouped.get(row["id"]),
             include_occurrences=include_occurrences,
+            record_range_end=record_range_end,
+            record_sets=record_sets,
         )
         if search:
             matched_ids = matched_occurrence_ids.get(row["id"], set())
@@ -3599,9 +3694,16 @@ def occurrence_start_value(value_date: date, value_time: str, timezone_value: st
     return start.isoformat(timespec="minutes")
 
 
-def program_calendar_events(program: dict[str, Any], range_start: date, range_end: date) -> list[dict[str, Any]]:
+def program_calendar_events(
+    program: dict[str, Any], range_start: date, range_end: date,
+    records: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     program_start = date.fromisoformat(program["start_date"]) if program.get("start_date") else range_start
-    records = sorted(program_occurrence_records(program, program_start, range_end), key=lambda record: (record["original_date"], record["original_time"], record["id"] or 0))
+    if records is None:
+        records = program_occurrence_records(program, program_start, range_end)
+    else:
+        records = project_program_records(program, records, range_end)
+    records = sorted(records, key=lambda record: (record["original_date"], record["original_time"], record["id"] or 0))
     episode_numbers = occurrence_episode_numbers(records, program_episode_start(program))
     events = []
     for index, record in enumerate(records):
@@ -7335,13 +7437,77 @@ async def api_admin_release_cover(release_id: str, request: Request) -> dict[str
     return {"release": await store_manual_release_cover(release_id, content)}
 
 
+program_api_cache = PublicProgramCache()
+
+
+def program_api_revision() -> str | None:
+    return database_revision(DB_PATH, ("program-api-v1", PROGRAM_JSON_VERSION, R2_PUBLIC_BASE_URL, R2_IMAGE_PREFIX))
+
+
+async def cached_program_api_response(request: Request, key: str, build: Callable[[], dict[str, Any]]) -> Response:
+    result = await asyncio.to_thread(
+        program_api_cache.response, key, program_api_revision, build, request.headers.get("if-none-match", "")
+    )
+    headers = {"Cache-Control": "private, no-cache" if result.etag else "no-store"}
+    if result.etag:
+        headers["ETag"] = result.etag
+    return Response(result.body, status_code=result.status, media_type="application/json", headers=headers)
+
+
 @app.get("/api/programs")
-async def api_programs(q: str = "") -> dict[str, Any]:
-    return {"programs": program_rows(q, include_occurrences=False), "q": q.strip()}
+async def api_programs(request: Request, q: str = "") -> Response:
+    query = q.strip()
+    return await cached_program_api_response(
+        request, "programs:" + query, lambda: {"programs": program_rows(query, include_occurrences=False), "q": query}
+    )
+
+
+def hydrate_calendar_records(record_sets: dict[str, list[dict[str, Any]]], range_start: date, range_end: date) -> None:
+    visible = [
+        record
+        for records in record_sets.values()
+        for record in records
+        if record["id"] and record["status"] != "deleted" and range_start <= record["date"] <= range_end
+    ]
+    identifiers = sorted({record["id"] for record in visible})
+    details: dict[int, dict[str, Any]] = {}
+    images: dict[int, list[dict[str, Any]]] = {}
+    with db() as conn:
+        for offset in range(0, len(identifiers), 400):
+            chunk = identifiers[offset : offset + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            for row in conn.execute(f"SELECT * FROM program_occurrences WHERE id IN ({placeholders})", chunk):
+                details[row["id"]] = occurrence_payload(row)
+            for row in conn.execute(
+                f"SELECT * FROM program_occurrence_images WHERE occurrence_id IN ({placeholders}) ORDER BY occurrence_id, position, id",
+                chunk,
+            ):
+                images.setdefault(row["occurrence_id"], []).append(program_occurrence_image_payload(row))
+    for record in visible:
+        saved = details.get(record["id"])
+        if saved is None:
+            continue
+        for key in ("source_url", "mirror_url", "subtitle_url", "note", "guests", "absent_members"):
+            record[key] = saved[key]
+        record["delivery_override"] = saved["delivery"]
+        record["delivery"] = saved["delivery"] or record["delivery"]
+        record["images"] = images.get(record["id"], [])
+
+
+def build_program_calendar(range_start: date, range_end: date) -> dict[str, Any]:
+    records: dict[str, list[dict[str, Any]]] = {}
+    programs = program_rows(include_occurrences=False, record_range_end=range_end, record_sets=records)
+    hydrate_calendar_records(records, range_start, range_end)
+    events = [
+        event
+        for program in programs
+        for event in program_calendar_events(program, range_start, range_end, records[program["id"]])
+    ]
+    return {"events": events, "programs": programs, "start": range_start.isoformat(), "end": range_end.isoformat()}
 
 
 @app.get("/api/programs/calendar")
-async def api_program_calendar(start: str = "", end: str = "") -> dict[str, Any]:
+async def api_program_calendar(request: Request, start: str = "", end: str = "") -> Response:
     today = datetime.now(JAPAN_TZ).date()
     default_start = date(today.year, today.month, 1)
     range_start = calendar_date(start, default_start)
@@ -7350,14 +7516,11 @@ async def api_program_calendar(start: str = "", end: str = "") -> dict[str, Any]
         range_end -= timedelta(days=1)
     if range_end < range_start:
         raise HTTPException(400, "日历结束日期不能早于开始日期")
-    programs = program_rows(include_occurrences=True)
-    events = [event for program in programs for event in program_calendar_events(program, range_start, range_end)]
-    return {
-        "events": events,
-        "programs": [program_summary(program) for program in programs],
-        "start": range_start.isoformat(),
-        "end": range_end.isoformat(),
-    }
+    return await cached_program_api_response(
+        request,
+        f"calendar:{range_start.isoformat()}:{range_end.isoformat()}",
+        lambda: build_program_calendar(range_start, range_end),
+    )
 
 
 @app.get("/api/eventernote/events")
@@ -7395,6 +7558,10 @@ async def api_eventernote_events(from_date: str = "", to_date: str = "") -> dict
 
 @app.get("/api/programs/{program_id}/occurrences")
 async def api_public_program_occurrences(program_id: str, start: str = "", end: str = "") -> dict[str, Any]:
+    return await asyncio.to_thread(public_program_occurrence_payload, program_id, start, end)
+
+
+def public_program_occurrence_payload(program_id: str, start: str, end: str) -> dict[str, Any]:
     program = next((item for item in program_rows(program_ids={program_id}) if item["id"] == program_id), None)
     if not program:
         raise HTTPException(404, "节目不存在")
@@ -7403,6 +7570,10 @@ async def api_public_program_occurrences(program_id: str, start: str = "", end: 
 
 @app.get("/api/programs/{program_id}")
 async def api_program_detail(program_id: str) -> dict[str, Any]:
+    return await asyncio.to_thread(public_program_detail_payload, program_id)
+
+
+def public_program_detail_payload(program_id: str) -> dict[str, Any]:
     program = next((item for item in program_rows(program_ids={program_id}, include_occurrences=False) if item["id"] == program_id), None)
     if not program:
         raise HTTPException(404, "节目不存在")

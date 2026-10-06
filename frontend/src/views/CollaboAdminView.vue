@@ -264,9 +264,9 @@ async function uploadFiles(files) {
   if (!writable.value || !files.length || uploading.value) return;
   if (
     files.length > 16 ||
-    files.some((file) => !["image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp"].includes(file.type) || file.size > 20 * 1024 * 1024)
+    files.some((file) => !["image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp", "image/avif"].includes(file.type) || file.size > 20 * 1024 * 1024)
   ) {
-    error.value = "JPEG / PNG / GIF / WebP / BMP · ≤ 20 MB / image · ≤ 16 images";
+    error.value = "JPEG / PNG / GIF / WebP / BMP / AVIF · ≤ 20 MB / image · ≤ 16 images";
     return;
   }
   uploading.value = true;
@@ -500,11 +500,11 @@ async function uploadImageUrl() {
               ref="fileInput"
               hidden
               type="file"
-              accept="image/jpeg,image/png,image/gif,image/webp,image/bmp"
+              accept="image/jpeg,image/png,image/gif,image/webp,image/bmp,image/avif"
               multiple
               @change="upload"
             />
-            <small>{{ c("可直接粘贴剪贴板图片；图片直链会先抓取并上传到 R2。") }}</small>
+            <small>{{ c("可直接粘贴剪贴板图片；非 GIF 会转为 JPG，GIF 保持原格式；图片直链会先抓取并上传到 R2。") }}</small>
           </div>
         </div>
       </fieldset>

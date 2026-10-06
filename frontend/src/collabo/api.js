@@ -1,4 +1,5 @@
 import { api } from "../api";
+import { prepareImageUpload } from "../imageUpload";
 import {
   COLLABO_CHARACTER_TAG_IDS,
   combinationGroup,
@@ -139,7 +140,9 @@ async function parseCollaborationUploadResponse(response) {
 
 export async function uploadCollaborationImages(files) {
   const form = new FormData();
-  files.forEach((file) => form.append("files", file));
+  const uploadFiles = [];
+  for (const file of files) uploadFiles.push(await prepareImageUpload(file));
+  uploadFiles.forEach((file) => form.append("files", file));
   const response = await fetch("/api/admin/collabo/assets", {
     method: "POST",
     body: form,

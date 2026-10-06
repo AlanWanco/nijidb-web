@@ -17,6 +17,7 @@ import {
 import NewsLightbox from "../components/NewsLightbox.vue";
 import { useDetailNavigation } from "../composables/useDetailNavigation";
 import { newsHref, newsSummaryText, renderNewsMarkdown } from "../newsMarkdown";
+import { prepareImageUpload } from "../imageUpload";
 import {
   newsSourceGroup,
   newsSourceLabel,
@@ -297,7 +298,8 @@ async function deleteImage(image) {
   }
 }
 
-async function uploadImageFile(file) {
+async function uploadImageFile(sourceFile) {
+  const file = await prepareImageUpload(sourceFile);
   const response = await fetch(
     `/api/admin/news/${encodeURIComponent(article.value.id)}/images`,
     {
@@ -554,7 +556,7 @@ onMounted(() => {
                 multiple
                 @change="selectImages"
               /><small>{{
-                t("可一次选择多张图片，保存后追加到本条新闻的图库。")
+                t("可一次选择多张图片，保存后追加到本条新闻的图库；非 GIF 转为 JPG，GIF 保持原格式。")
               }}</small></label
             >
             <p v-if="selectedImages.length" class="news-selected-images">

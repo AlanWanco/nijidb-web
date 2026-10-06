@@ -7,6 +7,7 @@ import { api } from "../api";
 import { locale, localeTag, t } from "../i18n";
 import { NIJIGASAKI_CAST, castColorSegments, castMemberMatches } from "../programCast";
 import { occurrenceLinkItems } from "../programLinks";
+import { prepareImageUpload } from "../imageUpload";
 import NewsLightbox from "../components/NewsLightbox.vue";
 
 const weekdayNames = computed(() => locale.value === "en"
@@ -1356,7 +1357,8 @@ async function uploadOccurrenceImageFiles(files) {
   error.value = "";
   let added = 0;
   try {
-    for (const file of files) {
+    for (const sourceFile of files) {
+      const file = await prepareImageUpload(sourceFile);
       const data = await uploadOccurrenceImageRequest(
         `/api/admin/programs/${encodeURIComponent(editingId.value)}/occurrences/${encodeURIComponent(occurrenceDraft.id)}/images`,
         {
@@ -2248,7 +2250,7 @@ onUnmounted(() => {
                   <input v-model="occurrenceImageUrl" type="url" :placeholder="t('粘贴图片直链（HTTP/HTTPS）')" :disabled="occurrenceImageUploading || occurrenceSaving" @keydown.enter.prevent="addOccurrenceImageUrl">
                   <button type="button" class="secondary program-action-button" :disabled="occurrenceImageUploading || occurrenceSaving || !occurrenceImageUrl.trim()" @click="addOccurrenceImageUrl">{{ t("添加直链") }}</button>
                 </div>
-                <small>{{ t("可上传图片到本地（配置 R2 时会同步）、粘贴图片直链，或直接粘贴剪贴板图片；点击缩略图可预览大图。") }}</small>
+                <small>{{ t("可上传图片到本地（配置 R2 时会同步）、粘贴图片直链，或直接粘贴剪贴板图片；非 GIF 图片转为 JPG，GIF 保留原格式；点击缩略图可预览大图。") }}</small>
               </div>
            <div class="actions">
                <span v-if="occurrenceAutoSaveEnabled && occurrenceAutoSaveState" class="occurrence-auto-save-status" :class="`is-${occurrenceAutoSaveState}`" role="status" aria-live="polite">{{ occurrenceAutoSaveState === 'saved' ? t("已自动保存") : occurrenceAutoSaveState === 'error' ? t("自动保存失败，请检查输入") : t("自动保存中……") }}</span>

@@ -4,6 +4,7 @@ import { RouterLink, useRoute, useRouter } from "vue-router";
 import "../settingsLayout.css";
 import { api } from "../api";
 import { formatLocalDateTime } from "../datetime";
+import { prepareImageUpload } from "../imageUpload";
 import { t } from "../i18n";
 
 const router = useRouter();
@@ -220,14 +221,15 @@ async function uploadMusicCoverFile(file) {
   musicCoverUploading.value = true;
   error.value = "";
   try {
+    const uploadFile = await prepareImageUpload(file);
     const response = await fetch(`/api/admin/releases/${encodeURIComponent(release.id)}/cover`, {
       method: "POST",
       headers: {
         Accept: "application/json",
-        "Content-Type": file.type || "application/octet-stream",
-        "X-Filename": encodeURIComponent(file.name || "release-cover"),
+        "Content-Type": uploadFile.type || "application/octet-stream",
+        "X-Filename": encodeURIComponent(uploadFile.name || "release-cover.jpg"),
       },
-      body: file,
+      body: uploadFile,
       credentials: "same-origin",
     });
     const payload = response.headers.get("content-type")?.includes("application/json")

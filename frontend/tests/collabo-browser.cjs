@@ -71,6 +71,12 @@ async function configure(context) {
       });
     if (p === "/api/auth/session") return json({ authenticated: true });
     if (p === "/api/admin/collabo/assets" && route.request().method() === "POST") {
+      const request = route.request();
+      if (request.headers()["content-type"]?.startsWith("multipart/form-data")) {
+        const binary = request.postDataBuffer().toString("latin1");
+        assert.match(binary, /filename=\"clipboard\.jpg\"/);
+        assert.match(binary, /Content-Type: image\/jpeg/i);
+      }
       uploadedImages++;
       const image = {
         ...dbItem.images[0],
@@ -324,9 +330,14 @@ async function swipe(page, selector, dx, dy = 2) {
     await page.getByRole("button", { name: "上传直链到 R2", exact: true }).click();
     await page.waitForFunction((count) => document.querySelectorAll(".cb-image-editor").length === count + 1, imageCountBeforeUrl);
     const imageCountBeforePaste = await page.locator(".cb-image-editor").count();
-    await page.locator(".cb-editor-assets").evaluate((element) => {
+    await page.locator(".cb-editor-assets").evaluate(async (element) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 2;
+      canvas.height = 2;
+      canvas.getContext("2d").fillRect(0, 0, 2, 2);
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/png"));
       const data = new DataTransfer();
-      data.items.add(new File(["clipboard-image"], "clipboard.png", { type: "image/png" }));
+      data.items.add(new File([blob], "clipboard.png", { type: "image/png" }));
       element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, clipboardData: data }));
     });
     await page.waitForFunction((count) => document.querySelectorAll(".cb-image-editor").length === count + 1, imageCountBeforePaste);

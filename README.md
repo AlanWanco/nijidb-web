@@ -196,6 +196,7 @@ uv run --locked python -m unittest discover -s tests -v
 PLAYWRIGHT_MODULE=/path/to/playwright node frontend/tests/news-browser.cjs
 PLAYWRIGHT_MODULE=/path/to/playwright node frontend/tests/program-period-browser.cjs
 PLAYWRIGHT_MODULE=/path/to/playwright node frontend/tests/program-final-episode-browser.cjs
+PLAYWRIGHT_MODULE=/path/to/playwright node frontend/tests/image-upload-format-browser.cjs
 node --test frontend/tests/program-calendar-cache.test.mjs
 PLAYWRIGHT_MODULE=/path/to/playwright node frontend/tests/program-calendar-progressive-browser.cjs
 ```

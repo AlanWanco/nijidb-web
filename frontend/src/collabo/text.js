@@ -99,7 +99,7 @@ const labels = {
   上传图片: ["Upload images", "画像をアップロード"],
   "粘贴图片直链": ["Paste image URL", "画像URLを貼り付け"],
   "上传直链到 R2": ["Upload URL to R2", "URLをR2へアップロード"],
-  "可直接粘贴剪贴板图片；图片直链会先抓取并上传到 R2。": ["You can paste an image from the clipboard; image URLs are fetched and uploaded to R2.", "クリップボード画像を貼り付けできます。画像URLは取得してR2へアップロードします。"],
+  "可直接粘贴剪贴板图片；非 GIF 会转为 JPG，GIF 保持原格式；图片直链会先抓取并上传到 R2。": ["Paste clipboard images; non-GIF images become JPG while GIF stays unchanged. Image URLs are fetched and uploaded to R2.", "クリップボード画像を貼り付けできます。GIF以外はJPGに変換し、GIFは元形式を保ちます。画像URLは取得してR2へアップロードします。"],
   保存到数据库: ["Save to database", "データベースに保存"],
   "导出草稿 JSON": ["Export draft JSON", "下書きJSONを書き出す"],
   保存并进入下一条: ["Save & open next", "保存して次を開く"],

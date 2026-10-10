@@ -11,6 +11,7 @@ from scripts.remote_news_image_worker import (
     NewsImageWorker,
     image_dimensions,
     image_signature,
+    iri_to_uri,
     is_r2_public_url,
     load_state,
     save_state,
@@ -20,6 +21,10 @@ from scripts.remote_news_image_worker import (
 class _FakeResponse:
     status = 200
 
+    def __init__(self):
+        self.headers = {}
+        self._read = False
+
     def __enter__(self):
         return self
 
@@ -27,6 +32,9 @@ class _FakeResponse:
         return False
 
     def read(self, _limit=-1):
+        if self._read:
+            return b""
+        self._read = True
         return b"{}"
 
 
@@ -59,6 +67,38 @@ class RemoteNewsWorkerTests(unittest.TestCase):
         self.assertFalse(is_r2_public_url("https://pub.example.test/images/a.jpg?x=1", base, "images"))
         self.assertFalse(is_r2_public_url("https://pub.example.test/images/news-remote//a.jpg", base, "images"))
         self.assertFalse(is_r2_public_url("https://evil.example.test/images/a.jpg", base, "images"))
+
+    def test_unicode_url_is_percent_encoded_before_urllib_request(self):
+        worker = object.__new__(NewsImageWorker)
+        worker.config = SimpleNamespace(request_timeout_seconds=5)
+        worker.opener = _RecordingOpener()
+        source = "https://img.sunrise-inc.co.jp/assets/虹/かすみ%20.jpg?name=優木&size=full"
+
+        self.assertEqual(
+            worker.request_bytes(
+                source,
+                {"Referer": "https://www.lovelive-anime.jp/nijigasaki/news.php?title=虹"},
+                100,
+                {"img.sunrise-inc.co.jp"},
+                True,
+            ),
+            b"{}",
+        )
+        request, _timeout = worker.opener.requests[0]
+        self.assertEqual(
+            request.full_url,
+            "https://img.sunrise-inc.co.jp/assets/%E8%99%B9/%E3%81%8B%E3%81%99%E3%81%BF%20.jpg"
+            "?name=%E5%84%AA%E6%9C%A8&size=full",
+        )
+        self.assertEqual(
+            iri_to_uri("https://img.sunrise-inc.co.jp/a%20b.jpg"),
+            "https://img.sunrise-inc.co.jp/a%20b.jpg",
+        )
+        self.assertTrue(request.full_url.isascii())
+        self.assertEqual(
+            request.get_header("Referer"),
+            "https://www.lovelive-anime.jp/nijigasaki/news.php?title=%E8%99%B9",
+        )
 
     def test_api_submission_uses_direct_opener_not_image_proxy(self):
         worker = object.__new__(NewsImageWorker)

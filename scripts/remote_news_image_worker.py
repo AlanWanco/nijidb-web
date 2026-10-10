@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, unquote, urlencode, urljoin, urlparse
+from urllib.parse import quote, unquote, urlencode, urljoin, urlparse, urlunparse
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -149,6 +149,14 @@ def safe_url_path(value: str) -> bool:
         and all(part not in {".", ".."} for part in parts if part)
         and all(part for part in parts[1:-1])
     )
+
+
+def iri_to_uri(value: str) -> str:
+    """Percent-encode non-ASCII URL path/query characters for urllib.request."""
+    parsed = urlparse(value)
+    path = quote(parsed.path, safe="/:@!$&'()*+,;=%-._~")
+    query = quote(parsed.query, safe="!$&'()*+,;=:/?@%-._~")
+    return urlunparse(parsed._replace(path=path, query=query))
 
 
 def effective_http_port(parsed) -> int:
@@ -796,7 +804,12 @@ class NewsImageWorker:
                 raise WorkerRequestError("请求地址无效") from exc
             if not valid:
                 raise WorkerRequestError("请求重定向到了不允许的地址")
-            request = Request(current, headers=headers, method="GET")
+            request_url = iri_to_uri(current)
+            request_headers = dict(headers)
+            referer = request_headers.get("Referer")
+            if referer:
+                request_headers["Referer"] = iri_to_uri(referer)
+            request = Request(request_url, headers=request_headers, method="GET")
             try:
                 response = (opener or self.opener).open(request, timeout=self.config.request_timeout_seconds)
             except HTTPError as exc:
@@ -810,7 +823,7 @@ class NewsImageWorker:
                         raise WorkerRequestError("请求重定向地址无效", exc.code) from location_error
                     continue
                 raise WorkerRequestError(f"HTTP {exc.code}", exc.code) from exc
-            except (TimeoutError, URLError, OSError) as exc:
+            except (TimeoutError, URLError, OSError, UnicodeError) as exc:
                 raise WorkerRequestError("网络请求失败") from exc
             with response:
                 try:

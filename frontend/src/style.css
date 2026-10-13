@@ -4942,10 +4942,24 @@ html[data-theme="mocha"] .dp__theme_dark {
 }
 
 .program-date-picker .dp__input {
-  min-height: 46px;
+  min-block-size: 46px;
+  box-sizing: border-box;
+  border: 1px solid var(--dp-border-color);
+  border-radius: var(--dp-border-radius);
+  padding-block: 11px;
+  padding-inline: 45px 38px;
+  background-color: var(--dp-background-color);
+  color: var(--dp-text-color);
   font-family: var(--mono);
+  font-size: var(--dp-font-size);
+  line-height: calc(var(--dp-font-size) * 1.5);
   font-variant-numeric: tabular-nums;
   letter-spacing: .01em;
+}
+
+.program-date-picker .dp__input:focus-visible {
+  outline: max(2px, 0.08em) solid var(--accent);
+  outline-offset: 2px;
 }
 
 .program-date-picker .dp__input_icon_pad {

@@ -9,6 +9,7 @@ import { NIJIGASAKI_CAST, castColorSegments, castMemberMatches } from "../progra
 import { occurrenceLinkItems } from "../programLinks";
 import { prepareImageUpload } from "../imageUpload";
 import NewsLightbox from "../components/NewsLightbox.vue";
+import { hiddenActionRow, keepActionRowConfig, todayActionRow } from "../datePickerOptions";
 
 const weekdayNames = computed(() => locale.value === "en"
   ? ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -2089,7 +2090,11 @@ onUnmounted(() => {
             </div>
             <div v-if="period.frequency === 'weekly' || period.frequency === 'monthly' || period.frequency === 'individual' || period.frequency === 'single'" class="program-form-field period-time-field">
                <span class="program-field-label">{{ t("播出时间") }}</span>
-               <VueDatePicker v-model="period.schedule_time" class="program-date-picker" time-picker model-type="HH:mm" format="HH:mm" :locale="localeTag()" auto-apply :clearable="true" :is-24="true" :teleport="true" text-input :placeholder="t('选择时间')" @keydown.enter.prevent />
+               <!-- VueDatePicker wires its up-arrow slot to increment; swap glyphs so down increases and up decreases. -->
+               <VueDatePicker v-model="period.schedule_time" class="program-date-picker" time-picker model-type="HH:mm" format="HH:mm" :locale="localeTag()" auto-apply :clearable="true" :is-24="true" :teleport="true" text-input :placeholder="t('选择时间')" @keydown.enter.prevent>
+                 <template #arrow-up><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" /></svg></template>
+                 <template #arrow-down><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" /></svg></template>
+               </VueDatePicker>
                <small v-if="period.frequency === 'individual'">{{ t("作为新增单集的默认时间；每期可以单独修改。") }}</small>
                <small v-else>{{ t("留空表示全天事件。") }}</small>
             </div>
@@ -2101,9 +2106,9 @@ onUnmounted(() => {
               </select>
                <small>{{ t("默认使用东京时间。") }}</small>
             </div>
-             <label v-if="period.frequency === 'single'" class="period-start-field">{{ t("播出日期") }}<VueDatePicker v-model="period.start_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" :locale="localeTag()" :enable-time-picker="false" auto-apply :clearable="false" :teleport="true" :placeholder="t('选择日期')" /></label>
-             <label v-else class="period-start-field">{{ t("时期开始") }}<VueDatePicker v-model="period.start_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" :locale="localeTag()" :enable-time-picker="false" auto-apply :clearable="false" :teleport="true" :placeholder="t('选择日期')" @update:model-value="syncPeriodWeekday(period, $event)" /></label>
-             <label v-if="period.frequency !== 'single'" class="period-end-field">{{ t("时期结束") }}<VueDatePicker v-model="period.end_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" :locale="localeTag()" auto-apply :clearable="true" :teleport="true" :placeholder="t('留空表示进行中')" /><small>{{ index < form.periods.length - 1 ? t("用于划分下一个排期时期。") : t("填入结束日期后会自动标记为已完结；留空表示进行中。") }}</small></label>
+             <label v-if="period.frequency === 'single'" class="period-start-field">{{ t("播出日期") }}<VueDatePicker v-model="period.start_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" :locale="localeTag()" :enable-time-picker="false" auto-apply :clearable="false" :teleport="true" :placeholder="t('选择日期')" :now-button-label="t('今天')" :action-row="todayActionRow" :config="keepActionRowConfig" /></label>
+             <label v-else class="period-start-field">{{ t("时期开始") }}<VueDatePicker v-model="period.start_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" :locale="localeTag()" :enable-time-picker="false" auto-apply :clearable="false" :teleport="true" :placeholder="t('选择日期')" :now-button-label="t('今天')" :action-row="todayActionRow" :config="keepActionRowConfig" @update:model-value="syncPeriodWeekday(period, $event)" /></label>
+             <label v-if="period.frequency !== 'single'" class="period-end-field">{{ t("时期结束") }}<VueDatePicker v-model="period.end_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" :locale="localeTag()" auto-apply :clearable="true" :teleport="true" :placeholder="t('留空表示进行中')" :now-button-label="t('今天')" :action-row="todayActionRow" :config="keepActionRowConfig" /><small>{{ index < form.periods.length - 1 ? t("用于划分下一个排期时期。") : t("填入结束日期后会自动标记为已完结；留空表示进行中。") }}</small></label>
              <label v-if="period.frequency !== 'individual' && period.frequency !== 'single'" class="period-auto-toggle program-field-wide">
                 <input :checked="period.auto_generate" type="checkbox" :disabled="saving || occurrenceSaving" @change="setPeriodAutoGeneration(period, $event.target.checked)">
                 <span>
@@ -2170,8 +2175,8 @@ onUnmounted(() => {
                <span v-if="occurrenceDraft.id || occurrenceDraft.generated" class="program-kind">{{ occurrenceDraft.id ? t("已保存") : t("自动生成") }}</span>
             </div>
              <label>{{ t("单集标题") }}<input v-model="occurrenceDraft.title" type="text" :placeholder="t('例如：特别企划、嘉宾回顾……')"><small>{{ t("可选；填写后会显示在日历和单集详情中。") }}</small></label>
-             <label>{{ t("原定日期") }}<VueDatePicker v-model="occurrenceDraft.original_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" :locale="localeTag()" :enable-time-picker="false" auto-apply :clearable="false" :readonly="occurrenceOriginalLocked" :teleport="true" :placeholder="t('选择日期')" /><small>{{ occurrenceDraft.individual ? t("逐期设置模式：可直接修改本期原定日期。") : occurrenceOriginalLocked ? t("来自节目排期规则，不能修改原定日期。") : t("手动补录单集时填写原定日期。") }}</small></label>
-                <label>{{ t("原定时间") }}<VueDatePicker v-model="occurrenceDraft.original_time" class="program-date-picker" time-picker model-type="HH:mm" format="HH:mm" :locale="localeTag()" auto-apply :clearable="true" :is-24="true" :readonly="occurrenceOriginalLocked" :teleport="true" text-input :placeholder="t('选择时间')" /><small>{{ occurrenceDraft.individual ? t("逐期设置模式：可直接修改本期原定时间。") : occurrenceOriginalLocked ? t("来自排期规则，只能修改调整日期；调整时间已默认沿用原定时间。") : t("手动补录单集时填写原定时间。") }}{{ t("节目排期时区") }}：{{ occurrenceTimezoneLabel }}；{{ t("日历会按访问设备时区显示") }}。</small></label>
+             <label>{{ t("原定日期") }}<VueDatePicker v-model="occurrenceDraft.original_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" :locale="localeTag()" :enable-time-picker="false" auto-apply :clearable="false" :readonly="occurrenceOriginalLocked" :teleport="true" :placeholder="t('选择日期')" :now-button-label="t('今天')" :action-row="occurrenceOriginalLocked ? hiddenActionRow : todayActionRow" :config="occurrenceOriginalLocked ? undefined : keepActionRowConfig" /><small>{{ occurrenceDraft.individual ? t("逐期设置模式：可直接修改本期原定日期。") : occurrenceOriginalLocked ? t("来自节目排期规则，不能修改原定日期。") : t("手动补录单集时填写原定日期。") }}</small></label>
+                <label>{{ t("原定时间") }}<VueDatePicker v-model="occurrenceDraft.original_time" class="program-date-picker" time-picker model-type="HH:mm" format="HH:mm" :locale="localeTag()" auto-apply :clearable="true" :is-24="true" :readonly="occurrenceOriginalLocked" :teleport="true" text-input :placeholder="t('选择时间')"><template #arrow-up><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" /></svg></template><template #arrow-down><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" /></svg></template></VueDatePicker><small>{{ occurrenceDraft.individual ? t("逐期设置模式：可直接修改本期原定时间。") : occurrenceOriginalLocked ? t("来自排期规则，只能修改调整日期；调整时间已默认沿用原定时间。") : t("手动补录单集时填写原定时间。") }}{{ t("节目排期时区") }}：{{ occurrenceTimezoneLabel }}；{{ t("日历会按访问设备时区显示") }}。</small></label>
            <div class="program-form-field">
               <span class="program-field-label">{{ t("本期播出方式") }}</span>
               <div class="choice-tags" role="radiogroup" :aria-label="t('本期播出方式')">
@@ -2199,8 +2204,8 @@ onUnmounted(() => {
                <small>{{ t("正常播出不会修改排期日期；需要更换日期时选择“已改期”。“因故取消”会保留单集并标记已取消；删除会移除单集，不再显示。") }}</small>
            </div>
              <div v-if="occurrenceDraft.status === 'rescheduled'" class="occurrence-date-row">
-                <label>{{ t("调整日期") }}<VueDatePicker v-model="occurrenceDraft.adjusted_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" :locale="localeTag()" :enable-time-picker="false" auto-apply :clearable="false" :teleport="true" :placeholder="t('选择新日期')" required /></label>
-                 <label>{{ t("调整时间") }}<VueDatePicker v-model="occurrenceDraft.adjusted_time" class="program-date-picker" time-picker model-type="HH:mm" format="HH:mm" :locale="localeTag()" auto-apply :clearable="true" :is-24="true" :teleport="true" text-input :placeholder="t('沿用原定时间')" /></label>
+                <label>{{ t("调整日期") }}<VueDatePicker v-model="occurrenceDraft.adjusted_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" :locale="localeTag()" :enable-time-picker="false" auto-apply :clearable="false" :teleport="true" :placeholder="t('选择新日期')" :now-button-label="t('今天')" :action-row="todayActionRow" :config="keepActionRowConfig" required /></label>
+                 <label>{{ t("调整时间") }}<VueDatePicker v-model="occurrenceDraft.adjusted_time" class="program-date-picker" time-picker model-type="HH:mm" format="HH:mm" :locale="localeTag()" auto-apply :clearable="true" :is-24="true" :teleport="true" text-input :placeholder="t('沿用原定时间')"><template #arrow-up><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" /></svg></template><template #arrow-down><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" /></svg></template></VueDatePicker></label>
              </div>
              <div v-if="occurrenceDraft.status === 'rescheduled' && canShiftFollowing" class="program-form-field program-field-wide">
                 <span class="program-field-label">{{ t("后续排期") }}</span>

@@ -1,5 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from "vue";
+import VueDatePicker from "@vuepic/vue-datepicker";
+import "@vuepic/vue-datepicker/dist/main.css";
 import { onBeforeRouteLeave, onBeforeRouteUpdate, RouterLink, useRoute, useRouter } from "vue-router";
 import CollaboImage from "../components/CollaboImage.vue";
 import {
@@ -18,6 +20,7 @@ import {
 import { coverUrl, dateLabel, normalizeImage, PAGE_SIZE, pageNumber, safeUrl } from "../collabo/model";
 import { c } from "../collabo/text";
 import { localeTag } from "../i18n";
+import { keepActionRowConfig, todayActionRow } from "../datePickerOptions";
 import "../collabo/style.css";
 
 const route = useRoute();
@@ -368,7 +371,7 @@ async function uploadImageUrl() {
           <h2>01 / {{ c("资料与备注") }}</h2>
           <label>{{ c("标题") }}<input v-model="form.title" required maxlength="500" /></label>
           <div class="cb-field-pair">
-            <label>{{ c("日期") }}<input v-model="form.date" type="date" required /></label
+            <label>{{ c("日期") }}<VueDatePicker v-model="form.date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" :locale="localeTag()" :enable-time-picker="false" auto-apply :clearable="false" :teleport="true" :placeholder="c('选择日期')" :now-button-label="c('今天')" :action-row="todayActionRow" :config="keepActionRowConfig" required /></label
             ><label
               >{{ c("日期含义")
               }}<select v-model="form.date_kind">
@@ -417,8 +420,8 @@ async function uploadImageUrl() {
               <button type="button" class="cb-quiet" @click="removePeriod(index)">{{ c("移除时间段") }}</button>
             </div>
             <div class="cb-field-pair">
-              <label>{{ c("开始日期") }}<input v-model="period.start_date" type="date" /></label>
-              <label>{{ c("结束日期") }}<input v-model="period.end_date" type="date" /></label>
+              <label>{{ c("开始日期") }}<VueDatePicker v-model="period.start_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" :locale="localeTag()" :enable-time-picker="false" auto-apply :clearable="true" :teleport="true" :placeholder="c('选择日期')" :now-button-label="c('今天')" :action-row="todayActionRow" :config="keepActionRowConfig" /></label>
+              <label>{{ c("结束日期") }}<VueDatePicker v-model="period.end_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" :locale="localeTag()" :enable-time-picker="false" auto-apply :clearable="true" :teleport="true" :placeholder="c('选择日期')" :now-button-label="c('今天')" :action-row="todayActionRow" :config="keepActionRowConfig" /></label>
             </div>
             <label>{{ c("时间段标题") }}<input v-model="period.title" maxlength="200" /></label>
             <label>{{ c("时间段描述") }}<textarea v-model="period.description" rows="3" maxlength="2000"></textarea></label>

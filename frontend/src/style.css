@@ -6482,6 +6482,10 @@ html[data-theme="mocha"] .dp__theme_dark {
   line-height: 1.6;
 }
 
+.program-readonly-episode-note {
+  white-space: pre-line;
+}
+
 .program-readonly-episode.cancelled {
   background: linear-gradient(90deg, var(--surface-alt), transparent 70%);
 }

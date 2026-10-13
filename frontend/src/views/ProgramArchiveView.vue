@@ -482,7 +482,7 @@ onUnmounted(() => window.clearTimeout(programSearchTimer));
                  </template>
                 </div>
                  <p v-if="row.absent_members?.length" class="program-episode-absence">{{ t("缺席：") }}{{ row.absent_members.join("、") }}</p>
-                <p v-if="row.note">{{ row.note }}</p>
+                <p v-if="row.note" class="program-readonly-episode-note">{{ row.note }}</p>
             </article>
           </div>
         </section>

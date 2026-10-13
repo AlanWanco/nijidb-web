@@ -495,12 +495,20 @@
   font: 500 9px var(--mono);
 }
 
-.news-filter-chip:hover:not(:disabled),
 .news-filter-chip.selected {
   border-color: color-mix(in srgb, var(--accent) 56%, var(--line));
   background: var(--accent-soft);
   color: var(--accent);
   transform: translateY(-1px);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .news-filter-chip:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--accent) 56%, var(--line));
+    background: var(--accent-soft);
+    color: var(--accent);
+    transform: translateY(-1px);
+  }
 }
 
 .text-button {
@@ -593,9 +601,11 @@
   color: var(--pink);
 }
 
-.news-tag-delete:hover:not(:disabled) {
-  border-color: var(--pink);
-  background: color-mix(in srgb, var(--pink) 12%, transparent);
+@media (hover: hover) and (pointer: fine) {
+  .news-tag-delete:hover:not(:disabled) {
+    border-color: var(--pink);
+    background: color-mix(in srgb, var(--pink) 12%, transparent);
+  }
 }
 
 .news-tag-delete svg {
@@ -638,10 +648,12 @@
   transition: transform 220ms ease, border-color 220ms ease, box-shadow 220ms ease;
 }
 
-.news-card:hover {
-  border-color: color-mix(in srgb, var(--accent) 64%, var(--line));
-  box-shadow: 0 18px 36px var(--accent-soft);
-  transform: translateY(-6px);
+@media (hover: hover) and (pointer: fine) {
+  .news-card:hover {
+    border-color: color-mix(in srgb, var(--accent) 64%, var(--line));
+    box-shadow: 0 18px 36px var(--accent-soft);
+    transform: translateY(-6px);
+  }
 }
 
 .news-card-media {
@@ -658,9 +670,11 @@
   transition: transform 450ms cubic-bezier(.2, .7, .2, 1), filter 450ms ease;
 }
 
-.news-card:hover .news-card-media img {
-  filter: saturate(1.08);
-  transform: scale(1.05);
+@media (hover: hover) and (pointer: fine) {
+  .news-card:hover .news-card-media img {
+    filter: saturate(1.08);
+    transform: scale(1.05);
+  }
 }
 
 .news-card-placeholder {
@@ -711,9 +725,11 @@
   transition: color 180ms ease, transform 180ms ease;
 }
 
-.news-card:hover .news-card-arrow {
-  color: var(--pink);
-  transform: translate(3px, -3px);
+@media (hover: hover) and (pointer: fine) {
+  .news-card:hover .news-card-arrow {
+    color: var(--pink);
+    transform: translate(3px, -3px);
+  }
 }
 
 .news-card-body {
@@ -856,8 +872,10 @@
   text-decoration: none;
 }
 
-.back-link:hover {
-  text-decoration: underline;
+@media (hover: hover) and (pointer: fine) {
+  .back-link:hover {
+    text-decoration: underline;
+  }
 }
 
 .news-detail-topline .eyebrow {
@@ -1048,8 +1066,10 @@
   transition: transform 300ms ease;
 }
 
-.news-detail-image:hover img {
-  transform: scale(1.04);
+@media (hover: hover) and (pointer: fine) {
+  .news-detail-image:hover img {
+    transform: scale(1.04);
+  }
 }
 
 .news-detail-image > span {
@@ -1090,10 +1110,12 @@
   transition: border-color 180ms ease, transform 180ms ease, background 180ms ease;
 }
 
-.news-nav-card:hover:not(.disabled) {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  transform: translateY(-3px);
+@media (hover: hover) and (pointer: fine) {
+  .news-nav-card:hover:not(.disabled) {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    transform: translateY(-3px);
+  }
 }
 
 .news-nav-card small,
@@ -1191,12 +1213,20 @@
   transition: color 160ms ease, border-color 160ms ease, background 160ms ease, transform 160ms ease;
 }
 
-.news-edit-tag:hover:not(:disabled),
 .news-edit-tag.selected {
   border-color: color-mix(in srgb, var(--accent) 56%, var(--line));
   background: var(--accent-soft);
   color: var(--accent);
   transform: translateY(-1px);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .news-edit-tag:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--accent) 56%, var(--line));
+    background: var(--accent-soft);
+    color: var(--accent);
+    transform: translateY(-1px);
+  }
 }
 
 .news-edit-tag.selected::before {

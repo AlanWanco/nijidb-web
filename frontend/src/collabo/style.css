@@ -511,21 +511,30 @@
   color: var(--accent);
   font-size: 9px;
 }
-.cb-year-chip:hover:not(:disabled),
-.cb-character-chip:hover:not(:disabled) {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--accent);
-  transform: translateY(-1px);
+@media (hover: hover) and (pointer: fine) {
+  .cb-year-chip:hover:not(:disabled),
+  .cb-character-chip:hover:not(:disabled) {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent);
+    transform: translateY(-1px);
+  }
 }
 .cb-year-chip.selected,
-.cb-year-chip.selected:hover,
-.cb-character-chip.selected,
-.cb-character-chip.selected:hover {
+.cb-character-chip.selected {
   border-color: var(--accent);
   background: var(--accent);
   color: var(--accent-ink);
   transform: none;
+}
+@media (hover: hover) and (pointer: fine) {
+  .cb-year-chip.selected:hover,
+  .cb-character-chip.selected:hover {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--accent-ink);
+    transform: none;
+  }
 }
 .cb-year-chip.selected b,
 .cb-character-chip.selected b {
@@ -628,10 +637,12 @@
     box-shadow 240ms ease,
     border-color 240ms ease;
 }
-.cb-card:hover {
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
-  transform: translateY(-4px);
-  box-shadow: 0 14px 28px var(--shadow);
+@media (hover: hover) and (pointer: fine) {
+  .cb-card:hover {
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+    transform: translateY(-4px);
+    box-shadow: 0 14px 28px var(--shadow);
+  }
 }
 .cb-card-art {
   position: relative;
@@ -653,8 +664,10 @@
   object-fit: contain;
   transition: transform 420ms ease;
 }
-.cb-card:hover .cb-card-art > img {
-  transform: scale(1.035);
+@media (hover: hover) and (pointer: fine) {
+  .cb-card:hover .cb-card-art > img {
+    transform: scale(1.035);
+  }
 }
 .cb-card-no {
   position: absolute;
@@ -682,10 +695,15 @@
     opacity 200ms ease,
     transform 200ms ease;
 }
-.cb-card:hover .cb-card-more,
 .cb-card:focus-visible .cb-card-more {
   opacity: 1;
   transform: none;
+}
+@media (hover: hover) and (pointer: fine) {
+  .cb-card:hover .cb-card-more {
+    opacity: 1;
+    transform: none;
+  }
 }
 .cb-card-body {
   padding: 16px 17px 18px;
@@ -845,8 +863,10 @@
   text-overflow: ellipsis;
   font-size: 12px;
 }
-.cb-detail-nav a:hover {
-  border-color: var(--accent);
+@media (hover: hover) and (pointer: fine) {
+  .cb-detail-nav a:hover {
+    border-color: var(--accent);
+  }
 }
 .cb-detail-layout {
   display: grid;
@@ -1028,8 +1048,10 @@
   overflow-wrap: anywhere;
   transition: color 160ms ease;
 }
-.cb-related a:hover {
-  color: var(--accent);
+@media (hover: hover) and (pointer: fine) {
+  .cb-related a:hover {
+    color: var(--accent);
+  }
 }
 .cb-related a b {
   color: var(--accent);
@@ -1162,8 +1184,10 @@
   padding: 15px 5px;
   text-decoration: none;
 }
-.cb-review-list > a:hover {
-  background: var(--accent-soft);
+@media (hover: hover) and (pointer: fine) {
+  .cb-review-list > a:hover {
+    background: var(--accent-soft);
+  }
 }
 .cb-review-list > a > img,
 .cb-review-list > a > .cb-image-placeholder {
@@ -1249,11 +1273,17 @@
   box-shadow: none;
   font-size: 10px;
 }
-.cb-character-pill:hover:not(:disabled),
 .cb-character-pill.selected {
   border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
   background: var(--accent-soft);
   color: var(--accent);
+}
+@media (hover: hover) and (pointer: fine) {
+  .cb-character-pill:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
 }
 .cb-character-pill-all b {
   font: 600 9px var(--mono);
@@ -2161,6 +2191,13 @@
     right: 8%;
     bottom: 11%;
     font-size: 8px;
+  }
+}
+
+@media (pointer: coarse) {
+  .cb-card-more {
+    opacity: 1;
+    transform: none;
   }
 }
 

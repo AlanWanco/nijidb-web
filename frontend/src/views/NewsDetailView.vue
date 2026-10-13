@@ -410,7 +410,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <main
+  <main id="main-content" tabindex="-1"
     class="page news-detail-page"
     @touchstart.passive="touch.onTouchStart"
     @touchmove.passive="touch.onTouchMove"

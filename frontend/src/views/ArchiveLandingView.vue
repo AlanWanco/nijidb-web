@@ -42,7 +42,7 @@ const archiveChoices = [
 </script>
 
 <template>
-  <main class="page archive-landing-page">
+  <main id="main-content" tabindex="-1" class="page archive-landing-page">
     <section class="archive-landing-intro">
       <p class="eyebrow">NIJIGASAKI DATA ARCHIVE</p>
      <h1>{{ t("选择一个档案入口") }}<span class="title-mark" aria-hidden="true"></span></h1>

@@ -448,7 +448,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="page news-page">
+  <main id="main-content" tabindex="-1" class="page news-page">
     <section
       ref="heroRef"
       class="hero news-hero"

@@ -319,7 +319,7 @@ async function uploadImageUrl() {
 </script>
 
 <template>
-  <main class="page cb-page cb-admin-page">
+  <main id="main-content" tabindex="-1" class="page cb-page cb-admin-page">
     <div class="cb-detail-top">
       <RouterLink class="back" :to="editing ? { path: '/admin/collabo', query: adminListQuery(page) } : '/collabo'"
         >← {{ c(editing ? "管理联动" : "返回联动一览") }}</RouterLink

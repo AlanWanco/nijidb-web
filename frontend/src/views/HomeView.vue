@@ -181,7 +181,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="page music-page">
+  <main id="main-content" tabindex="-1" class="page music-page">
     <section ref="heroRef" class="hero music-hero" :style="[heroScrollStyle, heroPointerStyle]" @pointermove="handleHeroPointerMove" @pointerleave="resetHeroPointer">
       <div class="music-hero-grid" aria-hidden="true"></div>
       <div class="hero-topline music-hero-fade">

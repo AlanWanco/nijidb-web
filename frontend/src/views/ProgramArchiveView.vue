@@ -328,7 +328,7 @@ onUnmounted(() => window.clearTimeout(programSearchTimer));
 </script>
 
 <template>
-  <main class="page programs-page program-archive-page">
+  <main id="main-content" tabindex="-1" class="page programs-page program-archive-page">
     <div class="programs-topline">
       <div>
         <p class="eyebrow">PROGRAM ARCHIVE / READ ONLY</p>

@@ -390,6 +390,14 @@ async function swipe(page, selector, dx, dy = 2) {
     phone.on("pageerror", (e) => browserErrors.push(e.message));
     await phone.goto("http://127.0.0.1:15173/collabo");
     await phone.waitForSelector(".cb-card");
+    const touchCardState = await phone.locator(".cb-card").first().evaluate((card) => ({
+      transform: getComputedStyle(card).transform,
+      arrowOpacity: getComputedStyle(card.querySelector(".cb-card-more")).opacity,
+      arrowTransform: getComputedStyle(card.querySelector(".cb-card-more")).transform,
+    }));
+    assert.equal(touchCardState.transform, "none");
+    assert.equal(touchCardState.arrowOpacity, "1");
+    assert.equal(touchCardState.arrowTransform, "none");
     assert.equal(await phone.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await phone.screenshot({ path: "/tmp/nijidb-collabo-mobile.png", fullPage: false });
     await phone.goto(`http://127.0.0.1:15173/collabo/${slug(sample)}`);

@@ -1840,7 +1840,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <main class="page program-admin-page" :class="{ 'occurrence-focused': activePanel === 'occurrences' }">
+  <main id="main-content" tabindex="-1" class="page program-admin-page" :class="{ 'occurrence-focused': activePanel === 'occurrences' }">
     <div class="programs-topline">
       <div>
         <p class="eyebrow">PROGRAM ARCHIVE / CONTROL ROOM</p>
@@ -1935,38 +1935,38 @@ onUnmounted(() => {
 
           <div class="program-form-field">
            <span class="program-field-label">{{ t("节目类型") }}</span>
-           <div class="choice-tags" role="radiogroup" :aria-label="t('节目类型')">
-             <button type="button" :class="{ selected: form.category === 'official' }" @click="form.category = 'official'">{{ t("官方节目") }}</button>
-             <button type="button" :class="{ selected: form.category === 'personal' }" @click="form.category = 'personal'">{{ t("个人节目") }}</button>
+           <div class="choice-tags" role="group" :aria-label="t('节目类型')">
+             <button type="button" :class="{ selected: form.category === 'official' }" :aria-pressed="form.category === 'official'" @click="form.category = 'official'">{{ t("官方节目") }}</button>
+             <button type="button" :class="{ selected: form.category === 'personal' }" :aria-pressed="form.category === 'personal'" @click="form.category = 'personal'">{{ t("个人节目") }}</button>
           </div>
         </div>
         <div class="program-form-field">
            <span class="program-field-label">{{ t("节目形式") }}</span>
-           <div class="choice-tags" role="radiogroup" :aria-label="t('节目形式')">
-             <button type="button" :class="{ selected: form.format === 'video' }" @click="form.format = 'video'">{{ t("有画面") }}</button>
-             <button type="button" :class="{ selected: form.format === 'radio' }" @click="form.format = 'radio'">{{ t("广播（无画面）") }}</button>
+           <div class="choice-tags" role="group" :aria-label="t('节目形式')">
+             <button type="button" :class="{ selected: form.format === 'video' }" :aria-pressed="form.format === 'video'" @click="form.format = 'video'">{{ t("有画面") }}</button>
+             <button type="button" :class="{ selected: form.format === 'radio' }" :aria-pressed="form.format === 'radio'" @click="form.format = 'radio'">{{ t("广播（无画面）") }}</button>
           </div>
         </div>
         <div class="program-form-field">
            <span class="program-field-label">{{ t("播出平台") }}</span>
-           <div class="choice-tags" role="radiogroup" :aria-label="t('播出平台')">
-             <button type="button" :class="{ selected: form.platform === 'tv' }" @click="form.platform = 'tv'">{{ t("电视台") }}</button>
-             <button type="button" :class="{ selected: form.platform === 'network' }" @click="form.platform = 'network'">{{ t("网络") }}</button>
+           <div class="choice-tags" role="group" :aria-label="t('播出平台')">
+             <button type="button" :class="{ selected: form.platform === 'tv' }" :aria-pressed="form.platform === 'tv'" @click="form.platform = 'tv'">{{ t("电视台") }}</button>
+             <button type="button" :class="{ selected: form.platform === 'network' }" :aria-pressed="form.platform === 'network'" @click="form.platform = 'network'">{{ t("网络") }}</button>
           </div>
         </div>
         <div class="program-form-field">
            <span class="program-field-label">{{ t("播放方式") }}</span>
-           <div class="choice-tags" role="radiogroup" :aria-label="t('播放方式')">
-             <button type="button" :class="{ selected: form.delivery === 'live' }" @click="form.delivery = 'live'">{{ t("直播") }}</button>
-             <button type="button" :class="{ selected: form.delivery === 'recorded' }" @click="form.delivery = 'recorded'">{{ t("录播") }}</button>
+           <div class="choice-tags" role="group" :aria-label="t('播放方式')">
+             <button type="button" :class="{ selected: form.delivery === 'live' }" :aria-pressed="form.delivery === 'live'" @click="form.delivery = 'live'">{{ t("直播") }}</button>
+             <button type="button" :class="{ selected: form.delivery === 'recorded' }" :aria-pressed="form.delivery === 'recorded'" @click="form.delivery = 'recorded'">{{ t("录播") }}</button>
           </div>
         </div>
          <div class="program-form-field">
             <span class="program-field-label">{{ t("首集编号") }}</span>
-            <div class="choice-tags" role="radiogroup" :aria-label="t('首集编号')">
-              <button type="button" :class="{ selected: episodeStartMode === 'zero' }" @click="setEpisodeStartMode('zero')">{{ t("第 0 期") }}</button>
-              <button type="button" :class="{ selected: episodeStartMode === 'one' }" @click="setEpisodeStartMode('one')">{{ t("第 1 期") }}</button>
-              <button type="button" :class="{ selected: episodeStartMode === 'custom' }" @click="setEpisodeStartMode('custom')">{{ t("自定义") }}</button>
+            <div class="choice-tags" role="group" :aria-label="t('首集编号')">
+              <button type="button" :class="{ selected: episodeStartMode === 'zero' }" :aria-pressed="episodeStartMode === 'zero'" @click="setEpisodeStartMode('zero')">{{ t("第 0 期") }}</button>
+              <button type="button" :class="{ selected: episodeStartMode === 'one' }" :aria-pressed="episodeStartMode === 'one'" @click="setEpisodeStartMode('one')">{{ t("第 1 期") }}</button>
+              <button type="button" :class="{ selected: episodeStartMode === 'custom' }" :aria-pressed="episodeStartMode === 'custom'" @click="setEpisodeStartMode('custom')">{{ t("自定义") }}</button>
             </div>
             <label v-if="episodeStartMode === 'custom'" class="program-custom-episode-start">
               <span>{{ t("自定义首集编号") }}</span>
@@ -1978,8 +1978,8 @@ onUnmounted(() => {
 
         <div class="program-form-field program-field-wide">
            <span class="program-field-label">{{ t("固定参与成员 / 主持") }}</span>
-          <div class="people-picker">
-             <button v-for="person in peopleOptions" :key="person" type="button" class="person-tag" :class="{ selected: form.people.includes(person) }" @click="togglePerson(person)"><i v-if="castMember(person)" class="program-cast-dot" :style="{ backgroundColor: castMember(person).color }"></i>{{ person }}</button>
+          <div class="people-picker" role="group" :aria-label="t('固定参与成员 / 主持')">
+             <button v-for="person in peopleOptions" :key="person" type="button" class="person-tag" :class="{ selected: form.people.includes(person) }" :aria-pressed="form.people.includes(person)" @click="togglePerson(person)"><i v-if="castMember(person)" class="program-cast-dot" :style="{ backgroundColor: castMember(person).color }"></i>{{ person }}</button>
             <div v-for="person in customPeople" :key="person" class="person-tag selected custom-person-tag">
                <span>{{ person }}</span><button type="button" :aria-label="t('移除成员')" @click="removePerson(person)">×</button>
             </div>
@@ -2019,11 +2019,11 @@ onUnmounted(() => {
           <div class="program-form-grid period-form-grid">
             <div class="program-form-field program-field-wide">
                <span class="program-field-label">{{ t("更新方式") }}</span>
-               <div class="choice-tags" role="radiogroup" :aria-label="t('更新方式')">
-                 <button type="button" :class="{ selected: period.frequency === 'weekly' }" @click="setPeriodFrequency(period, 'weekly')">{{ t("周更") }}</button>
-                 <button type="button" :class="{ selected: period.frequency === 'monthly' }" @click="setPeriodFrequency(period, 'monthly')">{{ t("月更") }}</button>
-                 <button type="button" :class="{ selected: period.frequency === 'individual' }" @click="setPeriodFrequency(period, 'individual')">{{ t("逐期设置") }}</button>
-                 <button type="button" :class="{ selected: period.frequency === 'single' }" @click="setPeriodFrequency(period, 'single')">{{ t("单次") }}</button>
+               <div class="choice-tags" role="group" :aria-label="t('更新方式')">
+                 <button type="button" :class="{ selected: period.frequency === 'weekly' }" :aria-pressed="period.frequency === 'weekly'" @click="setPeriodFrequency(period, 'weekly')">{{ t("周更") }}</button>
+                 <button type="button" :class="{ selected: period.frequency === 'monthly' }" :aria-pressed="period.frequency === 'monthly'" @click="setPeriodFrequency(period, 'monthly')">{{ t("月更") }}</button>
+                 <button type="button" :class="{ selected: period.frequency === 'individual' }" :aria-pressed="period.frequency === 'individual'" @click="setPeriodFrequency(period, 'individual')">{{ t("逐期设置") }}</button>
+                 <button type="button" :class="{ selected: period.frequency === 'single' }" :aria-pressed="period.frequency === 'single'" @click="setPeriodFrequency(period, 'single')">{{ t("单次") }}</button>
               </div>
                <small v-if="period.frequency === 'monthly' && period.monthly_mode === 'irregular'">{{ t("仅新建节目时按时期开始日创建首期；开启后续自动生成时按每月 1 日生成占位单集。已有节目不补建首期。") }}</small>
                <small v-else-if="period.frequency === 'individual'">{{ t("逐期设置不自动生成后续单集；仅新建节目时按时期开始日期和默认时间创建首期，已有节目不补建。") }}</small>
@@ -2036,48 +2036,48 @@ onUnmounted(() => {
             </div>
             <div v-if="period.frequency === 'weekly'" class="program-form-field program-field-wide">
                <span class="program-field-label">{{ t("星期") }}</span>
-               <div class="choice-tags weekday-tags" role="radiogroup" :aria-label="t('星期')">
-                <button v-for="(name, weekday) in weekdayNames" :key="name" type="button" :class="{ selected: period.weekday === weekday }" @click="period.weekday = weekday">{{ name }}</button>
+               <div class="choice-tags weekday-tags" role="group" :aria-label="t('星期')">
+                <button v-for="(name, weekday) in weekdayNames" :key="name" type="button" :class="{ selected: period.weekday === weekday }" :aria-pressed="period.weekday === weekday" @click="period.weekday = weekday">{{ name }}</button>
               </div>
             </div>
             <div v-if="period.frequency === 'monthly'" class="program-form-field program-field-wide">
                <span class="program-field-label">{{ t("月更规律") }}</span>
-               <div class="choice-tags" role="radiogroup" :aria-label="t('月更规律')">
-                 <button type="button" :class="{ selected: period.monthly_mode !== 'irregular' }" @click="setMonthlyMode(period, 'week')">{{ t("有规律") }}</button>
-                 <button type="button" :class="{ selected: period.monthly_mode === 'irregular' }" @click="setMonthlyMode(period, 'irregular')">{{ t("无规律") }}</button>
+               <div class="choice-tags" role="group" :aria-label="t('月更规律')">
+                 <button type="button" :class="{ selected: period.monthly_mode !== 'irregular' }" :aria-pressed="period.monthly_mode !== 'irregular'" @click="setMonthlyMode(period, 'week')">{{ t("有规律") }}</button>
+                 <button type="button" :class="{ selected: period.monthly_mode === 'irregular' }" :aria-pressed="period.monthly_mode === 'irregular'" @click="setMonthlyMode(period, 'irregular')">{{ t("无规律") }}</button>
               </div>
             </div>
             <div v-if="period.frequency === 'monthly' && period.monthly_mode !== 'irregular'" class="program-form-field program-field-wide">
                <span class="program-field-label">{{ t("计算方式") }}</span>
-               <div class="choice-tags" role="radiogroup" :aria-label="t('计算方式')">
-                 <button type="button" :class="{ selected: period.monthly_mode === 'week' }" @click="setMonthlyMode(period, 'week')">{{ t("周次计算") }}</button>
-                 <button type="button" :class="{ selected: period.monthly_mode === 'day' }" @click="setMonthlyMode(period, 'day')">{{ t("按日计算") }}</button>
+               <div class="choice-tags" role="group" :aria-label="t('计算方式')">
+                 <button type="button" :class="{ selected: period.monthly_mode === 'week' }" :aria-pressed="period.monthly_mode === 'week'" @click="setMonthlyMode(period, 'week')">{{ t("周次计算") }}</button>
+                 <button type="button" :class="{ selected: period.monthly_mode === 'day' }" :aria-pressed="period.monthly_mode === 'day'" @click="setMonthlyMode(period, 'day')">{{ t("按日计算") }}</button>
               </div>
             </div>
             <div v-if="period.frequency === 'monthly' && period.monthly_mode === 'week'" class="program-form-field">
                <span class="program-field-label">{{ t("周次方向") }}</span>
-               <div class="choice-tags" role="radiogroup" :aria-label="t('周次方向')">
-                 <button type="button" :class="{ selected: period.week_direction === 'first' }" @click="setPeriodWeekDirection(period, 'first')">{{ t("顺数") }}</button>
-                 <button type="button" :class="{ selected: period.week_direction === 'last' }" @click="setPeriodWeekDirection(period, 'last')">{{ t("倒数") }}</button>
+               <div class="choice-tags" role="group" :aria-label="t('周次方向')">
+                 <button type="button" :class="{ selected: period.week_direction === 'first' }" :aria-pressed="period.week_direction === 'first'" @click="setPeriodWeekDirection(period, 'first')">{{ t("顺数") }}</button>
+                 <button type="button" :class="{ selected: period.week_direction === 'last' }" :aria-pressed="period.week_direction === 'last'" @click="setPeriodWeekDirection(period, 'last')">{{ t("倒数") }}</button>
               </div>
             </div>
             <div v-if="period.frequency === 'monthly' && period.monthly_mode === 'week'" class="program-form-field">
                <span class="program-field-label">{{ t("第几周") }}</span>
-               <div class="choice-tags week-tags" role="radiogroup" :aria-label="t('第几周')">
-                 <button v-for="week in weekOptions" :key="week" type="button" :class="{ selected: period.week_number === week }" @click="period.week_number = week">{{ t("第 {count} 周", { count: week }) }}</button>
+               <div class="choice-tags week-tags" role="group" :aria-label="t('第几周')">
+                 <button v-for="week in weekOptions" :key="week" type="button" :class="{ selected: period.week_number === week }" :aria-pressed="period.week_number === week" @click="period.week_number = week">{{ t("第 {count} 周", { count: week }) }}</button>
               </div>
             </div>
             <div v-if="period.frequency === 'monthly' && period.monthly_mode === 'week'" class="program-form-field program-field-wide">
                <span class="program-field-label">{{ t("星期") }}</span>
-               <div class="choice-tags weekday-tags" role="radiogroup" :aria-label="t('星期')">
-                <button v-for="(name, weekday) in weekdayNames" :key="name" type="button" :class="{ selected: period.weekday === weekday }" @click="period.weekday = weekday">{{ name }}</button>
+               <div class="choice-tags weekday-tags" role="group" :aria-label="t('星期')">
+                <button v-for="(name, weekday) in weekdayNames" :key="name" type="button" :class="{ selected: period.weekday === weekday }" :aria-pressed="period.weekday === weekday" @click="period.weekday = weekday">{{ name }}</button>
               </div>
             </div>
             <div v-if="period.frequency === 'monthly' && period.monthly_mode === 'day'" class="program-form-field">
                <span class="program-field-label">{{ t("日次方向") }}</span>
-               <div class="choice-tags" role="radiogroup" :aria-label="t('日次方向')">
-                 <button type="button" :class="{ selected: period.day_direction === 'first' }" @click="setPeriodDayDirection(period, 'first')">{{ t("顺数") }}</button>
-                 <button type="button" :class="{ selected: period.day_direction === 'last' }" @click="setPeriodDayDirection(period, 'last')">{{ t("倒数") }}</button>
+               <div class="choice-tags" role="group" :aria-label="t('日次方向')">
+                 <button type="button" :class="{ selected: period.day_direction === 'first' }" :aria-pressed="period.day_direction === 'first'" @click="setPeriodDayDirection(period, 'first')">{{ t("顺数") }}</button>
+                 <button type="button" :class="{ selected: period.day_direction === 'last' }" :aria-pressed="period.day_direction === 'last'" @click="setPeriodDayDirection(period, 'last')">{{ t("倒数") }}</button>
               </div>
             </div>
             <div v-if="period.frequency === 'monthly' && period.monthly_mode === 'day'" class="program-form-field">
@@ -2179,27 +2179,27 @@ onUnmounted(() => {
                 <label>{{ t("原定时间") }}<VueDatePicker v-model="occurrenceDraft.original_time" class="program-date-picker" time-picker model-type="HH:mm" format="HH:mm" :locale="localeTag()" auto-apply :clearable="true" :is-24="true" :readonly="occurrenceOriginalLocked" :teleport="true" text-input :placeholder="t('选择时间')"><template #arrow-up><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" /></svg></template><template #arrow-down><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" /></svg></template></VueDatePicker><small>{{ occurrenceDraft.individual ? t("逐期设置模式：可直接修改本期原定时间。") : occurrenceOriginalLocked ? t("来自排期规则，只能修改调整日期；调整时间已默认沿用原定时间。") : t("手动补录单集时填写原定时间。") }}{{ t("节目排期时区") }}：{{ occurrenceTimezoneLabel }}；{{ t("日历会按访问设备时区显示") }}。</small></label>
            <div class="program-form-field">
               <span class="program-field-label">{{ t("本期播出方式") }}</span>
-              <div class="choice-tags" role="radiogroup" :aria-label="t('本期播出方式')">
-                <button type="button" :class="{ selected: !occurrenceDraft.delivery }" @click="occurrenceDraft.delivery = ''">{{ t("跟随节目默认") }}</button>
-                <button type="button" :class="{ selected: occurrenceDraft.delivery === 'live' }" @click="occurrenceDraft.delivery = 'live'">{{ t("直播") }}</button>
-                <button type="button" :class="{ selected: occurrenceDraft.delivery === 'recorded' }" @click="occurrenceDraft.delivery = 'recorded'">{{ t("录播") }}</button>
+              <div class="choice-tags" role="group" :aria-label="t('本期播出方式')">
+                <button type="button" :class="{ selected: !occurrenceDraft.delivery }" :aria-pressed="!occurrenceDraft.delivery" @click="occurrenceDraft.delivery = ''">{{ t("跟随节目默认") }}</button>
+                <button type="button" :class="{ selected: occurrenceDraft.delivery === 'live' }" :aria-pressed="occurrenceDraft.delivery === 'live'" @click="occurrenceDraft.delivery = 'live'">{{ t("直播") }}</button>
+                <button type="button" :class="{ selected: occurrenceDraft.delivery === 'recorded' }" :aria-pressed="occurrenceDraft.delivery === 'recorded'" @click="occurrenceDraft.delivery = 'recorded'">{{ t("录播") }}</button>
               </div>
               <small>{{ t("仅作用于这一期，不会修改整个节目的默认播出方式。") }}</small>
            </div>
            <div class="program-form-field">
               <span class="program-field-label">{{ t("本期类型") }}</span>
-              <div class="choice-tags" role="radiogroup" :aria-label="t('本期类型')">
-                <button type="button" :class="{ selected: occurrenceDraft.special !== 'EX' }" @click="occurrenceDraft.special = ''">{{ t("普通节目") }}</button>
-                <button type="button" :class="{ selected: occurrenceDraft.special === 'EX' }" @click="occurrenceDraft.special = 'EX'">{{ t("EX 特别节目") }}</button>
+              <div class="choice-tags" role="group" :aria-label="t('本期类型')">
+                <button type="button" :class="{ selected: occurrenceDraft.special !== 'EX' }" :aria-pressed="occurrenceDraft.special !== 'EX'" @click="occurrenceDraft.special = ''">{{ t("普通节目") }}</button>
+                <button type="button" :class="{ selected: occurrenceDraft.special === 'EX' }" :aria-pressed="occurrenceDraft.special === 'EX'" @click="occurrenceDraft.special = 'EX'">{{ t("EX 特别节目") }}</button>
               </div>
                <small>{{ t("EX 特别节目不占用正篇期数，后续正篇编号顺延；请在自动生成单集结束后手动添加。") }}</small>
            </div>
            <div class="program-form-field">
               <span class="program-field-label">{{ t("本期状态") }}</span>
-              <div class="choice-tags">
-                <button type="button" :class="{ selected: occurrenceDraft.status === 'scheduled' }" @click="setOccurrenceStatus('scheduled')">{{ t("正常播出") }}</button>
-                <button type="button" :class="{ selected: occurrenceDraft.status === 'rescheduled' }" @click="setOccurrenceStatus('rescheduled')">{{ t("已改期") }}</button>
-                <button type="button" :class="{ selected: occurrenceDraft.status === 'cancelled' }" @click="setOccurrenceStatus('cancelled')">{{ t("因故取消") }}</button>
+              <div class="choice-tags" role="group" :aria-label="t('本期状态')">
+                <button type="button" :class="{ selected: occurrenceDraft.status === 'scheduled' }" :aria-pressed="occurrenceDraft.status === 'scheduled'" @click="setOccurrenceStatus('scheduled')">{{ t("正常播出") }}</button>
+                <button type="button" :class="{ selected: occurrenceDraft.status === 'rescheduled' }" :aria-pressed="occurrenceDraft.status === 'rescheduled'" @click="setOccurrenceStatus('rescheduled')">{{ t("已改期") }}</button>
+                <button type="button" :class="{ selected: occurrenceDraft.status === 'cancelled' }" :aria-pressed="occurrenceDraft.status === 'cancelled'" @click="setOccurrenceStatus('cancelled')">{{ t("因故取消") }}</button>
               </div>
                <small>{{ t("正常播出不会修改排期日期；需要更换日期时选择“已改期”。“因故取消”会保留单集并标记已取消；删除会移除单集，不再显示。") }}</small>
            </div>
@@ -2209,9 +2209,9 @@ onUnmounted(() => {
              </div>
              <div v-if="occurrenceDraft.status === 'rescheduled' && canShiftFollowing" class="program-form-field program-field-wide">
                 <span class="program-field-label">{{ t("后续排期") }}</span>
-                <div class="choice-tags">
-                  <button type="button" :class="{ selected: occurrenceDraft.shift_following_days === -7 }" @click="setOccurrenceShift(occurrenceDraft.shift_following_days === -7 ? 0 : -7)">{{ occurrenceDraft.shift_following_days === -7 ? t("已提前一周") : t("提前一周") }}</button>
-                  <button type="button" :class="{ selected: occurrenceDraft.shift_following_days === 7 }" @click="setOccurrenceShift(occurrenceDraft.shift_following_days === 7 ? 0 : 7)">{{ occurrenceDraft.shift_following_days === 7 ? t("已顺延一周") : t("顺延一周") }}</button>
+                <div class="choice-tags" role="group" :aria-label="t('后续排期')">
+                  <button type="button" :class="{ selected: occurrenceDraft.shift_following_days === -7 }" :aria-pressed="occurrenceDraft.shift_following_days === -7" @click="setOccurrenceShift(occurrenceDraft.shift_following_days === -7 ? 0 : -7)">{{ occurrenceDraft.shift_following_days === -7 ? t("已提前一周") : t("提前一周") }}</button>
+                  <button type="button" :class="{ selected: occurrenceDraft.shift_following_days === 7 }" :aria-pressed="occurrenceDraft.shift_following_days === 7" @click="setOccurrenceShift(occurrenceDraft.shift_following_days === 7 ? 0 : 7)">{{ occurrenceDraft.shift_following_days === 7 ? t("已顺延一周") : t("顺延一周") }}</button>
                 </div>
                 <small>{{ t("本期原定周视为不播；选择提前或顺延后，之后的隔两周排期也从这里起同步平移一周。") }}</small>
              </div>

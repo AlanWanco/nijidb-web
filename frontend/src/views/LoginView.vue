@@ -39,7 +39,7 @@ async function login() {
 </script>
 
 <template>
-  <main class="page narrow-page">
+  <main id="main-content" tabindex="-1" class="page narrow-page">
     <section class="login login-card">
       <div class="login-emblem" aria-hidden="true">虹</div>
       <p class="eyebrow">PRIVATE AREA / 01</p>

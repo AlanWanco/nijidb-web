@@ -62,7 +62,7 @@ onBeforeUnmount(() => { releaseRequestId += 1; });
 </script>
 
 <template>
-  <main class="page" @touchstart.passive="detailTouch.onTouchStart" @touchmove.passive="detailTouch.onTouchMove" @touchend.passive="detailTouch.onTouchEnd" @touchcancel.passive="detailTouch.onTouchCancel">
+  <main id="main-content" tabindex="-1" class="page" @touchstart.passive="detailTouch.onTouchStart" @touchmove.passive="detailTouch.onTouchMove" @touchend.passive="detailTouch.onTouchEnd" @touchcancel.passive="detailTouch.onTouchCancel">
     <div class="detail-topline">
        <RouterLink class="back" to="/music"><span aria-hidden="true">←</span> {{ t("返回专辑目录") }}</RouterLink>
        <span class="keyboard-hint">← / → {{ t("浏览发行") }}</span>

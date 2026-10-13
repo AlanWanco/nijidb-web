@@ -1214,7 +1214,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <main class="page programs-page" :class="{ 'programs-list-mode': viewMode === 'list' }">
+  <main id="main-content" tabindex="-1" class="page programs-page" :class="{ 'programs-list-mode': viewMode === 'list' }">
     <div class="programs-topline">
        <div>
          <p class="eyebrow">PROGRAM ARCHIVE</p>

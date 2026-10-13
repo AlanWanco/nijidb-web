@@ -775,7 +775,7 @@ onMounted(loadSettings);
 </script>
 
 <template>
-  <main class="page settings-page">
+  <main id="main-content" tabindex="-1" class="page settings-page">
     <section class="settings">
       <div class="settings-heading">
         <div>

@@ -104,7 +104,7 @@ onMounted(loadIllustrationIndex);
 </script>
 
 <template>
-  <main class="page collaboration-page">
+  <main id="main-content" tabindex="-1" class="page collaboration-page">
     <section class="collaboration-hero">
       <div class="collaboration-hero-copy">
         <p class="eyebrow">COLLABORATION ILLUSTRATIONS</p>

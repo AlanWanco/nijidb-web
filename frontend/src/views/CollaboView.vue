@@ -206,7 +206,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="page cb-page cb-index-page">
+  <main id="main-content" tabindex="-1" class="page cb-page cb-index-page">
     <section
       ref="heroRef"
       class="cb-hero"

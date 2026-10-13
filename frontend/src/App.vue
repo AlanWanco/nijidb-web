@@ -116,6 +116,10 @@ function submitGlobalSearch() {
   });
 }
 
+function skipToMainContent() {
+  document.getElementById("main-content")?.focus();
+}
+
 function handleGlobalSearchKeydown(event) {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
     if (!globalSearchContext.value) return;
@@ -176,6 +180,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="app-shell">
+    <a class="skip-link" href="#main-content" @click.prevent="skipToMainContent">{{ t("跳到主内容") }}</a>
     <header class="site-header">
       <div class="brand-area">
         <RouterLink class="brand" to="/">

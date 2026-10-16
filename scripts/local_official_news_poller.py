@@ -53,6 +53,7 @@ from app.news import (  # noqa: E402
     topic_next_offset,
 )
 from logfmt import format_message  # noqa: E402
+from news_network import pin_r2_client_to_ipv4  # noqa: E402
 from app.news_fetch import (  # noqa: E402
     NEWS_HEADERS,
     fetch_news_page,
@@ -64,6 +65,7 @@ from app.news_fetch import (  # noqa: E402
 
 try:
     import boto3
+    from botocore.config import Config
     from botocore.exceptions import ClientError
 except ImportError:  # pragma: no cover
     boto3 = None
@@ -616,7 +618,9 @@ class OfficialNewsPoller:
                 aws_access_key_id=config.r2_access_key_id,
                 aws_secret_access_key=config.r2_secret_access_key,
                 region_name="auto",
+                config=Config(connect_timeout=10, read_timeout=45, retries={"mode": "standard", "max_attempts": 2}),
             )
+            pin_r2_client_to_ipv4(self.s3)
 
     # ---------- 图片 ----------
 

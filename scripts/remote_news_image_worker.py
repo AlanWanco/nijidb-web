@@ -52,9 +52,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.news import news_image_dimensions_allowed  # noqa: E402
 from app.news_fetch import image_dimensions_from_bytes, is_avif_bytes  # noqa: E402
 from logfmt import format_message  # noqa: E402
+from news_network import pin_r2_client_to_ipv4  # noqa: E402
 
 try:
     import boto3
+    from botocore.config import Config
     from botocore.exceptions import ClientError
 except ImportError:  # pragma: no cover - reported when the script is run
     boto3 = None
@@ -777,7 +779,9 @@ class NewsImageWorker:
             aws_access_key_id=config.r2_access_key_id,
             aws_secret_access_key=config.r2_secret_access_key,
             region_name=os.getenv("R2_REGION", "auto"),
+            config=Config(connect_timeout=10, read_timeout=45, retries={"mode": "standard", "max_attempts": 2}),
         )
+        pin_r2_client_to_ipv4(self.s3)
 
     def log(self, message: str) -> None:
         print(format_message(f"[news-worker] {message}"), flush=True)

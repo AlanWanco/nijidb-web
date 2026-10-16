@@ -9,6 +9,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.request import Request
 
+import boto3
+
+from scripts.news_network import pin_r2_client_to_ipv4
 from scripts.remote_news_image_worker import (
     DirectAPIHTTPHandler,
     DirectAPIHTTPSHandler,
@@ -134,6 +137,21 @@ class RemoteNewsWorkerTests(unittest.TestCase):
                 if scheme == "https":
                     self.assertTrue(connection._context.check_hostname)
                 connection.close()
+
+    def test_r2_ipv4_binding_is_limited_to_one_client(self):
+        first = boto3.client(
+            "s3", endpoint_url="https://r2.example.test", aws_access_key_id="test", aws_secret_access_key="test"
+        )
+        second = boto3.client(
+            "s3", endpoint_url="https://r2.example.test", aws_access_key_id="test", aws_secret_access_key="test"
+        )
+        self.addCleanup(first.close)
+        self.addCleanup(second.close)
+        pin_r2_client_to_ipv4(first)
+        first_pool = first._endpoint.http_session._manager.connection_from_url("https://r2.example.test")
+        second_pool = second._endpoint.http_session._manager.connection_from_url("https://r2.example.test")
+        self.assertEqual(first_pool.conn_kw["source_address"], ("0.0.0.0", 0))
+        self.assertNotIn("source_address", second_pool.conn_kw)
 
     def test_state_is_written_atomically_with_default_permissions(self):
         with tempfile.TemporaryDirectory() as directory:

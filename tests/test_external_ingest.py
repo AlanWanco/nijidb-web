@@ -188,6 +188,37 @@ class ExternalIngestApiTests(unittest.IsolatedAsyncioTestCase):
             row = conn.execute("SELECT source_url FROM news_articles").fetchone()
         self.assertEqual(row["source_url"], payload["article"]["source_url"])
 
+    async def test_news_ingest_accepts_large_galleries_up_to_the_limit(self):
+        def payload(count: int):
+            return {
+                "article": {
+                    "source": "niji_topics",
+                    "page_name": "01_125",
+                    "title": "多图新闻",
+                    "source_url": "https://www.lovelive-anime.jp/nijigasaki/news/01_125.html",
+                    "body_markdown": "正文",
+                    "images": [
+                        {
+                            "kind": "remote",
+                            "source_url": f"https://www.lovelive-anime.jp/nijigasaki/news/img/{index}.jpg",
+                            "public_url": f"https://images.example.test/images/news-remote/{index}.jpg",
+                        }
+                        for index in range(count)
+                    ],
+                }
+            }
+
+        headers = {"X-Nijidb-API-Key": "news-test-key"}
+        with patch.dict(os.environ, {"NIJIDB_INGEST_API_KEY": "news-test-key"}):
+            accepted = await self.client.post("/api/ingest/news", json=payload(main.REMOTE_NEWS_INGEST_MAX_IMAGES), headers=headers)
+            rejected = await self.client.post(
+                "/api/ingest/news", json=payload(main.REMOTE_NEWS_INGEST_MAX_IMAGES + 1), headers=headers
+            )
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        self.assertEqual(accepted.json()["image_count"], main.REMOTE_NEWS_INGEST_MAX_IMAGES)
+        self.assertEqual(rejected.status_code, 400)
+        self.assertIn("图片数量", rejected.text)
+
     async def test_official_poller_ingest_header_notifies_but_image_worker_does_not(self):
         payload = {
             "article": {

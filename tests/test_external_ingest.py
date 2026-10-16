@@ -210,7 +210,9 @@ class ExternalIngestApiTests(unittest.IsolatedAsyncioTestCase):
 
         headers = {"X-Nijidb-API-Key": "news-test-key"}
         with patch.dict(os.environ, {"NIJIDB_INGEST_API_KEY": "news-test-key"}):
-            accepted = await self.client.post("/api/ingest/news", json=payload(main.REMOTE_NEWS_INGEST_MAX_IMAGES), headers=headers)
+            accepted = await self.client.post(
+                "/api/ingest/news", json=payload(main.REMOTE_NEWS_INGEST_MAX_IMAGES), headers=headers
+            )
             rejected = await self.client.post(
                 "/api/ingest/news", json=payload(main.REMOTE_NEWS_INGEST_MAX_IMAGES + 1), headers=headers
             )

@@ -6,8 +6,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
+from urllib.request import Request
 
 from scripts.remote_news_image_worker import (
+    DirectAPIHTTPHandler,
+    DirectAPIHTTPSHandler,
     NewsImageWorker,
     image_dimensions,
     image_signature,
@@ -115,6 +119,21 @@ class RemoteNewsWorkerTests(unittest.TestCase):
         request, timeout = worker.api_opener.requests[0]
         self.assertEqual(request.get_header("X-nijidb-api-key"), "test-api-key")
         self.assertEqual(timeout, 5)
+
+    def test_direct_api_connections_pin_ipv4_and_keep_https_verification(self):
+        for handler_type, scheme in ((DirectAPIHTTPHandler, "http"), (DirectAPIHTTPSHandler, "https")):
+            with self.subTest(scheme=scheme):
+                handler = handler_type()
+                request = Request(f"{scheme}://site.example.test/api/news")
+                with patch.object(handler, "do_open", return_value="response") as open_connection:
+                    response = getattr(handler, f"{scheme}_open")(request)
+                self.assertEqual(response, "response")
+                factory = open_connection.call_args.args[0]
+                connection = factory("site.example.test", **open_connection.call_args.kwargs)
+                self.assertEqual(connection.source_address, ("0.0.0.0", 0))
+                if scheme == "https":
+                    self.assertTrue(connection._context.check_hostname)
+                connection.close()
 
     def test_state_is_written_atomically_with_default_permissions(self):
         with tempfile.TemporaryDirectory() as directory:

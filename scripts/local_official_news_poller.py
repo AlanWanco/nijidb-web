@@ -560,7 +560,7 @@ def archived_image_source_set(images: list[dict[str, Any]] | Any) -> set[str]:
     }
 
 
-def official_news_client(config: "PollerConfig") -> httpx.AsyncClient:
+def official_news_client(config: PollerConfig) -> httpx.AsyncClient:
     """官网请求客户端：只经固定的共享代理，不改动本机代理配置。"""
     return httpx.AsyncClient(
         timeout=config.timeout,
@@ -570,7 +570,7 @@ def official_news_client(config: "PollerConfig") -> httpx.AsyncClient:
     )
 
 
-def direct_api_client(config: "PollerConfig") -> httpx.AsyncClient:
+def direct_api_client(config: PollerConfig) -> httpx.AsyncClient:
     """站点 API 直连客户端。
 
     轮询容器只有 IPv4 出口，而站点域名同时返回 AAAA 记录；不固定地址族时
@@ -581,7 +581,7 @@ def direct_api_client(config: "PollerConfig") -> httpx.AsyncClient:
         timeout=config.timeout,
         follow_redirects=False,
         trust_env=False,
-        transport=httpx.AsyncHTTPTransport(retries=API_CONNECT_RETRIES, local_address="0.0.0.0"),
+        transport=httpx.AsyncHTTPTransport(retries=API_CONNECT_RETRIES, local_address="0.0.0.0", trust_env=False),
     )
 
 

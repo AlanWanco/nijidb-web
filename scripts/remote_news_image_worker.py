@@ -30,11 +30,21 @@ import sys
 import uuid
 import time
 from dataclasses import dataclass
+from functools import partial
+from http.client import HTTPConnection, HTTPResponse, HTTPSConnection
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, unquote, urlencode, urljoin, urlparse, urlunparse
-from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from urllib.request import (
+    HTTPHandler,
+    HTTPRedirectHandler,
+    HTTPSHandler,
+    OpenerDirector,
+    ProxyHandler,
+    Request,
+    build_opener,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -95,6 +105,24 @@ class NoRedirectHandler(HTTPRedirectHandler):
 
     def redirect_request(self, request, file, code, message, headers, newurl):  # type: ignore[no-untyped-def]
         return None
+
+
+class DirectAPIHTTPHandler(HTTPHandler):
+    """Use IPv4 for direct API requests without changing image connections."""
+
+    def http_open(self, request: Request) -> HTTPResponse:
+        connection = partial(HTTPConnection, source_address=("0.0.0.0", 0))
+        return self.do_open(connection, request)
+
+
+class DirectAPIHTTPSHandler(HTTPSHandler):
+    def https_open(self, request: Request) -> HTTPResponse:
+        connection = partial(HTTPSConnection, source_address=("0.0.0.0", 0))
+        return self.do_open(connection, request, context=self._context)
+
+
+def direct_api_opener() -> OpenerDirector:
+    return build_opener(ProxyHandler({}), DirectAPIHTTPHandler(), DirectAPIHTTPSHandler(), NoRedirectHandler())
 
 
 @dataclass(frozen=True)
@@ -740,7 +768,8 @@ class NewsImageWorker:
         self.opener = build_opener(ProxyHandler(handlers), NoRedirectHandler())
         # The optional proxy is only for official image requests. Keep the
         # Nijidb API direct so the ingest key is not sent through that proxy.
-        self.api_opener = build_opener(ProxyHandler({}), NoRedirectHandler())
+        # Pin the source to IPv4 so an unreachable AAAA cannot stall a step.
+        self.api_opener = direct_api_opener()
         self.base_parts = urlparse(config.base_url)
         self.s3 = boto3.client(
             "s3",

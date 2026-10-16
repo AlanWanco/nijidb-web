@@ -72,6 +72,7 @@ except ImportError:  # pragma: no cover
 
 IMAGE_MAX_BYTES = 20 * 1024 * 1024
 API_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+API_CONNECT_RETRIES = 2
 INGEST_PATH = "/api/ingest/news"
 STATE_VERSION = 1
 STATE_MAX_BYTES = 4 * 1024 * 1024
@@ -524,13 +525,25 @@ def content_signature(record: dict[str, Any]) -> str:
 
 
 def image_source_set(images: list[dict[str, Any]] | Any) -> set[str]:
+    """图片来源地址集合。
+
+    同时接受图片字典（官网解析结果）和纯地址字符串（状态文件里保存的
+    ``pushed_image_sources``）；早期只接受字典，导致已提交过的地址被当成
+    待提交，每趟都重复抓取官网图片。
+    """
     if not isinstance(images, list):
         return set()
-    return {
-        str(image.get("source_url") or "").strip()
-        for image in images
-        if isinstance(image, dict) and str(image.get("source_url") or "").strip()
-    }
+    sources: set[str] = set()
+    for image in images:
+        if isinstance(image, dict):
+            source = str(image.get("source_url") or "").strip()
+        elif isinstance(image, str):
+            source = image.strip()
+        else:
+            continue
+        if source:
+            sources.add(source)
+    return sources
 
 
 def archived_image_source_set(images: list[dict[str, Any]] | Any) -> set[str]:
@@ -545,6 +558,31 @@ def archived_image_source_set(images: list[dict[str, Any]] | Any) -> set[str]:
             and str(image.get("public_url") or "").strip()
         )
     }
+
+
+def official_news_client(config: "PollerConfig") -> httpx.AsyncClient:
+    """官网请求客户端：只经固定的共享代理，不改动本机代理配置。"""
+    return httpx.AsyncClient(
+        timeout=config.timeout,
+        headers=NEWS_HEADERS,
+        proxy=config.proxy or None,
+        trust_env=False,
+    )
+
+
+def direct_api_client(config: "PollerConfig") -> httpx.AsyncClient:
+    """站点 API 直连客户端。
+
+    轮询容器只有 IPv4 出口，而站点域名同时返回 AAAA 记录；不固定地址族时
+    httpx 会尝试连接 IPv6 并让整趟以 ConnectError/ConnectTimeout 失败，因此
+    固定 IPv4 源地址，并允许连接级重试以吸收瞬时抖动。
+    """
+    return httpx.AsyncClient(
+        timeout=config.timeout,
+        follow_redirects=False,
+        trust_env=False,
+        transport=httpx.AsyncHTTPTransport(retries=API_CONNECT_RETRIES, local_address="0.0.0.0"),
+    )
 
 
 async def read_response_bytes(response: httpx.Response, maximum: int) -> bytes:
@@ -968,18 +1006,12 @@ class OfficialNewsPoller:
         config = self.config
         handled = 0
         log("本趟使用固定共享代理")
-        proxy = config.proxy or None
-        async with httpx.AsyncClient(
-            timeout=config.timeout,
-            headers=NEWS_HEADERS,
-            proxy=proxy,
-            trust_env=False,
-        ) as official:
-            async with httpx.AsyncClient(timeout=config.timeout, follow_redirects=False, trust_env=False) as api:
+        async with official_news_client(config) as official:
+            async with direct_api_client(config) as api:
                 try:
                     self.production = await self.load_production_index(api)
                 except httpx.HTTPError as exc:
-                    raise SiteApiError("读取站点新闻索引失败") from exc
+                    raise SiteApiError(f"读取站点新闻索引失败（{type(exc).__name__}）") from exc
                 log(f"站点已有新闻 {len(self.production)} 条（首页比对基准）")
                 offset = 0
                 for page in range(config.max_pages):

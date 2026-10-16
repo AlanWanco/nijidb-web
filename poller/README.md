@@ -77,6 +77,7 @@ docker compose logs -f image-worker
 
 - 默认只扫描官网新闻列表第一页，可用 `NEWS_POLL_MAX_PAGES` 调整。
 - 官网串行、低频访问，固定 UA；不使用 Cookie、UA 轮换、并发抓取或代理轮换。
+- 站点 API 直连并固定 IPv4 源地址，同时允许连接级重试；容器没有 IPv6 出口，而站点域名同时返回 AAAA 记录，不固定地址族会让整趟以 `ConnectError`/`ConnectTimeout` 失败。
 - 篇间默认 30 秒、图片间默认 10 秒；趟间默认随机休息 30–60 分钟。
 - 官网 403 使用现有退避策略。切换上游节点或恢复代理由独立代理服务处理。
 - 站点 API 与 R2 不经新闻代理，避免无谓绕路。

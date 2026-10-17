@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import tempfile
@@ -1374,3 +1375,34 @@ def datetime_today() -> date:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProgramHashtagTests(unittest.TestCase):
+    def test_normalized_hashtags_strips_prefix_and_dedupes(self):
+        raw = main.normalized_hashtags(["#アニガサキ", "アニガサキ", " #虹ヶ咲 ", "", 123])
+        self.assertEqual(json.loads(raw), ["アニガサキ", "虹ヶ咲", "123"])
+
+    def test_normalized_hashtags_accepts_json_string(self):
+        raw = main.normalized_hashtags('["#A", "B"]')
+        self.assertEqual(json.loads(raw), ["A", "B"])
+
+    def test_normalized_program_keeps_hashtags_list(self):
+        values = main.normalized_program(
+            {
+                "title": "示例节目",
+                "start_date": "2026-01-01",
+                "periods": [
+                    {"start_date": "2026-01-01", "frequency": "individual"}
+                ],
+                "hashtags": ["#アニガサキ", "虹ヶ咲"],
+            }
+        )
+        self.assertEqual(
+            json.loads(values["hashtags"]), ["アニガサキ", "虹ヶ咲"]
+        )
+
+    def test_program_hashtags_decodes_for_api_payload(self):
+        self.assertEqual(
+            main.program_hashtags('["#A", "B"]'), ["A", "B"]
+        )
+        self.assertEqual(main.program_hashtags(""), [])

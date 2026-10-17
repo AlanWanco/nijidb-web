@@ -36,7 +36,8 @@
     "occurrences[].note": "补充来源或播出语义；直播回看建议写明“生配信アーカイブ”，以区别于预直播 live 单集。",
     "occurrences[].guests": "本期临时嘉宾数组，不会修改节目固定成员；虹咲成员使用规范日文原名。",
     "occurrences[].absent_members": "本期明确缺席的虹咲成员数组；仅记录节目固定成员本期缺席，不要把未被邀请的非固定成员填写在这里。",
-    "occurrences[].images": "当期节目返图数组；每项使用 url（HTTP/HTTPS 图片直链）和可选 alt_text。上传到本地或 R2 的图片导出为可访问的 public URL。"
+    "occurrences[].images": "当期节目返图数组；每项使用 url（HTTP/HTTPS 图片直链）和可选 alt_text。上传到本地或 R2 的图片导出为可访问的 public URL。",
+    "program.hashtags": "节目级 hashtag 数组，用于站内搜索和联动匹配；填写不带 # 的短标签，最多 12 个。"
   },
   "_import_notes": [
     "期数不是 occurrences 的输入字段；EX 不占期。允许空号：不要为了补齐 #5/#7 之间的编号而伪造没有内容的单集或强行补连号，真实日期占位和后续单集按系统规则自然处理。标题中的【#N】只能作为核对提示。",
@@ -59,7 +60,6 @@
     "target_program_id": ""
   },
   "program": {
-    "id": "",
     "title": "示例节目",
     "category": "personal",
     "format": "video",
@@ -69,6 +69,9 @@
     "episode_start": 1,
     "people": [
       "成员姓名"
+    ],
+    "hashtags": [
+      "示例tag"
     ],
     "official_url": "https://example.com/program",
     "description": "节目简介。",
@@ -98,7 +101,8 @@
         "schedule_time": "20:00",
         "timezone": "Asia/Tokyo"
       }
-    ]
+    ],
+    "id": ""
   },
   "occurrences": [
     {

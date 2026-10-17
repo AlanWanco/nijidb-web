@@ -1400,6 +1400,7 @@ onUnmounted(() => {
           <div class="program-occurrence-card" :class="{ cancelled: selectedEvent.occurrenceStatus === 'cancelled' }">
              <span v-if="eventCast(selectedEvent).length" class="program-drawer-cast-line" role="img" :aria-label="`${t('出场成员')}：${eventCast(selectedEvent).map(member => member.name).join('、')}`" :title="eventCast(selectedEvent).map(member => member.name).join('、')"><i v-for="member in eventCast(selectedEvent)" :key="member.name" :style="{ '--cast-color': member.color }"></i></span>
                 <span>{{ eventEpisodeLabel({ extendedProps: selectedEvent }) }} · {{ selectedEvent.delivery === "live" ? t("直播") : t("录播") }} · {{ occurrenceAirStatus(selectedEvent) }}</span>
+                <span v-if="selectedEvent.occurrenceId" class="program-occurrence-id">ID {{ selectedEvent.occurrenceId }}</span>
            <strong v-if="selectedEvent.occurrenceTitle" class="program-occurrence-title">{{ selectedEvent.occurrenceTitle }}</strong>
            <strong>{{ fullDateLabel(selectedEvent.date) }}</strong>
           <div class="program-occurrence-time-line">

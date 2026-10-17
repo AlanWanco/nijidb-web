@@ -4220,6 +4220,36 @@ body.program-screenshot-capturing .program-event-enter {
   line-height: 1;
 }
 
+.program-episode-id,
+.occurrence-list-id,
+.occurrence-form-id {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font: 600 10px/1 var(--mono);
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.program-occurrence-card .program-occurrence-id {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  margin-top: 2px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: color-mix(in srgb, var(--surface) 58%, transparent);
+  color: var(--accent);
+  font: 600 10px/1 var(--mono);
+  letter-spacing: 0.02em;
+}
+
 .program-status.status-ongoing {
   border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
   background: var(--accent-soft);

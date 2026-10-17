@@ -113,9 +113,18 @@ function blankProgram() {
     episode_start: 1,
     people: [],
     official_url: "",
+    hashtagsText: "",
     description: "",
     periods: [blankPeriod()],
   };
+}
+
+function parseHashtags(value) {
+  const tags = String(value || "")
+    .split(/[\s,，、#＃]+/)
+    .map(tag => tag.trim())
+    .filter(Boolean);
+  return [...new Set(tags)].slice(0, 12);
 }
 
 function blankPeriod() {
@@ -785,6 +794,7 @@ function applyProgram(program) {
     episode_start: episodeStart,
     people: [...(program.people || [])],
     official_url: program.official_url || "",
+    hashtagsText: (program.hashtags || []).map(tag => `#${tag}`).join(" "),
     description: program.description || "",
     periods,
   });
@@ -1133,6 +1143,7 @@ function programBody() {
         episode_start: episodeStartPayload(),
        people: [...form.people],
       official_url: form.official_url,
+      hashtags: parseHashtags(form.hashtagsText),
       description: form.description,
      parent_id: form.parent_id,
      subprogram_name: form.parent_id ? form.subprogram_name : "主节目",
@@ -1991,6 +2002,7 @@ onUnmounted(() => {
            <small>{{ t("这里填写批量排期下固定出现的虹咲成员、主持人或常驻嘉宾；单期临时嘉宾请在下方单集编辑。") }}</small>
         </div>
           <label class="program-field-wide">{{ t("相关链接") }}<input v-model="form.official_url" type="url" placeholder="https://"><small>{{ t("节目层面的补充链接；源地址、搬运地址和字幕地址请在单集编辑中填写。") }}</small></label>
+           <label class="program-field-wide">{{ t("Hashtags") }}<input v-model="form.hashtagsText" type="text" placeholder="#アニガサキ #虹ヶ咲"><small>{{ t("用空格或逗号分隔，不需要写 #；最多 12 个，用于站内搜索和返图联动匹配。") }}</small></label>
            <label class="program-field-wide">{{ t("节目简介") }}<textarea v-model="form.description" rows="3" :placeholder="t('可选')"></textarea></label>
            <div v-if="editingId && !form.parent_id" class="program-subprogram-panel program-field-wide">
              <div class="program-subprogram-panel-heading">
@@ -2158,6 +2170,7 @@ onUnmounted(() => {
                 <span v-if="occurrenceCast(row).length" class="occurrence-list-cast-line" role="img" :aria-label="`${t('出场成员')}：${occurrenceCast(row).map(member => member.name).join('、')}`" :title="occurrenceCast(row).map(member => member.name).join('、')"><i v-for="member in occurrenceCast(row)" :key="member.name" :style="{ '--cast-color': member.color, backgroundColor: member.color }"></i></span>
               <span><b>{{ occurrenceEpisodeLabel(row) }}</b><em :class="{ cancelled: row.status === 'cancelled', deleted: row.status === 'deleted', aired: row.aired }">{{ row._draft ? t("待填写") : occurrenceStatus(row) }}</em></span>
              <strong>{{ row._draft ? t("时间未定") : row.date }}</strong>
+             <small v-if="row.id && !row._draft" class="occurrence-list-id">ID {{ row.id }}</small>
               <small v-if="row.title" class="occurrence-list-title">{{ row.title }}</small>
                 <small v-if="row._draft">{{ t("请填写日期后保存") }}</small>
                 <small v-else>{{ row.status === "deleted" ? t("已删除，不参与生成") : row.generated ? t("自动生成") : row.materialized ? t("已播出并保存") : row.adjusted_date ? `${t("原定")} ${row.original_date}` : t("已单独调整") }}{{ row.guests?.length ? ` · ${t("嘉宾")} ${row.guests.length} ${t("人")}` : "" }}{{ row.absent_members?.length ? ` · ${t("缺席")} ${row.absent_members.length} ${t("人")}` : "" }}</small>
@@ -2173,6 +2186,7 @@ onUnmounted(() => {
                <div><p class="form-kicker">ONE EPISODE</p><h3>{{ occurrenceDraft._draft ? t("添加单集") : occurrenceDraft.id || occurrenceDraft.generated ? t("编辑单集") : t("添加单集调整") }}</h3></div>
                <button type="button" class="occurrence-nav-button" :disabled="!canNextOccurrence" :aria-label="t('下一集')" :title="t('下一集')" @click="selectAdjacentOccurrence(1)">→</button>
                <span v-if="occurrenceDraft.id || occurrenceDraft.generated" class="program-kind">{{ occurrenceDraft.id ? t("已保存") : t("自动生成") }}</span>
+               <span v-if="occurrenceDraft.id" class="occurrence-form-id">ID {{ occurrenceDraft.id }}</span>
             </div>
              <label>{{ t("单集标题") }}<input v-model="occurrenceDraft.title" type="text" :placeholder="t('例如：特别企划、嘉宾回顾……')"><small>{{ t("可选；填写后会显示在日历和单集详情中。") }}</small></label>
              <label>{{ t("原定日期") }}<VueDatePicker v-model="occurrenceDraft.original_date" class="program-date-picker" model-type="yyyy-MM-dd" format="yyyy-MM-dd" :locale="localeTag()" :enable-time-picker="false" auto-apply :clearable="false" :readonly="occurrenceOriginalLocked" :teleport="true" :placeholder="t('选择日期')" :now-button-label="t('今天')" :action-row="occurrenceOriginalLocked ? hiddenActionRow : todayActionRow" :config="occurrenceOriginalLocked ? undefined : keepActionRowConfig" /><small>{{ occurrenceDraft.individual ? t("逐期设置模式：可直接修改本期原定日期。") : occurrenceOriginalLocked ? t("来自节目排期规则，不能修改原定日期。") : t("手动补录单集时填写原定日期。") }}</small></label>

@@ -482,6 +482,7 @@ def init_db() -> None:
            delivery TEXT NOT NULL DEFAULT 'recorded',
           auto_generate INTEGER NOT NULL DEFAULT 1,
           people TEXT NOT NULL DEFAULT '',
+          hashtags TEXT NOT NULL DEFAULT '[]',
            official_url TEXT NOT NULL DEFAULT '',
            description TEXT NOT NULL DEFAULT '',
           frequency TEXT NOT NULL DEFAULT 'weekly',
@@ -577,6 +578,7 @@ def init_db() -> None:
             "parent_id": "TEXT NOT NULL DEFAULT ''",
             "subprogram_name": "TEXT NOT NULL DEFAULT '主节目'",
             "episode_start": "INTEGER NOT NULL DEFAULT 1",
+            "hashtags": "TEXT NOT NULL DEFAULT '[]'",
         }
         for name, definition in program_migrations.items():
             if name not in program_columns:
@@ -985,6 +987,38 @@ def normalized_occurrence_images(value: Any) -> list[dict[str, str]]:
             raise ValueError(f"第 {index} 张返图地址不能超过 {PROGRAM_IMAGE_URL_MAX_LENGTH} 个字符")
         images.append({"url": url, "alt_text": alt_text})
     return images
+
+
+def normalized_hashtags(value: Any) -> str:
+    """节目级 hashtag 只保留去 # 后的短标签，最多 12 个。"""
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            parsed = re.split(r"[,，、\s]+", value)
+    elif isinstance(value, (list, tuple)):
+        parsed = list(value)
+    else:
+        parsed = []
+    if not isinstance(parsed, list):
+        parsed = []
+    tags: list[str] = []
+    for item in parsed:
+        tag = str(item or "").strip().lstrip("#＃").strip()
+        if not tag or len(tag) > 60 or tag in tags:
+            continue
+        tags.append(tag)
+    return json.dumps(tags[:12], ensure_ascii=False)
+
+
+def program_hashtags(value: Any) -> list[str]:
+    try:
+        parsed = json.loads(value or "[]") if isinstance(value, str) else value
+    except json.JSONDecodeError:
+        parsed = []
+    if not isinstance(parsed, list):
+        parsed = []
+    return [str(item).strip().lstrip("#＃") for item in parsed if str(item).strip()][:12]
 
 
 def program_people(value: Any) -> list[str]:
@@ -1500,6 +1534,7 @@ def program_payload(
     payload.pop("mirror_url", None)
     payload.pop("subtitle_url", None)
     payload["people"] = program_people(payload.get("people", ""))
+    payload["hashtags"] = program_hashtags(payload.get("hashtags", ""))
     payload["official_url"] = safe_program_link(payload.get("official_url"))
     payload["auto_generate"] = boolean_value(payload.get("auto_generate"), True)
     payload["week_interval"] = int(payload.get("week_interval") or 1)
@@ -1736,6 +1771,7 @@ def normalized_program(values: dict[str, Any]) -> dict[str, Any]:
         "delivery": delivery,
         "auto_generate": auto_generate,
         "people": normalized_people(values.get("people")),
+        "hashtags": normalized_hashtags(values.get("hashtags")),
         "official_url": normalized_program_link(values.get("official_url"), "相关链接"),
         "description": str(values.get("description") or "").strip(),
         "frequency": first_period["frequency"],
@@ -1833,6 +1869,7 @@ def program_json_metadata() -> dict[str, Any]:
             "parent_program": "子节目 JSON 的原主节目定位信息；导入时可以在预览中改选实际所属主节目。",
             "program.delivery": "默认播出方式：live 或 recorded。",
             "program.episode_start": "首集编号支持 0 到 9999，默认是 1；第一个非 EX 单集从该编号开始，之后按规则递增。EX 始终不占期。",
+            "program.hashtags": "节目级 hashtag 数组，用于站内搜索和联动匹配；填写不带 # 的短标签，最多 12 个。",
             "program.people": "节目固定参与成员、主持人或常驻嘉宾数组。推荐使用以下 14 个虹咲成员日文原名以启用成员筛选和彩色标记：大西亜玖璃、相良茉優、前田佳織里、久保田未夢、村上奈津実、鬼頭明里、楠木ともり、林鼓子、指出毬亜、田中ちえ美、小泉萌香、内田秀、法元明菜、矢野妃菜喜。其他主持人或嘉宾也可直接填写姓名，会被保存和显示，但不会被识别为虹咲成员。",
             "program.periods[].frequency": "weekly、monthly、individual 或 single。monthly 还需要通过 monthly_mode 区分有规律和无规律。",
             "program.periods[].monthly_mode": "仅 monthly 使用：week 表示按周次计算，day 表示按日计算，irregular 表示每月更新一期但日期未知。",
@@ -1898,6 +1935,7 @@ def program_json_template() -> dict[str, Any]:
         "auto_generate": False,
         "episode_start": 1,
         "people": ["成员姓名"],
+        "hashtags": ["示例tag"],
         "official_url": "https://example.com/program",
         "description": "节目简介。",
         "periods": [
@@ -2267,8 +2305,9 @@ def normalize_import_bundle(payload: dict[str, Any]) -> tuple[list[dict[str, Any
 def import_preview_entry(program: dict[str, Any], occurrences: list[dict[str, Any]]) -> dict[str, Any]:
     preview_program = {
         key: program[key]
-        for key in ("title", "status", "category", "format", "platform", "delivery", "auto_generate", "episode_start", "official_url", "description", "periods")
+        for key in ("title", "status", "category", "format", "platform", "delivery", "auto_generate", "episode_start", "hashtags", "official_url", "description", "periods")
     }
+    preview_program["hashtags"] = program_hashtags(program.get("hashtags", []))
     if program.get("parent_id"):
         preview_program["subprogram_name"] = program.get("subprogram_name") or ""
     preview_occurrences = []
@@ -3408,11 +3447,11 @@ def seed_new_program_occurrences(
 
 def insert_program_row(conn: sqlite3.Connection, values: dict[str, Any]) -> None:
     conn.execute("""INSERT INTO programs (
-        id, title, status, category, format, platform, delivery, auto_generate, people, official_url, description,
+        id, title, status, category, format, platform, delivery, auto_generate, people, hashtags, official_url, description,
         frequency, week_interval, monthly_mode, week_index, day_index, weekday, schedule_time,
         start_date, end_date, parent_id, subprogram_name, episode_start, created_at, updated_at
     ) VALUES (
-        :id, :title, :status, :category, :format, :platform, :delivery, :auto_generate, :people, :official_url, :description,
+        :id, :title, :status, :category, :format, :platform, :delivery, :auto_generate, :people, :hashtags, :official_url, :description,
         :frequency, :week_interval, :monthly_mode, :week_index, :day_index, :weekday, :schedule_time,
         :start_date, :end_date, :parent_id, :subprogram_name, :episode_start, :created_at, :updated_at
     )""", values)
@@ -3429,7 +3468,7 @@ def replace_imported_program_row(
     values = {**values, "id": target_id, "created_at": created_at, "updated_at": updated_at}
     conn.execute("""UPDATE programs SET
         title=:title, status=:status, category=:category, format=:format, platform=:platform, delivery=:delivery, auto_generate=:auto_generate,
-        people=:people, official_url=:official_url, description=:description,
+        people=:people, hashtags=:hashtags, official_url=:official_url, description=:description,
         frequency=:frequency, week_interval=:week_interval, monthly_mode=:monthly_mode,
         week_index=:week_index, day_index=:day_index, weekday=:weekday, schedule_time=:schedule_time,
         start_date=:start_date, end_date=:end_date, parent_id=:parent_id, subprogram_name=:subprogram_name, episode_start=:episode_start, updated_at=:updated_at
@@ -3467,7 +3506,7 @@ def program_rows(
     record_sets: dict[str, list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
     search = query.strip()
-    program_search_sql = text_search_sql("p", ("title", "subprogram_name", "description", "people", "official_url"))
+    program_search_sql = text_search_sql("p", ("title", "subprogram_name", "description", "people", "hashtags", "official_url"))
     occurrence_search_sql = text_search_sql("o", ("title", "note", "guests", "source_url", "mirror_url", "subtitle_url"))
     matched_occurrence_ids: dict[str, set[int]] = {}
     program_id_values = sorted(str(program_id) for program_id in program_ids) if program_ids is not None else []
@@ -3632,7 +3671,7 @@ def program_json_export_entry(program: dict[str, Any], today: date) -> dict[str,
     auto_generate = boolean_value(program.get("auto_generate"), True)
     exported_program = {
         key: program.get(key)
-        for key in ("title", "category", "format", "platform", "delivery", "episode_start", "people", "official_url", "description", "periods")
+        for key in ("title", "category", "format", "platform", "delivery", "episode_start", "people", "hashtags", "official_url", "description", "periods")
     }
     exported_program["auto_generate"] = auto_generate
     exported_program["id"] = program.get("id", "")
@@ -9040,7 +9079,7 @@ async def api_update_program(program_id: str, request: Request) -> dict[str, Any
         ]
         conn.execute("""UPDATE programs SET
             title=:title, status=:status, category=:category, format=:format, platform=:platform, delivery=:delivery, auto_generate=:auto_generate,
-            people=:people, official_url=:official_url, description=:description,
+            people=:people, hashtags=:hashtags, official_url=:official_url, description=:description,
             frequency=:frequency, week_interval=:week_interval, monthly_mode=:monthly_mode,
             week_index=:week_index, day_index=:day_index, weekday=:weekday, schedule_time=:schedule_time,
             start_date=:start_date, end_date=:end_date, parent_id=:parent_id, subprogram_name=:subprogram_name, episode_start=:episode_start, updated_at=:updated_at

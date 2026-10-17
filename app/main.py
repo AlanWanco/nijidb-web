@@ -3302,6 +3302,26 @@ def materialize_generated_occurrences(conn: sqlite3.Connection, program: dict[st
     return conn.total_changes - before
 
 
+def materialize_all_aired_generated_occurrences() -> int:
+    """把已经播出且未删除的自动生成单集落库，使其拥有真实单集 ID。
+
+    只物化 `aired` 的生成记录；未来单集继续由 periods 投影，不写数据库。
+    """
+    total = 0
+    with db() as conn:
+        programs = program_rows(include_occurrences=True)
+        for program in programs:
+            try:
+                total += materialize_generated_occurrences(conn, program)
+            except (ValueError, sqlite3.Error) as exc:
+                print(
+                    f"[programs] materialize skipped {program.get('id')}: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+    return total
+
+
 def backfill_individual_occurrence_anchors(
     conn: sqlite3.Connection,
     program_id: str,
@@ -6978,6 +6998,38 @@ def next_daily_backup_at(current: datetime) -> datetime:
     return (current + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
+def next_aired_materialize_at(current: datetime) -> datetime:
+    candidate = current.replace(minute=5, second=0, microsecond=0)
+    if candidate <= current:
+        candidate += timedelta(hours=1)
+    return candidate
+
+
+async def program_materialize_scheduler() -> None:
+    while not stop_event.is_set():
+        current = datetime.now(JAPAN_TZ)
+        next_run = next_aired_materialize_at(current)
+        await wait_or_stop(max(1, int((next_run - current).total_seconds())))
+        if stop_event.is_set():
+            return
+        try:
+            async with sync_lock:
+                count = await asyncio.to_thread(
+                    materialize_all_aired_generated_occurrences
+                )
+            if count:
+                print(
+                    f"[programs] materialized {count} aired occurrences",
+                    flush=True,
+                )
+        except Exception as exc:  # noqa: BLE001 - scheduler must keep running
+            print(
+                f"[programs] materialize scheduler error: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
+
 async def database_backup_scheduler() -> None:
     while not stop_event.is_set():
         current = datetime.now(JAPAN_TZ)
@@ -6997,14 +7049,32 @@ async def database_backup_scheduler() -> None:
 async def lifespan(_: FastAPI):
     init_db()
     prune_database_backups()
+    try:
+        materialized = materialize_all_aired_generated_occurrences()
+        if materialized:
+            print(f"[programs] materialized {materialized} aired occurrences", flush=True)
+    except Exception as exc:  # noqa: BLE001 - startup must not be blocked by this
+        print(
+            f"[programs] initial materialize failed: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
     source_task = asyncio.create_task(source_scheduler())
     detail_task = asyncio.create_task(detail_scheduler())
     news_task = asyncio.create_task(news_scheduler())
     news_slow_task = asyncio.create_task(news_slow_refresh_scheduler())
     backup_task = asyncio.create_task(database_backup_scheduler())
+    materialize_task = asyncio.create_task(program_materialize_scheduler())
     yield
     stop_event.set()
-    await asyncio.gather(source_task, detail_task, news_task, news_slow_task, backup_task)
+    await asyncio.gather(
+        source_task,
+        detail_task,
+        news_task,
+        news_slow_task,
+        backup_task,
+        materialize_task,
+    )
 
 
 class SafeStaticFiles(StaticFiles):

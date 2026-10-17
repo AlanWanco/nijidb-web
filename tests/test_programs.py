@@ -499,6 +499,41 @@ class IndividualProgramApiTests(unittest.IsolatedAsyncioTestCase):
             listing_after_update = await self.client.get(f"/api/admin/programs/{program_id}/occurrences")
             self.assertEqual(len(listing_after_update.json()["occurrences"]), 1)
 
+    async def test_aired_generated_occurrences_materialize_without_future_rows(self):
+        today = main.datetime.now(main.JAPAN_TZ).date()
+        start = today - timedelta(days=28)
+        payload = {
+            "title": "已播出自动生成落库测试",
+            "auto_generate": True,
+            "periods": [{
+                "start_date": start.isoformat(),
+                "frequency": "weekly",
+                "week_interval": 1,
+                "weekday": start.weekday(),
+                "schedule_time": "00:00",
+                "timezone": "Asia/Tokyo",
+                "auto_generate": True,
+            }],
+        }
+        created = await self.client.post("/api/admin/programs", json=payload)
+        self.assertEqual(created.status_code, 200, created.text)
+        program_id = created.json()["program"]["id"]
+        with main.db() as conn:
+            program = next(
+                item for item in main.program_rows(program_ids={program_id})
+                if item["id"] == program_id
+            )
+            inserted = main.materialize_generated_occurrences(conn, program)
+        self.assertGreater(inserted, 0)
+        with main.db() as conn:
+            rows = [dict(row) for row in conn.execute(
+                "SELECT original_date, materialized FROM program_occurrences "
+                "WHERE program_id = ? AND materialized = 1",
+                (program_id,),
+            )]
+        self.assertTrue(rows)
+        self.assertTrue(all(date.fromisoformat(row["original_date"]) <= today for row in rows))
+
     async def test_monthly_irregular_and_single_seed_first_episode_when_auto_off(self):
         start = main.datetime.now(main.JAPAN_TZ).date() + timedelta(days=7)
         cases = [

@@ -49,6 +49,7 @@ class ExternalIngestApiTests(unittest.IsolatedAsyncioTestCase):
                 "artist": "虹ヶ咲学園スクールアイドル同好会",
                 "release_date": "2026-09-20",
                 "cover_url": "https://images.example.test/images/music/cd_external_001.jpg",
+                "cover_source_url": "https://www.lovelive-anime.jp/nijigasaki/img/cover.jpg",
                 "detail_html": "<p>详情</p>",
                 "source_url": "https://www.example.com/music/cd_external_001",
                 "tracks": [{"disc": "", "number": 1, "title": "曲目", "credits": {}}],
@@ -381,7 +382,7 @@ class ExternalIngestApiTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get("/api/admin/external-api-docs")
         self.assertEqual(response.status_code, 200)
         docs = response.json()
-        self.assertEqual([item["id"] for item in docs["resources"]], ["music", "program", "collabo", "news"])
+        self.assertEqual([item["id"] for item in docs["resources"]], ["music", "music_worker", "program", "collabo", "news"])
         self.assertEqual(docs["header"], "X-Nijidb-API-Key")
         self.assertTrue(all("key" not in item for item in docs["resources"]))
 

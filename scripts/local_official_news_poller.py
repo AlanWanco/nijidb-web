@@ -31,6 +31,7 @@ import json
 import math
 import os
 import random
+import signal
 import stat
 import sys
 import time
@@ -117,6 +118,12 @@ class PollerConfig:
     limit: int = 0
     refresh_existing: bool = False
     only: list[str] = field(default_factory=list)
+    music_enabled: bool = False
+    music_state_file: Path | None = None
+    music_api_key: str = ""
+    music_article_delay: float = 5.0
+    music_detail_delay: float = 5.0
+    music_backoff_seconds: float = 1800.0
 
 
 def env_float(name: str, default: float, minimum: float = 0) -> float:
@@ -130,6 +137,17 @@ def env_float(name: str, default: float, minimum: float = 0) -> float:
     if not math.isfinite(value) or value < minimum:
         raise PollerConfigError(f"环境变量 {name} 必须是不小于 {minimum:g} 的有限数字")
     return value
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise PollerConfigError(f"环境变量 {name} 必须是布尔值")
 
 
 def env_int(name: str, default: int, minimum: int = 0, maximum: int | None = None) -> int:
@@ -235,6 +253,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def build_config(args: argparse.Namespace) -> PollerConfig:
     base_url = os.getenv("NIJIDB_BASE_URL", "").strip().rstrip("/")
     api_key = os.getenv("NIJIDB_INGEST_API_KEY", "").strip()
+    music_api_key = os.getenv("NIJIDB_MUSIC_POLLER_API_KEY", "").strip()
+    music_enabled = env_bool("MUSIC_POLL_ENABLED", False)
+    music_state_raw = os.getenv("MUSIC_POLL_STATE_FILE", "").strip()
     proxy = os.getenv("NEWS_POLL_PROXY", "").strip()
     if proxy:
         proxy = validate_proxy_url(proxy)
@@ -252,12 +273,17 @@ def build_config(args: argparse.Namespace) -> PollerConfig:
     ):
         raise PollerConfigError("R2_IMAGE_PREFIX 格式无效")
     state_raw = os.getenv("NEWS_POLL_STATE_FILE", "").strip()
+    news_state_path = Path(state_raw).expanduser() if state_raw else default_state_path()
+    music_state_path = Path(music_state_raw).expanduser() if music_state_raw else news_state_path.with_name("music-poller.json")
+    if music_enabled and music_state_path.resolve() == news_state_path.resolve():
+        raise PollerConfigError("音乐与新闻状态文件不能相同")
 
     missing = [
         name
         for name, value in (
             ("NIJIDB_BASE_URL", base_url),
             ("NIJIDB_INGEST_API_KEY", api_key),
+            *(([("NIJIDB_MUSIC_POLLER_API_KEY", music_api_key)] if music_enabled else [])),
             ("NEWS_POLL_PROXY", proxy),
             ("R2_ENDPOINT", endpoint),
             ("R2_BUCKET", bucket),
@@ -271,6 +297,8 @@ def build_config(args: argparse.Namespace) -> PollerConfig:
         raise PollerConfigError(f"缺少环境变量：{', '.join(missing)}")
     if base_url:
         validate_http_url(base_url, "NIJIDB_BASE_URL")
+    if len(music_api_key) > 256:
+        raise PollerConfigError("NIJIDB_MUSIC_POLLER_API_KEY 不能超过 256 个字符")
     if endpoint:
         validate_http_url(endpoint, "R2_ENDPOINT")
     if public_base:
@@ -322,6 +350,12 @@ def build_config(args: argparse.Namespace) -> PollerConfig:
         limit=args.limit,
         refresh_existing=bool(args.refresh_existing),
         only=[str(name).strip() for name in args.only if str(name).strip()],
+        music_enabled=music_enabled,
+        music_state_file=music_state_path,
+        music_api_key=music_api_key,
+        music_article_delay=env_float("MUSIC_POLL_ARTICLE_DELAY_SECONDS", 5, 5),
+        music_detail_delay=env_float("MUSIC_POLL_DETAIL_DELAY_SECONDS", max(1.0, image_delay), 1),
+        music_backoff_seconds=env_float("MUSIC_POLL_BACKOFF_MINUTES", env_float("NEWS_POLL_BACKOFF_MINUTES", 30, 1), 1) * 60,
     )
 
 
@@ -609,6 +643,8 @@ class OfficialNewsPoller:
     def __init__(self, config: PollerConfig):
         self.config = config
         self.state = load_state(config.state_file)
+        self.stop_event = asyncio.Event()
+        self.official_cycle_lock = asyncio.Lock()
         self.production: dict[str, dict[str, Any]] = {}
         self.s3 = None
         if not config.dry_run:
@@ -1061,25 +1097,60 @@ class OfficialNewsPoller:
 
     async def run(self) -> int:
         lock = acquire_state_lock(self.config.state_file)
+        music_lock = None
+        tasks = []
+        loop = asyncio.get_running_loop()
+        registered_signals = []
         try:
-            return await self._run()
+            if self.config.music_enabled:
+                from scripts.music_poll_worker import MusicPoller
+
+                music = MusicPoller(self.config)
+                music_lock = acquire_state_lock(music.state_file)
+            for signum in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(signum, self.stop_event.set)
+                registered_signals.append(signum)
+            if self.config.music_enabled:
+                tasks.append(asyncio.create_task(
+                    music.run(self.stop_event, self.official_cycle_lock, music_lock, self._wait)
+                ))
+            tasks.append(asyncio.create_task(self._run()))
+            results = await asyncio.gather(*tasks)
+            return int(any(results))
         finally:
-            try:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-            finally:
-                lock.close()
+            self.stop_event.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for signum in registered_signals:
+                loop.remove_signal_handler(signum)
+            if music_lock is not None:
+                fcntl.flock(music_lock.fileno(), fcntl.LOCK_UN)
+                music_lock.close()
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            lock.close()
+            if self.s3 is not None:
+                self.s3.close()
+
+    async def _wait(self, seconds: float) -> None:
+        try:
+            await asyncio.wait_for(self.stop_event.wait(), timeout=max(0.01, seconds))
+        except asyncio.TimeoutError:
+            pass
 
     async def _run(self) -> int:
         config = self.config
-        while True:
+        while not self.stop_event.is_set():
             remaining = float(self.state.get("backoff_until") or 0) - time.time()
             if remaining > 0 and not config.once:
-                log(f"官网上次返回 403，退避中（剩余约 {remaining / 60:.0f} 分钟）")
-                await asyncio.sleep(min(remaining, 300))
+                log(f"官网新闻上次返回 403，退避中（剩余约 {remaining / 60:.0f} 分钟）")
+                await self._wait(min(remaining, 300))
                 continue
             failed = False
             try:
-                result = await self.run_pass()
+                async with self.official_cycle_lock:
+                    result = await self.run_pass()
                 stats = self.state["stats"]
                 log(
                     f"本趟完成：检查 {result['handled']} 篇 | 累计提交 {stats['pushed']}"
@@ -1098,7 +1169,6 @@ class OfficialNewsPoller:
             if config.once:
                 return 1 if failed else 0
             if failed:
-                # 代理刚重启、网络抖动之类的问题不必等满整个休息窗口
                 wait = min(config.rest_min_seconds, 300.0)
                 log(f"本趟失败，{wait / 60:.0f} 分钟后重试")
             else:
@@ -1107,7 +1177,8 @@ class OfficialNewsPoller:
                     f"休息 {int(wait // 60)} 分 {int(wait % 60)} 秒"
                     f"（随机区间 {config.rest_min_seconds / 60:g}–{config.rest_max_seconds / 60:g} 分钟）"
                 )
-            await asyncio.sleep(wait)
+            await self._wait(wait)
+        return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1135,4 +1206,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    sys.modules["scripts.local_official_news_poller"] = sys.modules[__name__]
     raise SystemExit(main())

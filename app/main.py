@@ -72,6 +72,15 @@ from app.news import (
     truncate_news_summary,
     upsert_news_record,
 )
+from app.music import (
+    SOURCE_URL as MUSIC_SOURCE_URL,
+    add_credit as music_add_credit,
+    clean_text,
+    parse_extras as parse_music_extras,
+    parse_plain_tracks as music_parse_plain_tracks,
+    parse_release as parse_music_release,
+    release_fingerprint as music_release_fingerprint,
+)
 from app.news_fetch import (
     NEWS_HEADERS,
     OFFICIAL_BROWSER_HEADERS,
@@ -88,7 +97,7 @@ from app.news_fetch import (
 
 from app.program_api_cache import PublicProgramCache, database_revision
 
-SOURCE_URL = "https://www.lovelive-anime.jp/nijigasaki/cd.php"
+SOURCE_URL = MUSIC_SOURCE_URL
 EVENTERNOTE_EVENTS_URL = "https://events.nijigaku.fans/api/events"
 MAX_POLL_INTERVAL_MINUTES = 5 * 60
 MANUAL_SOURCE_MAX_BYTES = 8 * 1024 * 1024
@@ -97,10 +106,12 @@ REMOTE_NEWS_INGEST_MAX_IMAGES = 512
 REMOTE_NEWS_INGEST_MAX_IMAGE_BYTES = 20 * 1024 * 1024
 REMOTE_NEWS_INGEST_API_KEY_ENV = "NIJIDB_INGEST_API_KEY"
 REMOTE_MUSIC_INGEST_API_KEY_ENV = "NIJIDB_MUSIC_INGEST_API_KEY"
+REMOTE_MUSIC_POLLER_API_KEY_ENV = "NIJIDB_MUSIC_POLLER_API_KEY"
 REMOTE_PROGRAM_INGEST_API_KEY_ENV = "NIJIDB_PROGRAM_INGEST_API_KEY"
 REMOTE_COLLABO_INGEST_API_KEY_ENV = "NIJIDB_COLLABO_INGEST_API_KEY"
 EXTERNAL_INGEST_KEY_CONFIG = {
-    "music": {"label": "音乐", "env_name": REMOTE_MUSIC_INGEST_API_KEY_ENV},
+    "music": {"label": "音乐档案（旧版导入）", "env_name": REMOTE_MUSIC_INGEST_API_KEY_ENV},
+    "music_worker": {"label": "音乐自动更新器", "env_name": REMOTE_MUSIC_POLLER_API_KEY_ENV},
     "program": {"label": "节目", "env_name": REMOTE_PROGRAM_INGEST_API_KEY_ENV},
     "collabo": {"label": "联动立绘", "env_name": REMOTE_COLLABO_INGEST_API_KEY_ENV},
     "news": {"label": "新闻", "env_name": REMOTE_NEWS_INGEST_API_KEY_ENV},
@@ -212,6 +223,7 @@ ensure_runtime_directory(BACKUP_DIR, "数据库备份目录")
 os.chmod(BACKUP_DIR, 0o700)
 stop_event = asyncio.Event()
 sync_lock = asyncio.Lock()
+music_notification_lock = asyncio.Lock()
 news_run_lock = asyncio.Lock()
 official_site_health_lock = asyncio.Lock()
 official_site_backoff_until = 0.0
@@ -450,6 +462,10 @@ def init_db() -> None:
           key_hash TEXT NOT NULL,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS music_worker_notifications (
+          id TEXT PRIMARY KEY, release_id TEXT NOT NULL UNIQUE,
+          snapshot TEXT NOT NULL, created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS releases (
           id TEXT PRIMARY KEY, title TEXT NOT NULL, subtitle TEXT, artist TEXT,
@@ -3977,141 +3993,30 @@ def save_settings(values: dict[str, str]) -> None:
         conn.executemany("INSERT INTO settings VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", values.items())
 
 
-def clean_text(node) -> str:
-    return " ".join(node.get_text(" ", strip=True).split()) if node else ""
+
+def parse_release(release_id: str, content: Any, entry_image: Any = None) -> dict[str, str]:
+    """Backward-compatible alias for the shared app.music parser."""
+    return parse_music_release(release_id, content, entry_image, source_url=SOURCE_URL)
 
 
 def parse_plain_tracks(spec) -> list[dict[str, object]]:
-    tracks: list[dict[str, object]] = []
-    blocks = spec.select("p.list")
-    if not blocks and getattr(spec, "name", "") == "dd":
-        blocks = [spec]
-    for block in blocks:
-        current: dict[str, object] | None = None
-        for raw_line in block.get_text("\n").splitlines():
-            line = re.sub(r"[ \t]+", " ", raw_line).strip(" \u3000")
-            if not line:
-                continue
-            track_match = re.match(r"^(\d{1,3})(?:[.．、]\s*|\s+)(.+)$", line)
-            if track_match:
-                if current:
-                    tracks.append(current)
-                current = {"disc": "", "number": int(track_match.group(1)), "title": track_match.group(2).strip(), "credits": {}}
-                continue
-            if current and (":" in line or "：" in line):
-                key, value = re.split(r"[：:]", line, maxsplit=1)
-                key = re.sub(r"\s*・\s*", "・", key).replace(" ", "").strip()
-                add_credit(current["credits"], key, value.strip())
-        if current:
-            tracks.append(current)
-    return tracks
+    """Backward-compatible alias for the shared app.music parser."""
+    return music_parse_plain_tracks(spec)
 
 
 def add_credit(credits: dict[str, str], key: str, value: str) -> None:
-    normalized = re.sub(r"\s+", "", key).strip("：:")
-    roles = [part for part in re.split(r"[・/／]", normalized) if part]
-    if len(roles) > 1 and all(role in {"作詞", "作曲", "編曲"} for role in roles):
-        for role in roles:
-            credits[role] = value
-    else:
-        credits[normalized] = value
+    """Backward-compatible alias for the shared app.music parser."""
+    music_add_credit(credits, key, value)
 
 
 def parse_extras(content) -> list[dict[str, object]]:
-    extras: list[dict[str, object]] = []
-    for panel in content.select(".tokutenbox, .kokuchibox"):
-        heading = panel.select_one(".tokutentitle")
-        items = [clean_text(item) for item in panel.select("li") if clean_text(item)]
-        body = clean_text(panel)
-        if not heading and not items and panel.select_one("a[href]"):
-            continue
-        if heading:
-            body = body.removeprefix(clean_text(heading)).strip()
-        extras.append({"type": "bonus" if "tokutenbox" in (panel.get("class") or []) else "notice", "title": clean_text(heading) or "相关说明", "entries": items or ([body] if body else [])})
-    for link in content.select("a[href]"):
-        url = urljoin(SOURCE_URL, link["href"])
-        label = clean_text(link)
-        if not label or url.startswith("#") or any(extra.get("url") == url for extra in extras):
-            continue
-        extras.append({"type": "link", "title": label, "url": url})
-    return extras
-
-
-def parse_release(release_id: str, content, entry_image=None) -> dict[str, str]:
-    release_id = str(release_id or "").strip()
-    if not REMOTE_INGEST_ID_PATTERN.fullmatch(release_id):
-        raise ValueError("官网音乐发行 ID 格式无效")
-    title = content.select_one(".title") if content else None
-    subtitle = title.find("span") if title else None
-    entry_title = clean_text(title) or (entry_image.get("alt", "").strip() if entry_image else "") or release_id
-    specs = content.select(".spec") if content else []
-    fields: dict[str, str] = {}
-    tracks: list[dict[str, object]] = []
-    plain_track_sources = []
-    for spec in specs:
-        for dt in spec.find_all("dt", recursive=False):
-            dd = dt.find_next_sibling("dd")
-            if dd:
-                field_name = clean_text(dt).strip("【】")
-                fields[field_name] = clean_text(dd)
-                if field_name in {"収録内容", "仕様", "収録曲"}:
-                    plain_track_sources.append(dd)
-        for track_list in spec.select("ul.track"):
-            for number, track in enumerate(track_list.find_all("li", recursive=False), 1):
-                track_copy = BeautifulSoup(str(track), "html.parser").find("li")
-                credits: dict[str, str] = {}
-                credit_list = track_copy.find("dl", recursive=False) if track_copy else None
-                if credit_list:
-                    for credit_name in credit_list.find_all("dt", recursive=False):
-                        credit_value = credit_name.find_next_sibling("dd")
-                        if credit_value:
-                            add_credit(credits, clean_text(credit_name), clean_text(credit_value))
-                    credit_list.decompose()
-                media_label = track_list.find_previous("p", class_="media")
-                track_title = re.sub(r"^\d{1,3}(?:[.．、]|\s)\s*", "", clean_text(track_copy))
-                tracks.append({"disc": media_label.get_text(strip=True) if media_label else "", "number": number, "title": track_title, "credits": credits})
-        if not tracks:
-            for track_source in plain_track_sources:
-                tracks.extend(parse_plain_tracks(track_source))
-    image = (content.select_one(".cover img") if content else None) or entry_image
-    detail_copy = BeautifulSoup(str(content or ""), "html.parser") if content else BeautifulSoup("", "html.parser")
-    for detail_image in detail_copy.select("img[src]"):
-        detail_image["src"] = urljoin(SOURCE_URL, detail_image["src"])
-        detail_image["loading"] = "lazy"
-    detail_html = str(detail_copy) if content else ""
-    extras = parse_extras(content) if content else []
-    record = {
-        "id": release_id,
-        "title": entry_title,
-        "subtitle": clean_text(subtitle),
-        "artist": fields.get("アーティスト", ""),
-        "release_date": fields.get("発売日") or fields.get("一般発売日") or fields.get("劇場先行発売日", ""),
-        "price": fields.get("価格", ""),
-        "cover_url": (
-            urljoin(SOURCE_URL, image.get("src", ""))
-            if image and valid_official_image_url(urljoin(SOURCE_URL, image.get("src", "")))
-            else ""
-        ),
-        "detail_html": detail_html,
-        "source_url": f"{SOURCE_URL}#{release_id}",
-        "tracks_json": json.dumps(tracks, ensure_ascii=False),
-        "spec_json": json.dumps(fields, ensure_ascii=False),
-        "extras_json": json.dumps(extras, ensure_ascii=False),
-    }
-    record["fingerprint"] = release_fingerprint(record)
-    return record
+    """Backward-compatible alias for the shared app.music parser."""
+    return parse_music_extras(content, SOURCE_URL)
 
 
 def release_fingerprint(record: dict[str, Any]) -> str:
-    return hashlib.sha256(
-        (
-            str(record.get("title") or "")
-            + str(record.get("detail_html") or "")
-            + str(record.get("cover_url") or "")
-            + str(record.get("tracks_json") or "[]")
-            + str(record.get("extras_json") or "[]")
-        ).encode()
-    ).hexdigest()
+    """Backward-compatible alias for the shared app.music fingerprint."""
+    return music_release_fingerprint(record)
 
 
 def sync_exception_label(exc: BaseException) -> str:
@@ -4620,16 +4525,41 @@ def release_change_details(item: dict[str, Any]) -> list[str]:
     return details[:48]
 
 
+def onebot_result(response: httpx.Response) -> Any:
+    response.raise_for_status()
+    result = response.json()
+    if not isinstance(result, dict) or result.get("status") != "ok" or result.get("retcode") != 0:
+        raise ValueError("OneBot 返回发送失败")
+    return result.get("data")
+
+
 async def notify(changed: list[dict[str, Any]], config: dict[str, str], category: str) -> None:
     if not changed or not config.get("onebot_url") or not config.get("onebot_target"):
         return
-    lines = [f"[{category}]", f"虹咲音乐资料有 {len(changed)} 项更新："]
-    for item in changed[:10]:
-        lines.append(f"• {item['title']}")
-        lines.extend(f"  {detail}" for detail in release_change_details(item))
-    if len(changed) > 10:
-        lines.append(f"以及其他 {len(changed) - 10} 项")
-    await send_onebot("\n".join(lines), config)
+    onebot_url = validate_onebot_url(config["onebot_url"])
+    _path, target_key, target = validate_onebot_target(config["onebot_target"])
+    action = "/send_group_forward_msg" if target_key == "group_id" else "/send_private_forward_msg"
+    headers = {"Authorization": f"Bearer {config['onebot_token']}"} if config.get("onebot_token") else {}
+    async with httpx.AsyncClient(timeout=20, trust_env=False, follow_redirects=False) as client:
+        identity = onebot_result(await client.post(onebot_url + "/get_login_info", json={}, headers=headers))
+        sender = str(identity.get("user_id") or "") if isinstance(identity, dict) else ""
+        if not re.fullmatch(r"[1-9][0-9]{0,18}", sender):
+            raise ValueError("OneBot 未返回有效的机器人账号")
+
+        def node(content: list[dict[str, Any]]) -> dict[str, Any]:
+            return {"type": "node", "data": {"name": config.get("onebot_profile") or "Nijidb", "uin": sender, "content": content}}
+        for offset in range(0, len(changed), 10):
+            nodes = []
+            for item in changed[offset:offset + 10]:
+                lines = [f"[{category}]", str(item["title"]), *release_change_details(item)]
+                if valid_external_url(item.get("source_url")):
+                    lines.append(str(item["source_url"]))
+                nodes.append(node([{"type": "text", "data": {"text": "\\n".join(lines)}}]))
+                cover = item.get("cover_url")
+                if valid_r2_public_image_url(cover):
+                    nodes.append(node([{"type": "image", "data": {"file": cover}}]))
+            response = await client.post(onebot_url + action, json={target_key: target, "messages": nodes}, headers=headers)
+            onebot_result(response)
 
 
 def news_image_value(image: Any) -> str:
@@ -6291,6 +6221,7 @@ def remote_music_record(payload: dict[str, Any]) -> dict[str, Any]:
     if not title:
         raise HTTPException(400, "音乐发行标题不能为空")
     detail_html = remote_ingest_text(release.get("detail_html"), "音乐发行详情 HTML", 2 * 1024 * 1024, strip=False)
+    cover_url = remote_ingest_url(release.get("cover_url"), "音乐发行封面地址")
     record: dict[str, Any] = {
         "id": release_id,
         "title": title,
@@ -6298,7 +6229,7 @@ def remote_music_record(payload: dict[str, Any]) -> dict[str, Any]:
         "artist": remote_ingest_text(release.get("artist"), "音乐发行艺术家", 1000),
         "release_date": remote_ingest_text(release.get("release_date"), "音乐发行日期", 200),
         "price": remote_ingest_text(release.get("price"), "音乐发行价格", 500),
-        "cover_url": remote_ingest_url(release.get("cover_url"), "音乐发行封面地址"),
+        "cover_url": cover_url,
         "detail_html": detail_html,
         "source_url": remote_ingest_url(release.get("source_url"), "音乐发行来源地址"),
         "tracks_json": json.dumps(remote_music_tracks(release), ensure_ascii=False),
@@ -6510,14 +6441,14 @@ def external_ingest_api_docs() -> dict[str, Any]:
         "resources": [
             {
                 "id": "music",
-                "label": "音乐档案",
+                "label": "音乐档案（兼容导入）",
                 "method": "POST",
                 "path": "/api/ingest/music",
                 "key_env": REMOTE_MUSIC_INGEST_API_KEY_ENV,
                 "configured": key_statuses["music"]["configured"],
                 "key_source": key_statuses["music"]["source"],
                 "key_updated_at": key_statuses["music"]["updated_at"],
-                "description": "提交单个音乐发行的完整快照；id 已存在时更新，不存在时新增。",
+                "description": "兼容已有音乐导入客户端；新音乐监控 worker 使用独立的“音乐监控”密钥。",
                 "fields": [
                     {"name": "release.id", "required": True, "description": "稳定的发行 ID，只能使用字母、数字、下划线和连字符。"},
                     {"name": "release.title", "required": True, "description": "发行标题。"},
@@ -6539,6 +6470,41 @@ def external_ingest_api_docs() -> dict[str, Any]:
                         "cover_url": "https://images.example.com/images/music/cd_external_001.jpg",
                         "detail_html": "<p>发行详情。</p>",
                         "source_url": "https://www.example.com/music/cd_external_001",
+                        "tracks": [{"disc": "", "number": 1, "title": "曲目标题", "credits": {}}],
+                        "specs": {"规格": "CD"},
+                        "extras": [],
+                    }
+                },
+            },
+            {
+                "id": "music_worker",
+                "label": "音乐监控",
+                "method": "POST",
+                "path": "/api/ingest/music-worker",
+                "key_env": REMOTE_MUSIC_POLLER_API_KEY_ENV,
+                "configured": key_statuses["music_worker"]["configured"],
+                "key_source": key_statuses["music_worker"]["source"],
+                "key_updated_at": key_statuses["music_worker"]["updated_at"],
+                "description": "用于同容器音乐监控 worker 的单发行快照导入；变化时由网站使用保存的 OneBot 配置发送更新通知。",
+                "fields": [
+                    {"name": "release.id / release.title", "required": True, "description": "官网发行 ID 和标题。"},
+                    {"name": "release.subtitle / artist / release_date / price", "required": False, "description": "发行基本资料。"},
+                    {"name": "release.cover_url", "required": False, "description": "先归档至本实例 R2 的封面公开地址；原始封面 URL 保存在 worker 独立状态文件中。"},
+                    {"name": "release.detail_html", "required": False, "description": "详情 HTML，引用图片使用当前可访问的公开地址。"},
+                    {"name": "release.source_url", "required": False, "description": "官网目录详情链接。"},
+                    {"name": "release.tracks / specs / extras", "required": False, "description": "曲目数组、规格对象和特典数组。"},
+                    {"name": "release.position", "required": False, "description": "Worker 预留为 999999；服务端保留现有顺序或追加新发行。"},
+                ],
+                "example": {
+                    "release": {
+                        "id": "cd01_9999",
+                        "title": "虹咲音乐发行",
+                        "artist": "虹ヶ咲学園スクールアイドル同好会",
+                        "release_date": "2026年9月20日(日)",
+                        "price": "￥3,300",
+                        "cover_url": "https://images.alanwanco.xyz/images/cd01_9999.jpg",
+                        "detail_html": "<div class=\"box\"><img src=\"https://images.alanwanco.xyz/images/cd01_9999.jpg\"></div>",
+                        "source_url": "https://www.lovelive-anime.jp/nijigasaki/cd.php#cd01_9999",
                         "tracks": [{"disc": "", "number": 1, "title": "曲目标题", "credits": {}}],
                         "specs": {"规格": "CD"},
                         "extras": [],
@@ -7747,6 +7713,28 @@ async def api_logout() -> JSONResponse:
     return response
 
 
+def _read_music_poll_status() -> dict[str, Any]:
+    configured = bool(external_api_key_status("music_worker")["configured"])
+    state_raw = os.getenv("MUSIC_POLL_STATE_FILE", "").strip()
+    news_state = os.getenv("NEWS_POLL_STATE_FILE", "").strip()
+    path = Path(state_raw).expanduser() if state_raw else Path(news_state).expanduser().with_name("music-poller.json") if news_state else None
+    if path is None or path.is_symlink() or not path.is_file():
+        return {"configured": configured, "last_pass_at": None, "stats": None}
+    try:
+        raw = path.read_bytes()
+        if len(raw) > 4 * 1024 * 1024:
+            raise ValueError("音乐状态文件过大")
+        state = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError):
+        return {"configured": configured, "last_pass_at": None, "stats": None}
+    stats = state.get("stats") if isinstance(state, dict) else None
+    if not isinstance(stats, dict):
+        stats = {}
+    visible = ("passes", "submitted", "seeded", "skipped", "errors", "last_inspected", "last_changed")
+    return {"configured": configured, "last_pass_at": state.get("last_pass_at") if isinstance(state, dict) else None,
+            "stats": {key: stats[key] for key in visible if key in stats}}
+
+
 @app.get("/api/admin/settings")
 async def api_get_settings(request: Request) -> dict[str, Any]:
     role = require_api_admin(request)
@@ -7768,7 +7756,7 @@ async def api_get_settings(request: Request) -> dict[str, Any]:
     slow_refresh["delay_seconds"] = int(
         normalized_settings(config)["news_slow_refresh_delay_seconds"]
     )
-    return {
+    result = {
         "role": role,
         "settings": normalized_settings(public_settings(), include_onebot_token=False),
         "activity_logs": recent_database_logs(200),
@@ -7777,6 +7765,11 @@ async def api_get_settings(request: Request) -> dict[str, Any]:
         "news_slow_refresh": slow_refresh,
         "source_urls": {"music": SOURCE_URL, "news": NEWS_TOPICS_URL},
     }
+    try:
+        result["music_poll"] = _read_music_poll_status()
+    except Exception:
+        result["music_poll"] = {"configured": False, "running": None, "last_pass_at": None, "stats": None}
+    return result
 
 
 @app.patch("/api/admin/settings")
@@ -7859,6 +7852,107 @@ async def api_remote_music_ingest(request: Request) -> dict[str, Any]:
         "changed": changed,
         "position": record["position"],
     }
+
+
+async def flush_music_worker_notifications() -> dict[str, int]:
+    sent = 0
+    async with music_notification_lock:
+        config = settings()
+        if config.get("onebot_url") and config.get("onebot_target"):
+            with db() as conn:
+                rows = conn.execute("SELECT id,snapshot FROM music_worker_notifications ORDER BY created_at LIMIT 10").fetchall()
+            for row in rows:
+                try:
+                    await notify([json.loads(row["snapshot"])], config, "音乐目录更新")
+                except Exception as exc:
+                    print(f"[music-ingest] notification pending: {type(exc).__name__}", flush=True)
+                    break
+                with db() as conn:
+                    conn.execute("DELETE FROM music_worker_notifications WHERE id = ?", (row["id"],))
+                sent += 1
+        with db() as conn:
+            pending = conn.execute("SELECT COUNT(*) FROM music_worker_notifications").fetchone()[0]
+    return {"sent": sent, "pending": pending}
+
+
+def music_worker_status() -> dict[str, Any]:
+    with db() as conn:
+        pending = conn.execute("SELECT COUNT(*) FROM music_worker_notifications").fetchone()[0]
+        last = conn.execute("SELECT value FROM settings WHERE key = 'music_worker_last_ingest_at'").fetchone()
+    return {
+        "configured": bool(external_api_key_status("music_worker")["configured"]),
+        "last_ingest_at": last[0] if last else None,
+        "pending_notifications": pending,
+    }
+
+
+@app.get("/api/ingest/music-worker", include_in_schema=False)
+async def api_music_worker_status(request: Request) -> dict[str, Any]:
+    require_external_ingest_key(request, REMOTE_MUSIC_POLLER_API_KEY_ENV, "音乐监控")
+    return {"version": 1, **music_worker_status()}
+
+
+@app.post("/api/ingest/music-worker/notifications", include_in_schema=False)
+async def api_music_worker_notifications(request: Request) -> dict[str, int]:
+    require_external_ingest_key(request, REMOTE_MUSIC_POLLER_API_KEY_ENV, "音乐监控")
+    return await flush_music_worker_notifications()
+
+
+@app.post("/api/ingest/music-worker", include_in_schema=False)
+async def api_remote_music_worker_ingest(request: Request) -> dict[str, Any]:
+    require_external_ingest_key(request, REMOTE_MUSIC_POLLER_API_KEY_ENV, "音乐监控")
+    payload = await read_external_ingest_request(request, "音乐")
+    raw = payload.get("release", payload)
+    if not isinstance(raw, dict):
+        raise HTTPException(400, "音乐发行内容格式无效")
+    if raw.get("cover_local_path"):
+        raise HTTPException(400, "音乐 worker 不能提交本地文件路径")
+    try:
+        record = remote_music_record(payload)
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise HTTPException(400, "音乐导入内容格式无效") from exc
+    if record["cover_url"] and not valid_r2_public_image_url(record["cover_url"]):
+        raise HTTPException(400, "音乐封面必须归档到本实例 R2")
+    source_cover = str(raw.get("cover_source_url") or "").strip()
+    if source_cover and not is_allowed_official_image_url(source_cover):
+        raise HTTPException(400, "音乐原始封面地址不在允许的官网域名内")
+    baseline = payload.get("baseline") is True
+    now = datetime.now(timezone.utc).isoformat()
+    async with sync_lock:
+        with db() as conn:
+            row = conn.execute("SELECT * FROM releases WHERE id = ?", (record["id"],)).fetchone()
+            previous = dict(row) if row else None
+            changed = previous is None or any(previous.get(key) != record[key] for key in (
+                "title", "subtitle", "artist", "release_date", "price", "cover_url",
+                "detail_html", "source_url", "tracks_json", "spec_json", "extras_json"))
+            record["position"] = previous["position"] if previous else conn.execute(
+                "SELECT COALESCE(MAX(position), -1) + 1 FROM releases").fetchone()[0]
+            if changed:
+                conn.execute("""INSERT INTO releases
+                    (id,title,subtitle,artist,release_date,price,cover_url,detail_html,source_url,fingerprint,
+                     updated_at,position,tracks_json,spec_json,extras_json)
+                    VALUES (:id,:title,:subtitle,:artist,:release_date,:price,:cover_url,:detail_html,:source_url,
+                            :fingerprint,:updated_at,:position,:tracks_json,:spec_json,:extras_json)
+                    ON CONFLICT(id) DO UPDATE SET title=excluded.title,subtitle=excluded.subtitle,
+                      artist=excluded.artist,release_date=excluded.release_date,price=excluded.price,
+                      cover_url=excluded.cover_url,detail_html=excluded.detail_html,source_url=excluded.source_url,
+                      fingerprint=excluded.fingerprint,updated_at=excluded.updated_at,position=excluded.position,
+                      tracks_json=excluded.tracks_json,spec_json=excluded.spec_json,extras_json=excluded.extras_json""",
+                    {**record, "updated_at": now})
+                if not baseline:
+                    item = {**record, "_previous": previous,
+                            "_cover_changed": (previous or {}).get("cover_url", "") != record["cover_url"]}
+                    conn.execute("""INSERT INTO music_worker_notifications(id,release_id,snapshot,created_at)
+                        VALUES (?,?,?,?) ON CONFLICT(release_id) DO UPDATE SET
+                        id=excluded.id,snapshot=excluded.snapshot,created_at=excluded.created_at""",
+                        (secrets.token_hex(16), record["id"], json.dumps(item, ensure_ascii=False), now))
+            conn.execute("""INSERT INTO settings(key,value) VALUES ('music_worker_last_ingest_at',?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (now,))
+    if changed:
+        log_database_activity("music", f"自动导入音乐：{record['title'][:80]}")
+    delivery = await flush_music_worker_notifications()
+    return {"id": record["id"], "created": previous is None, "changed": changed,
+            "position": record["position"], "notifications": delivery}
 
 
 @app.post("/api/ingest/program", include_in_schema=False)

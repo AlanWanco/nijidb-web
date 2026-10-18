@@ -524,8 +524,6 @@ class MusicPoller:
                 await self.load_site_releases(api) if self.config.base_url else {}
             )
             entries, dynamic, failed = await self.get_catalog(official)
-            if self.config.music_max_pages < 1:
-                raise PollerConfigError("MUSIC_POLL_MAX_PAGES 必须至少为 1")
             if self.config.limit:
                 entries = entries[: self.config.limit]
                 selected = {entry[0] for entry in entries}
@@ -619,13 +617,9 @@ class MusicPoller:
                     log(
                         f"官网音乐访问受限，退避 {self.config.music_backoff_seconds / 60:g} 分钟"
                     )
-                except (
-                    httpx.HTTPError,
-                    ValueError,
-                    RuntimeError,
-                    BotoCoreError,
-                    ClientError,
-                ) as exc:
+                except Exception as exc:
+                    # Music monitoring is auxiliary: a defect here must never stop
+                    # the news poller sharing this process. Log the type only.
                     failed = True
                     self.state["stats"]["errors"] += 1
                     log(f"音乐轮询失败：{type(exc).__name__}")

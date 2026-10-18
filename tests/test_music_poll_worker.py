@@ -120,6 +120,17 @@ class MusicPollerTests(unittest.IsolatedAsyncioTestCase):
             poller = MusicPoller(config)
         return poller
 
+    async def test_run_pass_with_real_config_completes_and_marks_initialized(self):
+        poller = self.make_poller(tempfile.mkdtemp())
+        poller.api_json = AsyncMock(return_value={"version": 1, "sent": 0, "pending": 0})
+        poller.load_site_releases = AsyncMock(return_value={})
+        poller.get_catalog = AsyncMock(return_value=([], {}, set()))
+        result = await poller.run_pass()
+        self.assertEqual(result["inspected"], 0)
+        self.assertTrue(poller.state["initialized"])
+        self.assertEqual(poller.state["stats"]["passes"], 1)
+        self.assertTrue(poller.state_file.exists())
+
     async def test_existing_r2_catalog_is_seeded_then_skipped(self):
         record = music_record()
         poller = self.make_poller(tempfile.mkdtemp())
@@ -166,6 +177,32 @@ class MusicPollerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(httpx.ConnectError):
             await poller.process_release(None, None, record, {"id": record["id"], "cover_url": "https://images.example.test/images/cd01_9999.jpg"})
         self.assertNotIn(record["id"], poller.state["releases"])
+
+    async def test_unexpected_music_failure_does_not_stop_news(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = music_config(
+                once=True,
+                dry_run=True,
+                state_file=Path(directory) / "news.json",
+                music_state_file=Path(directory) / "music.json",
+            )
+        news = OfficialNewsPoller(config)
+        news.run_pass = AsyncMock(
+            return_value={"handled": 0, "stats": news.state["stats"]}
+        )
+
+        class BrokenMusic:
+            state_file = config.music_state_file
+            s3 = None
+
+            async def run(self, *args, **kwargs):
+                raise AttributeError("simulated defect")
+
+        with patch(
+            "scripts.music_poll_worker.MusicPoller", return_value=BrokenMusic()
+        ):
+            self.assertEqual(await news.run(), 1)
+        news.run_pass.assert_awaited_once()
 
     async def test_news_only_config_does_not_require_music_key_or_construct_worker(self):
         with patch.dict(os.environ, {}, clear=True):

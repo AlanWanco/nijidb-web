@@ -1111,9 +1111,11 @@ class OfficialNewsPoller:
                 loop.add_signal_handler(signum, self.stop_event.set)
                 registered_signals.append(signum)
             if self.config.music_enabled:
-                tasks.append(asyncio.create_task(
-                    music.run(self.stop_event, self.official_cycle_lock, music_lock, self._wait)
-                ))
+                tasks.append(
+                    asyncio.create_task(
+                        self._supervise_music(music, music_lock)
+                    )
+                )
             tasks.append(asyncio.create_task(self._run()))
             results = await asyncio.gather(*tasks)
             return int(any(results))
@@ -1132,6 +1134,18 @@ class OfficialNewsPoller:
             lock.close()
             if self.s3 is not None:
                 self.s3.close()
+
+    async def _supervise_music(self, music, music_lock) -> int:
+        """Contain unexpected music failures so news polling keeps running."""
+        try:
+            return await music.run(
+                self.stop_event, self.official_cycle_lock, music_lock, self._wait
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log(f"音乐监控异常退出，新闻轮询继续：{type(exc).__name__}")
+            return 1
 
     async def _wait(self, seconds: float) -> None:
         try:

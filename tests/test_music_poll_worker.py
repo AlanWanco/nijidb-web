@@ -131,6 +131,22 @@ class MusicPollerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(poller.state["stats"]["passes"], 1)
         self.assertTrue(poller.state_file.exists())
 
+    async def test_run_pass_releases_shared_lock_between_official_requests(self):
+        poller = self.make_poller(tempfile.mkdtemp())
+        lock = asyncio.Lock()
+        observed = []
+
+        async def catalog(official, cycle_lock=None):
+            observed.append(lock.locked())
+            return [], {}, set()
+
+        poller.get_catalog = catalog
+        poller.load_site_releases = AsyncMock(return_value={})
+        poller.api_json = AsyncMock(return_value={"version": 1})
+        await poller.run_pass(lock)
+        self.assertEqual(observed, [False])
+        self.assertFalse(lock.locked())
+
     async def test_existing_r2_catalog_is_seeded_then_skipped(self):
         record = music_record()
         poller = self.make_poller(tempfile.mkdtemp())

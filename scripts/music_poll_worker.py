@@ -9,6 +9,7 @@ import math
 import random
 import re
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urljoin, urlparse
@@ -264,10 +265,14 @@ class MusicPoller:
                 request=response.request,
             )
 
-    async def get_catalog(self, client: httpx.AsyncClient) -> tuple[list, dict, set]:
-        response = await self.official_response(
-            client, "GET", SOURCE_URL, headers=OFFICIAL_BROWSER_HEADERS
-        )
+    async def get_catalog(
+        self, client: httpx.AsyncClient, cycle_lock=None
+    ) -> tuple[list, dict, set]:
+        guard = cycle_lock if cycle_lock is not None else nullcontext()
+        async with guard:
+            response = await self.official_response(
+                client, "GET", SOURCE_URL, headers=OFFICIAL_BROWSER_HEADERS
+            )
         entries, missing = parse_music_listing(response.text)
         if self.config.limit:
             entries = entries[: self.config.limit]
@@ -277,13 +282,14 @@ class MusicPoller:
         for release_id in missing:
             await asyncio.sleep(self.config.music_detail_delay)
             try:
-                response = await self.official_response(
-                    client,
-                    "POST",
-                    urljoin(SOURCE_URL, "cd_detail.php"),
-                    json=release_id.removeprefix("cd"),
-                    headers=OFFICIAL_BROWSER_HEADERS,
-                )
+                async with guard:
+                    response = await self.official_response(
+                        client,
+                        "POST",
+                        urljoin(SOURCE_URL, "cd_detail.php"),
+                        json=release_id.removeprefix("cd"),
+                        headers=OFFICIAL_BROWSER_HEADERS,
+                    )
                 value = response.json()
                 if not isinstance(value, str):
                     raise ValueError("官网音乐详情格式无效")
@@ -422,7 +428,9 @@ class MusicPoller:
         api: httpx.AsyncClient,
         record: dict,
         previous: dict | None,
+        cycle_lock=None,
     ) -> str:
+        guard = cycle_lock if cycle_lock is not None else nullcontext()
         release_id = record["id"]
         saved = self.state["releases"].get(release_id, {})
         signature = music_content_signature(record)
@@ -436,7 +444,8 @@ class MusicPoller:
             # Seed known records on startup or after state loss; never rewrite all historical releases.
             image_state = {}
             if source and not self.config.dry_run:
-                _data, image_state = await self.fetch_cover(official, source, {})
+                async with guard:
+                    _data, image_state = await self.fetch_cover(official, source, {})
             self.state["releases"][release_id] = {
                 **image_state,
                 "source_signature": signature,
@@ -452,7 +461,8 @@ class MusicPoller:
             )
         data, image_state = None, {}
         if source:
-            data, image_state = await self.fetch_cover(official, source, saved)
+            async with guard:
+                data, image_state = await self.fetch_cover(official, source, saved)
         content_changed = saved.get("source_signature") != signature
         bytes_changed = bool(
             saved.get("cover_sha256")
@@ -474,7 +484,8 @@ class MusicPoller:
             if (
                 data is None
             ):  # Conditional 304 but the site lost its cover; re-fetch before uploading.
-                data, image_state = await self.fetch_cover(official, source, {})
+                async with guard:
+                    data, image_state = await self.fetch_cover(official, source, {})
             cover_url = await asyncio.to_thread(self.archive_cover, data)
         else:
             cover_url = current_cover if archived else ""
@@ -507,7 +518,7 @@ class MusicPoller:
             return "seeded"
         return "changed" if response["changed"] else "skipped"
 
-    async def run_pass(self) -> dict[str, int]:
+    async def run_pass(self, cycle_lock=None) -> dict[str, int]:
         result = dict.fromkeys(
             ("inspected", "changed", "seeded", "skipped", "errors"), 0
         )
@@ -523,7 +534,7 @@ class MusicPoller:
             existing = (
                 await self.load_site_releases(api) if self.config.base_url else {}
             )
-            entries, dynamic, failed = await self.get_catalog(official)
+            entries, dynamic, failed = await self.get_catalog(official, cycle_lock)
             if self.config.limit:
                 entries = entries[: self.config.limit]
                 selected = {entry[0] for entry in entries}
@@ -546,7 +557,11 @@ class MusicPoller:
                         release_id, dynamic.get(release_id) or box, image
                     )
                     outcome = await self.process_release(
-                        official, api, record, existing.get(release_id)
+                        official,
+                        api,
+                        record,
+                        existing.get(release_id),
+                        cycle_lock,
                     )
                     result[outcome] += 1
                     self.save()
@@ -603,8 +618,7 @@ class MusicPoller:
                     continue
                 failed = False
                 try:
-                    async with cycle_lock:
-                        result = await self.run_pass()
+                    result = await self.run_pass(cycle_lock)
                     failed = bool(result["errors"])
                     log(
                         f"音乐轮询完成：检查 {result['inspected']}，更新 {result['changed']}，基线 {result['seeded']}，错误 {result['errors']}"

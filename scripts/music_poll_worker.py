@@ -9,6 +9,7 @@ import math
 import random
 import re
 import time
+import traceback
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -535,6 +536,9 @@ class MusicPoller:
                 await self.load_site_releases(api) if self.config.base_url else {}
             )
             entries, dynamic, failed = await self.get_catalog(official, cycle_lock)
+            log(
+                f"音乐目录：{len(entries)} 条，异步详情 {len(dynamic)} 条，失败 {len(failed)} 条"
+            )
             if self.config.limit:
                 entries = entries[: self.config.limit]
                 selected = {entry[0] for entry in entries}
@@ -633,10 +637,11 @@ class MusicPoller:
                     )
                 except Exception as exc:
                     # Music monitoring is auxiliary: a defect here must never stop
-                    # the news poller sharing this process. Log the type only.
+                    # the news poller sharing this process.
                     failed = True
                     self.state["stats"]["errors"] += 1
                     log(f"音乐轮询失败：{type(exc).__name__}")
+                    log(traceback.format_exc(limit=4).strip())
                 finally:
                     self.save()
                 if self.config.once:

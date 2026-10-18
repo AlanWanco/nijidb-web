@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import re
 import tempfile
 import unittest
 from dataclasses import replace
@@ -256,6 +257,14 @@ class MusicPollerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MusicStateTests(unittest.TestCase):
+    def test_every_config_attribute_used_by_music_exists(self):
+        source = Path("scripts/music_poll_worker.py").read_text(encoding="utf-8")
+        names = set(re.findall(r"(?:self|config)\.config\.([a-z_][a-z0-9_]*)", source))
+        names |= set(re.findall(r"\bconfig\.([a-z_][a-z0-9_]*)", source))
+        config = music_config()
+        missing = sorted(name for name in names if not hasattr(config, name))
+        self.assertEqual(missing, [], f"unknown PollerConfig attributes: {missing}")
+
     def test_corrupt_state_is_not_reinitialized_over_existing_baseline(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "music.json"

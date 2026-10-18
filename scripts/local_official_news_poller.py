@@ -124,6 +124,7 @@ class PollerConfig:
     music_article_delay: float = 5.0
     music_detail_delay: float = 5.0
     music_backoff_seconds: float = 1800.0
+    music_image_max_bytes: int = 20 * 1024 * 1024
 
 
 def env_float(name: str, default: float, minimum: float = 0) -> float:
@@ -356,6 +357,9 @@ def build_config(args: argparse.Namespace) -> PollerConfig:
         music_article_delay=env_float("MUSIC_POLL_ARTICLE_DELAY_SECONDS", 5, 5),
         music_detail_delay=env_float("MUSIC_POLL_DETAIL_DELAY_SECONDS", max(1.0, image_delay), 1),
         music_backoff_seconds=env_float("MUSIC_POLL_BACKOFF_MINUTES", env_float("NEWS_POLL_BACKOFF_MINUTES", 30, 1), 1) * 60,
+        music_image_max_bytes=env_int(
+            "MUSIC_IMAGE_MAX_BYTES", 20 * 1024 * 1024, 1024, 100 * 1024 * 1024
+        ),
     )
 
 

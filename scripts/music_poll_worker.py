@@ -487,6 +487,8 @@ class MusicPoller:
                 "extras": json.loads(previous.get("extras_json") or "[]"),
                 "detail_html": previous.get("detail_html") or "",
             }
+            quick_payload = music_row_to_api(previous)
+            quick_payload["source_url"] = str(quick_payload.get("source_url") or "").split("#", 1)[0]
             event_id = queue_site_event(
                 self.config,
                 source="music",
@@ -495,7 +497,7 @@ class MusicPoller:
                 snapshot=snapshot,
                 previous_id=str(previous.get("updated_at") or ""),
                 site_path=MUSIC_API_PATH,
-                site_payload={"release": music_row_to_api(previous), "baseline": True},
+                site_payload={"release": quick_payload, "baseline": True},
             )
             mark_site_event_imported(self.config, event_id, changed=False)
             await flush_bot_event_outbox(self.config, api)
@@ -562,6 +564,8 @@ class MusicPoller:
             cover_url = current_cover if archived else ""
         outgoing = rewrite_cover(record, source, cover_url)
         outgoing["cover_source_url"] = source
+        # 站点只接受无片段地址；目录链接的 #id 仅用于官网定位。
+        outgoing["source_url"] = str(outgoing.get("source_url") or "").split("#", 1)[0]
         site_payload = {
             "release": music_row_to_api(outgoing),
             "baseline": first_catalog_baseline,

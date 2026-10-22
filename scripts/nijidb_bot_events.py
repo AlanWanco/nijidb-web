@@ -283,6 +283,13 @@ async def flush_site_event_outbox(config: Any, client: httpx.AsyncClient) -> dic
             ) as response:
                 body = await _read_limited(response, MAX_BOT_RESPONSE_BYTES)
                 if response.status_code not in {200, 202}:
+                    if (
+                        response.status_code in {400, 409, 421, 422}
+                        and str(row["change_type"]) == "baseline"
+                    ):
+                        # 基线只补 Bot 快照；站点拒绝重放时转为已导入，不无限重试。
+                        mark_site_event_imported(config, str(row["event_id"]), changed=False)
+                        continue
                     raise RuntimeError(f"site_http_{response.status_code}")
                 try:
                     result = json.loads(body)

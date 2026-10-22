@@ -471,6 +471,42 @@ class MusicPoller:
         )
         if is_bot_baseline and saved.get("source_signature") != signature:
             first_catalog_baseline = True
+        if is_bot_baseline and previous is not None:
+            # 站点已有且内容未变：只补 Bot 对比快照，不重新导入，避免重复下载封面。
+            snapshot = {
+                "id": release_id,
+                "title": previous.get("title") or "",
+                "subtitle": previous.get("subtitle") or "",
+                "artist": previous.get("artist") or "",
+                "release_date": previous.get("release_date") or "",
+                "price": previous.get("price") or "",
+                "cover_url": current_cover,
+                "source_url": previous.get("source_url") or "",
+                "tracks": json.loads(previous.get("tracks_json") or "[]"),
+                "specs": json.loads(previous.get("spec_json") or "{}"),
+                "extras": json.loads(previous.get("extras_json") or "[]"),
+                "detail_html": previous.get("detail_html") or "",
+            }
+            event_id = queue_site_event(
+                self.config,
+                source="music",
+                item_id=release_id,
+                change="baseline",
+                snapshot=snapshot,
+                previous_id=str(previous.get("updated_at") or ""),
+                site_path=MUSIC_API_PATH,
+                site_payload={"release": music_row_to_api(previous), "baseline": True},
+            )
+            mark_site_event_imported(self.config, event_id, changed=False)
+            await flush_bot_event_outbox(self.config, api)
+            self.state["releases"][release_id] = {
+                **saved,
+                "bot_baseline_pending": False,
+                "bot_baseline_seeded": True,
+                "checked_at": time.time(),
+            }
+            self.state["stats"]["seeded"] += 1
+            return "seeded"
         if previous is not None and (saved.get("baseline_pending") or not saved) and not is_bot_baseline:
             if not self.config.bot_event_url:
                 # Seed known records on startup or after state loss; never rewrite all historical releases.

@@ -463,9 +463,16 @@ def init_db() -> None:
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS poller_import_receipts (
+          event_id TEXT PRIMARY KEY,
+          payload_hash TEXT NOT NULL,
+          response_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS music_worker_notifications (
           id TEXT PRIMARY KEY, release_id TEXT NOT NULL UNIQUE,
-          snapshot TEXT NOT NULL, created_at TEXT NOT NULL
+          snapshot TEXT NOT NULL, created_at TEXT NOT NULL,
+          suppressed_at TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS releases (
           id TEXT PRIMARY KEY, title TEXT NOT NULL, subtitle TEXT, artist TEXT,
@@ -712,6 +719,20 @@ def init_db() -> None:
             conn.execute(
                 "INSERT INTO settings (key, value) VALUES ('editor_password_hash', ?)",
                 (admin_hash,),
+            )
+        notification_setting = conn.execute(
+            "SELECT value FROM settings WHERE key = 'poller_update_notifications_enabled'"
+        ).fetchone()
+        if not notification_setting:
+            conn.execute(
+                "INSERT INTO settings(key,value) VALUES ('poller_update_notifications_enabled','1')"
+            )
+        notification_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(music_worker_notifications)")
+        }
+        if "suppressed_at" not in notification_columns:
+            conn.execute(
+                "ALTER TABLE music_worker_notifications ADD COLUMN suppressed_at TEXT NOT NULL DEFAULT ''"
             )
         individual_time_migration_key = "program_individual_time_migration_v1"
         if not conn.execute("SELECT 1 FROM settings WHERE key = ?", (individual_time_migration_key,)).fetchone():
@@ -3971,6 +3992,7 @@ def normalized_settings(values: dict[str, Any], *, include_onebot_token: bool = 
     music_auto_sync = "1" if boolean_value(values.get("music_auto_sync"), True) else "0"
     news_auto_sync = "1" if boolean_value(values.get("news_auto_sync"), True) else "0"
     news_slow_refresh_enabled = "1" if boolean_value(values.get("news_slow_refresh_enabled"), False) else "0"
+    poller_update_notifications_enabled = "1" if boolean_value(values.get("poller_update_notifications_enabled"), True) else "0"
     normalized = {
         "interval_minutes": str(interval),
         "detail_interval_minutes": str(detail_interval),
@@ -3979,6 +4001,7 @@ def normalized_settings(values: dict[str, Any], *, include_onebot_token: bool = 
         "news_auto_sync": news_auto_sync,
         "news_slow_refresh_enabled": news_slow_refresh_enabled,
         "news_slow_refresh_delay_seconds": str(news_slow_refresh_delay),
+        "poller_update_notifications_enabled": poller_update_notifications_enabled,
         "onebot_url": str(values.get("onebot_url", "") or "").strip(),
         "onebot_target": str(values.get("onebot_target", "") or "").strip(),
         "onebot_profile": str(values.get("onebot_profile", "bot") or "").strip() or "bot",
@@ -5828,6 +5851,64 @@ async def read_manual_source_request(request: Request) -> tuple[dict[str, Any], 
 
 def external_api_key_digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def poller_event_request(request: Request, payload: dict[str, Any]) -> tuple[str, str]:
+    event_id = str(request.headers.get("X-Nijidb-Poller-Event-ID", "")).strip()
+    if not event_id:
+        return "", ""
+    if request.headers.get("X-Nijidb-Poller") != "1":
+        raise HTTPException(400, "Poller 事件头无效")
+    if not re.fullmatch(r"[0-9a-f]{64}", event_id):
+        raise HTTPException(400, "Poller 事件 ID 格式无效")
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return event_id, hashlib.sha256(encoded).hexdigest()
+
+
+def poller_event_receipt(
+    conn: sqlite3.Connection, event_id: str, payload_hash: str
+) -> dict[str, Any] | None:
+    if not event_id:
+        return None
+    row = conn.execute(
+        "SELECT payload_hash,response_json FROM poller_import_receipts WHERE event_id=?",
+        (event_id,),
+    ).fetchone()
+    if not row:
+        return None
+    if not hmac.compare_digest(str(row["payload_hash"]), payload_hash):
+        raise HTTPException(409, "Poller 事件 ID 已用于不同内容")
+    try:
+        result = json.loads(str(row["response_json"]))
+    except (ValueError, json.JSONDecodeError, RecursionError) as exc:
+        raise HTTPException(500, "Poller 导入回执损坏") from exc
+    return result if isinstance(result, dict) else None
+
+
+def save_poller_event_receipt(
+    conn: sqlite3.Connection,
+    event_id: str,
+    payload_hash: str,
+    response: dict[str, Any],
+    created_at: str,
+) -> None:
+    if event_id:
+        conn.execute(
+            "INSERT INTO poller_import_receipts(event_id,payload_hash,response_json,created_at) VALUES (?,?,?,?)",
+            (event_id, payload_hash, json.dumps(response, ensure_ascii=False), created_at),
+        )
+
+
+def external_api_key_matches(resource: str, supplied: str) -> bool:
+    supplied = str(supplied or "").strip()
+    if not supplied or len(supplied) > 256:
+        return False
+    stored = external_api_key_record(resource)
+    if stored:
+        return hmac.compare_digest(external_api_key_digest(supplied), stored["key_hash"])
+    config = EXTERNAL_INGEST_KEY_CONFIG.get(resource)
+    expected = os.getenv(config["env_name"], "").strip() if config else ""
+    return bool(expected) and hmac.compare_digest(supplied, expected)
 
 
 def external_api_key_config(resource: str) -> dict[str, str]:
@@ -7793,8 +7874,16 @@ async def api_save_settings(request: Request) -> dict[str, dict[str, str]]:
             validate_onebot_target(patch["onebot_target"])
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    previous_settings = normalized_settings(settings())
     values = normalized_settings({**settings(), **patch})
     save_settings(values)
+    if (
+        "poller_update_notifications_enabled" in payload
+        and previous_settings["poller_update_notifications_enabled"] == "1"
+        and values["poller_update_notifications_enabled"] == "0"
+    ):
+        with db() as conn:
+            conn.execute("DELETE FROM music_worker_notifications WHERE suppressed_at = ''")
     if {"music_auto_sync", "interval_minutes", "detail_interval_minutes"} & payload.keys():
         music_settings_event.set()
     news_settings_event.set()
@@ -7858,9 +7947,25 @@ async def flush_music_worker_notifications() -> dict[str, int]:
     sent = 0
     async with music_notification_lock:
         config = settings()
+        notifications_enabled = boolean_value(
+            config.get("poller_update_notifications_enabled"), True
+        )
+        with db() as conn:
+            if not notifications_enabled:
+                conn.execute(
+                    "UPDATE music_worker_notifications SET suppressed_at=? WHERE suppressed_at=''",
+                    (datetime.now(timezone.utc).isoformat(),),
+                )
+                conn.execute(
+                    "DELETE FROM music_worker_notifications WHERE suppressed_at != ''"
+                )
+                pending = conn.execute(
+                    "SELECT COUNT(*) FROM music_worker_notifications"
+                ).fetchone()[0]
+                return {"sent": 0, "pending": int(pending)}
         if config.get("onebot_url") and config.get("onebot_target"):
             with db() as conn:
-                rows = conn.execute("SELECT id,snapshot FROM music_worker_notifications ORDER BY created_at LIMIT 10").fetchall()
+                rows = conn.execute("SELECT id,snapshot FROM music_worker_notifications WHERE suppressed_at='' ORDER BY created_at LIMIT 10").fetchall()
             for row in rows:
                 try:
                     await notify([json.loads(row["snapshot"])], config, "音乐目录更新")
@@ -7917,9 +8022,16 @@ async def api_remote_music_worker_ingest(request: Request) -> dict[str, Any]:
     if source_cover and not is_allowed_official_image_url(source_cover):
         raise HTTPException(400, "音乐原始封面地址不在允许的官网域名内")
     baseline = payload.get("baseline") is True
+    notification_owner = "bot" if request.headers.get("X-Nijidb-Poller") == "1" else "site"
+    event_id, payload_hash = poller_event_request(request, payload)
+    if event_id and notification_owner != "bot":
+        raise HTTPException(400, "Poller 导入标记缺失")
     now = datetime.now(timezone.utc).isoformat()
     async with sync_lock:
         with db() as conn:
+            receipt = poller_event_receipt(conn, event_id, payload_hash)
+            if receipt is not None:
+                return receipt
             row = conn.execute("SELECT * FROM releases WHERE id = ?", (record["id"],)).fetchone()
             previous = dict(row) if row else None
             changed = previous is None or any(previous.get(key) != record[key] for key in (
@@ -7939,20 +8051,41 @@ async def api_remote_music_worker_ingest(request: Request) -> dict[str, Any]:
                       fingerprint=excluded.fingerprint,updated_at=excluded.updated_at,position=excluded.position,
                       tracks_json=excluded.tracks_json,spec_json=excluded.spec_json,extras_json=excluded.extras_json""",
                     {**record, "updated_at": now})
-                if not baseline:
+                notification_setting = conn.execute(
+                    "SELECT value FROM settings WHERE key='poller_update_notifications_enabled'"
+                ).fetchone()
+                if (
+                    not baseline
+                    and not event_id
+                    and notification_owner == "site"
+                    and boolean_value(notification_setting[0] if notification_setting else None, True)
+                ):
                     item = {**record, "_previous": previous,
                             "_cover_changed": (previous or {}).get("cover_url", "") != record["cover_url"]}
-                    conn.execute("""INSERT INTO music_worker_notifications(id,release_id,snapshot,created_at)
-                        VALUES (?,?,?,?) ON CONFLICT(release_id) DO UPDATE SET
-                        id=excluded.id,snapshot=excluded.snapshot,created_at=excluded.created_at""",
+                    conn.execute("""INSERT INTO music_worker_notifications(id,release_id,snapshot,created_at,suppressed_at)
+                        VALUES (?,?,?,?,'') ON CONFLICT(release_id) DO UPDATE SET
+                        id=excluded.id,snapshot=excluded.snapshot,created_at=excluded.created_at,suppressed_at=''""",
                         (secrets.token_hex(16), record["id"], json.dumps(item, ensure_ascii=False), now))
             conn.execute("""INSERT INTO settings(key,value) VALUES ('music_worker_last_ingest_at',?)
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (now,))
-    if changed:
+            result = {
+                "id": record["id"],
+                "created": previous is None,
+                "changed": changed,
+                "updated_at": now if changed else str((previous or {}).get("updated_at") or now),
+                "position": record["position"],
+                "notifications": {"sent": 0, "pending": 0},
+            }
+            save_poller_event_receipt(conn, event_id, payload_hash, result, now)
+    if changed and not event_id:
         log_database_activity("music", f"自动导入音乐：{record['title'][:80]}")
-    delivery = await flush_music_worker_notifications()
-    return {"id": record["id"], "created": previous is None, "changed": changed,
-            "position": record["position"], "notifications": delivery}
+    delivery = (
+        await flush_music_worker_notifications()
+        if notification_owner == "site"
+        else {"sent": 0, "pending": music_worker_status()["pending_notifications"]}
+    )
+    result["notifications"] = delivery
+    return result
 
 
 @app.post("/api/ingest/program", include_in_schema=False)
@@ -8116,6 +8249,18 @@ async def api_remote_news_ingest(request: Request) -> dict[str, Any]:
     except (TypeError, ValueError, OverflowError, RecursionError) as exc:
         raise HTTPException(400, "新闻导入内容格式无效") from exc
     notify_requested = request.headers.get("x-nijidb-news-notify") == "1"
+    event_id, payload_hash = poller_event_request(request, payload)
+    is_poller_import = request.headers.get("x-nijidb-poller") == "1"
+    if event_id and not is_poller_import:
+        raise HTTPException(400, "Poller 导入标记缺失")
+    if is_poller_import and event_id:
+        with db() as conn:
+            notification_setting = conn.execute(
+                "SELECT value FROM settings WHERE key='poller_update_notifications_enabled'"
+            ).fetchone()
+        notify_requested = notify_requested and boolean_value(
+            notification_setting[0] if notification_setting else None, True
+        )
     if news_run_lock.locked():
         raise HTTPException(409, "新闻检查正在进行，请稍后再试")
     async with news_run_lock:
@@ -8123,6 +8268,9 @@ async def api_remote_news_ingest(request: Request) -> dict[str, Any]:
         previous_news: dict[str, dict[str, Any] | None] = {}
         async with sync_lock:
             with db() as conn:
+                receipt = poller_event_receipt(conn, event_id, payload_hash)
+                if receipt is not None:
+                    return receipt
                 if notify_requested:
                     previous_news = previous_news_snapshot(conn, record)
                 changed, created = upsert_news_record(conn, record, timestamp)
@@ -8134,21 +8282,24 @@ async def api_remote_news_ingest(request: Request) -> dict[str, Any]:
                     "SELECT public_url FROM news_images WHERE news_id = ?", (record["id"],)
                 ).fetchall()
                 r2_image_count = sum(1 for image in article_images if valid_r2_public_image_url(image["public_url"]))
-    if changed:
+                result = {
+                    "id": record["id"],
+                    "source": record["source"],
+                    "created": created,
+                    "changed": changed,
+                    "updated_at": str(article["updated_at"] or timestamp),
+                    "image_count": image_count,
+                    "r2_image_count": r2_image_count,
+                }
+                save_poller_event_receipt(conn, event_id, payload_hash, result, timestamp)
+    if changed and not event_id:
         log_database_activity("news", f"远程导入新闻：{str(article['title'] or '')[:80]}")
         if notify_requested:
             try:
                 await notify_news(news_notification_items([str(record["id"])], previous_news), settings())
             except Exception as exc:
                 print(f"[news-ingest] notification failed: {type(exc).__name__}", flush=True)
-    return {
-        "id": record["id"],
-        "source": record["source"],
-        "created": created,
-        "changed": changed,
-        "image_count": image_count,
-        "r2_image_count": r2_image_count,
-    }
+    return result
 
 
 @app.post("/api/admin/source-html")

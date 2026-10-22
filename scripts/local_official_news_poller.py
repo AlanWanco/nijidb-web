@@ -55,6 +55,13 @@ from app.news import (  # noqa: E402
 )
 from logfmt import format_message  # noqa: E402
 from news_network import pin_r2_client_to_ipv4  # noqa: E402
+from scripts.nijidb_bot_events import (
+    flush_bot_event_outbox,
+    flush_site_event_outbox,
+    mark_site_event_imported,
+    queue_site_event,
+    send_poller_heartbeat,
+)  # noqa: E402
 from app.news_fetch import (  # noqa: E402
     NEWS_HEADERS,
     fetch_news_page,
@@ -125,6 +132,9 @@ class PollerConfig:
     music_detail_delay: float = 5.0
     music_backoff_seconds: float = 1800.0
     music_image_max_bytes: int = 20 * 1024 * 1024
+    bot_event_url: str = ""
+    bot_event_secret: str = ""
+    bot_event_outbox_file: Path | None = None
 
 
 def env_float(name: str, default: float, minimum: float = 0) -> float:
@@ -256,6 +266,8 @@ def build_config(args: argparse.Namespace) -> PollerConfig:
     api_key = os.getenv("NIJIDB_INGEST_API_KEY", "").strip()
     music_api_key = os.getenv("NIJIDB_MUSIC_POLLER_API_KEY", "").strip()
     music_enabled = env_bool("MUSIC_POLL_ENABLED", False)
+    bot_event_url = os.getenv("NIJIDB_BOT_EVENT_URL", "").strip()
+    bot_event_secret = os.getenv("NIJIDB_BOT_EVENT_SECRET", "").strip()
     music_state_raw = os.getenv("MUSIC_POLL_STATE_FILE", "").strip()
     proxy = os.getenv("NEWS_POLL_PROXY", "").strip()
     if proxy:
@@ -278,6 +290,14 @@ def build_config(args: argparse.Namespace) -> PollerConfig:
     music_state_path = Path(music_state_raw).expanduser() if music_state_raw else news_state_path.with_name("music-poller.json")
     if music_enabled and music_state_path.resolve() == news_state_path.resolve():
         raise PollerConfigError("音乐与新闻状态文件不能相同")
+    if bool(bot_event_url) != bool(bot_event_secret):
+        raise PollerConfigError("NIJIDB_BOT_EVENT_URL 与 NIJIDB_BOT_EVENT_SECRET 必须同时配置")
+    if bot_event_url:
+        validate_http_url(bot_event_url, "NIJIDB_BOT_EVENT_URL")
+        if urlparse(bot_event_url).path.rstrip("/") != "/internal/nijidb/poller-events":
+            raise PollerConfigError("NIJIDB_BOT_EVENT_URL 必须指向 Bot 内部 Poller 事件接口")
+    if bot_event_secret and not 32 <= len(bot_event_secret) <= 256:
+        raise PollerConfigError("NIJIDB_BOT_EVENT_SECRET 长度必须为 32–256 个字符")
 
     missing = [
         name
@@ -359,6 +379,13 @@ def build_config(args: argparse.Namespace) -> PollerConfig:
         music_backoff_seconds=env_float("MUSIC_POLL_BACKOFF_MINUTES", env_float("NEWS_POLL_BACKOFF_MINUTES", 30, 1), 1) * 60,
         music_image_max_bytes=env_int(
             "MUSIC_IMAGE_MAX_BYTES", 20 * 1024 * 1024, 1024, 100 * 1024 * 1024
+        ),
+        bot_event_url=bot_event_url,
+        bot_event_secret=bot_event_secret,
+        bot_event_outbox_file=(
+            Path(os.getenv("NIJIDB_BOT_OUTBOX_FILE", "").strip()).expanduser()
+            if os.getenv("NIJIDB_BOT_OUTBOX_FILE", "").strip()
+            else news_state_path.with_name("nijidb-bot-outbox.sqlite3")
         ),
     )
 
@@ -773,17 +800,36 @@ class OfficialNewsPoller:
 
     # ---------- 提交 ----------
 
-    async def submit(self, client: httpx.AsyncClient, article: dict[str, Any]) -> None:
+    async def submit(
+        self,
+        client: httpx.AsyncClient,
+        article: dict[str, Any],
+        *,
+        event_id: str = "",
+    ) -> dict[str, Any]:
         payload = {"article": {key: value for key, value in article.items() if value is not None}}
+        headers = {
+            "X-Nijidb-API-Key": self.config.api_key,
+            "X-Nijidb-News-Notify": "1",
+            "X-Nijidb-Poller": "1",
+        }
+        if event_id:
+            headers["X-Nijidb-Poller-Event-ID"] = event_id
         async with client.stream(
             "POST",
             f"{self.config.base_url}{INGEST_PATH}",
             json=payload,
-            headers={"X-Nijidb-API-Key": self.config.api_key, "X-Nijidb-News-Notify": "1"},
+            headers=headers,
         ) as response:
-            if response.status_code == 200:
-                return
             body = await read_response_bytes(response, 16 * 1024)
+            if response.status_code == 200:
+                try:
+                    result = json.loads(body)
+                except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+                    raise SiteApiError("新闻导入返回格式无效") from exc
+                if not isinstance(result, dict) or type(result.get("changed")) is not bool:
+                    raise SiteApiError("新闻导入返回的变更状态无效")
+                return result
             detail = ""
             try:
                 error_payload = json.loads(body.decode("utf-8"))
@@ -824,12 +870,18 @@ class OfficialNewsPoller:
         headers: dict[str, str] = {}
         # Validators belong to a specific URL. Do not send an ETag from an
         # old page URL after the official site changes its page location.
-        if saved.get("source_url") == source_url and saved.get("etag"):
+        if saved.get("source_url") == source_url and saved.get("etag") and not saved.get("bot_baseline_pending"):
             headers["If-None-Match"] = str(saved["etag"])
-        if saved.get("source_url") == source_url and saved.get("last_modified"):
+        if saved.get("source_url") == source_url and saved.get("last_modified") and not saved.get("bot_baseline_pending"):
             headers["If-Modified-Since"] = str(saved["last_modified"])
 
         response = await fetch_news_page(official, source_url, headers)
+        if (
+            response.status_code == 304
+            and self.config.bot_event_url
+            and (saved.get("bot_baseline_pending") or self.production.get(page_name))
+        ):
+            response = await fetch_news_page(official, source_url, {})
         if response.status_code == 304:
             log(f"官网未变化：{page_name}")
             self.state["stats"]["skipped_unchanged"] += 1
@@ -855,6 +907,8 @@ class OfficialNewsPoller:
         if existing and existing.get("id"):
             record["id"] = existing["id"]
         local = self.state["articles"].get(page_name)
+        saved = local or {}
+        bot_baseline_pending = bool(saved.get("bot_baseline_pending"))
         official_images = [image for image in (record.get("images") or []) if image.get("source_url")]
         cover = str((existing or {}).get("cover_url") or "")
         r2_base = f"{self.config.r2_public_base_url}/" if self.config.r2_public_base_url else ""
@@ -875,6 +929,8 @@ class OfficialNewsPoller:
 
         if existing is None:
             decision, reason = "submit", "站点没有该篇（新增）"
+        elif bot_baseline_pending:
+            decision, reason = "submit", "Bot 通知基线待建立"
         elif self.config.refresh_existing:
             decision, reason = "submit", "--refresh-existing 强制提交"
         elif needs_archive:
@@ -883,10 +939,18 @@ class OfficialNewsPoller:
             decision, reason = "seed", "站点已有，首次建立基线"
         elif local.get("content_hash") == signature and local.get("pushed_hash") == signature and pending_sources:
             decision, reason = "submit", f"仍有 {len(pending_sources)} 张图片未成功提交"
-        elif local.get("content_hash") == signature:
+        elif local.get("content_hash") == signature and not bot_baseline_pending:
             decision, reason = "skip", "官网内容与基线一致"
         else:
             decision, reason = "submit", "官网内容有变化"
+
+        if (
+            existing is not None
+            and self.config.bot_event_url
+            and not (local or {}).get("bot_baseline_seeded")
+            and not needs_archive
+        ):
+            decision, reason = "submit", "Bot 通知基线待建立"
 
         if decision == "seed":
             log(f"{reason}，仅记录基线：{page_name}")
@@ -898,6 +962,8 @@ class OfficialNewsPoller:
                 source_hash=source_hash,
                 content_hash=signature,
                 seeded=True,
+                bot_baseline_pending=bool(self.config.bot_event_url),
+                bot_baseline_seeded=not bool(self.config.bot_event_url),
             )
             return False
         if decision == "skip":
@@ -943,6 +1009,8 @@ class OfficialNewsPoller:
             and not needs_archive
             and saved.get("pushed_hash") == signature
             and not image_source_set(record.get("images")) - pushed_sources
+            and (local or {}).get("bot_baseline_seeded")
+            and (not self.config.bot_event_url or saved.get("bot_baseline_seeded"))
         ):
             log(f"本地记录一致，跳过提交：{page_name}")
             self.state["stats"]["skipped_existing"] += 1
@@ -1028,7 +1096,56 @@ class OfficialNewsPoller:
         if self.config.dry_run:
             return False
 
-        await self.submit(api, article)
+        pending_event_id = ""
+        event_snapshot = {
+            "id": str(article["id"]),
+            "title": article["title"],
+            "published_at": article.get("published_at") or "",
+            "category": article.get("category") or "",
+            "tags": article.get("tags") or [],
+            "summary": article.get("summary") or "",
+            "body_markdown": article.get("body_markdown") or "",
+            "source_url": article["source_url"],
+            "images": [
+                {"public_url": image.get("public_url") or "", "alt_text": image.get("alt_text") or ""}
+                for image in images
+                if image.get("public_url")
+            ],
+        }
+        site_payload = {"article": {key: value for key, value in article.items() if value is not None}}
+        if self.config.bot_event_url and (
+            saved.get("content_hash") != signature
+            or needs_archive
+            or saved.get("bot_baseline_pending")
+            or not saved.get("bot_baseline_seeded")
+        ):
+            pending_event_id = queue_site_event(
+                self.config,
+                source="news",
+                item_id=str(article["id"]),
+                change=(
+                    "created"
+                    if existing is None
+                    else "baseline"
+                    if (
+                        not saved.get("bot_baseline_seeded")
+                        or (
+                            saved.get("content_hash") == signature
+                            and (saved.get("bot_baseline_pending") or needs_archive)
+                        )
+                    )
+                    else "updated"
+                ),
+                snapshot=event_snapshot,
+                previous_id=str((existing or {}).get("updated_at") or ""),
+                site_path=INGEST_PATH,
+                site_payload=site_payload,
+            )
+        site_result = await self.submit(api, article, event_id=pending_event_id)
+        if pending_event_id:
+            changed = bool(site_result and site_result.get("changed"))
+            mark_site_event_imported(self.config, pending_event_id, changed=changed)
+            await flush_bot_event_outbox(self.config, api)
         self.remember(
             page_name,
             response,
@@ -1036,6 +1153,8 @@ class OfficialNewsPoller:
             source_hash=source_hash,
             content_hash=signature,
             pushed_hash=signature,
+            bot_baseline_pending=False,
+            bot_baseline_seeded=True,
             pushed_image_sources=sorted(archived_image_source_set(images)),
             title=article["title"],
             pushed_at=datetime.now(timezone.utc).isoformat(),
@@ -1167,6 +1286,10 @@ class OfficialNewsPoller:
                 continue
             failed = False
             try:
+                if config.bot_event_url:
+                    async with direct_api_client(config) as api:
+                        await flush_site_event_outbox(config, api)
+                        await flush_bot_event_outbox(config, api)
                 async with self.official_cycle_lock:
                     result = await self.run_pass()
                 stats = self.state["stats"]
@@ -1184,6 +1307,23 @@ class OfficialNewsPoller:
                 log(f"本趟异常：{type(exc).__name__} {exc}")
             finally:
                 save_state(config.state_file, self.state)
+                if config.bot_event_url:
+                    try:
+                        async with direct_api_client(config) as api:
+                            await send_poller_heartbeat(
+                                config,
+                                api,
+                                {
+                                    "source": "news",
+                                    "running": not config.once and not self.stop_event.is_set(),
+                                    "checked_at": time.time(),
+                                    "last_pass_at": self.state.get("last_pass_at", 0),
+                                    "backoff_until": self.state.get("backoff_until", 0),
+                                    "stats": self.state.get("stats", {}),
+                                },
+                            )
+                    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+                        log(f"Bot 心跳提交失败：{type(exc).__name__}")
             if config.once:
                 return 1 if failed else 0
             if failed:

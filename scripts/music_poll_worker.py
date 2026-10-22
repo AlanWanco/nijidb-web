@@ -47,6 +47,13 @@ from scripts.local_official_news_poller import (
     read_response_bytes,
 )
 from scripts.news_network import pin_r2_client_to_ipv4
+from scripts.nijidb_bot_events import (
+    flush_bot_event_outbox,
+    flush_site_event_outbox,
+    mark_site_event_imported,
+    queue_site_event,
+    send_poller_heartbeat,
+)
 
 MUSIC_STATE_VERSION = 1
 MUSIC_STATE_MAX_BYTES = 4 * 1024 * 1024
@@ -310,12 +317,15 @@ class MusicPoller:
     async def api_json(
         self, api: httpx.AsyncClient, method: str, path: str, **kwargs
     ) -> dict[str, Any]:
+        caller_headers = kwargs.pop("headers", {})
+        headers = {
+            **({"X-Nijidb-API-Key": self.config.music_api_key} if path.startswith(MUSIC_API_PATH) else {}),
+            **caller_headers,
+        }
         async with api.stream(
             method,
             self.config.base_url + path,
-            headers={"X-Nijidb-API-Key": self.config.music_api_key}
-            if path.startswith(MUSIC_API_PATH)
-            else {},
+            headers=headers,
             **kwargs,
         ) as response:
             if response.status_code in {401, 403, 404, 503}:
@@ -438,24 +448,45 @@ class MusicPoller:
         source = record["cover_url"]
         current_cover = (previous or {}).get("cover_url", "")
         first_catalog_baseline = bool(
+            self.config.bot_event_url
+            and not self.state["initialized"]
+            and (
+                previous is None
+                or not saved
+                or saved.get("source_signature") != signature
+                or saved.get("baseline_pending")
+            )
+        ) or bool(
             saved.get("baseline_pending")
             or (not self.state["initialized"] and previous is None)
         )
-        if previous is not None and (saved.get("baseline_pending") or not saved):
-            # Seed known records on startup or after state loss; never rewrite all historical releases.
-            image_state = {}
-            if source and not self.config.dry_run:
-                async with guard:
-                    _data, image_state = await self.fetch_cover(official, source, {})
-            self.state["releases"][release_id] = {
-                **image_state,
-                "source_signature": signature,
-                "cover_source_url": source,
-                "cover_url": current_cover,
-                "seeded": True,
-                "checked_at": time.time(),
-            }
-            return "seeded"
+        is_bot_baseline = bool(
+            self.config.bot_event_url
+            and (
+                saved.get("bot_baseline_pending")
+                or (previous is not None and (saved.get("baseline_pending") or not saved))
+            )
+            and (saved.get("source_signature") in {None, signature})
+        )
+        if is_bot_baseline and saved.get("source_signature") != signature:
+            first_catalog_baseline = True
+        if previous is not None and (saved.get("baseline_pending") or not saved) and not is_bot_baseline:
+            if not self.config.bot_event_url:
+                # Seed known records on startup or after state loss; never rewrite all historical releases.
+                image_state = {}
+                if source and not self.config.dry_run:
+                    async with guard:
+                        _data, image_state = await self.fetch_cover(official, source, {})
+                self.state["releases"][release_id] = {
+                    **image_state,
+                    "source_signature": signature,
+                    "cover_source_url": source,
+                    "cover_url": current_cover,
+                    "seeded": True,
+                    "checked_at": time.time(),
+                }
+                return "seeded"
+            first_catalog_baseline = True
         if self.config.dry_run:
             return (
                 "changed" if saved.get("source_signature") != signature else "skipped"
@@ -476,6 +507,8 @@ class MusicPoller:
             and not bytes_changed
             and archived
             and current_cover == saved.get("cover_url")
+            and not first_catalog_baseline
+            and not is_bot_baseline
         ):
             saved.update(image_state, checked_at=time.time())
             return "skipped"
@@ -492,24 +525,71 @@ class MusicPoller:
             cover_url = current_cover if archived else ""
         outgoing = rewrite_cover(record, source, cover_url)
         outgoing["cover_source_url"] = source
+        site_payload = {
+            "release": music_row_to_api(outgoing),
+            "baseline": first_catalog_baseline,
+        }
+        pending_event_id = ""
+        if self.config.bot_event_url and (
+            first_catalog_baseline
+            or saved.get("source_signature") != signature
+            or is_bot_baseline
+        ):
+            snapshot = {
+                "id": release_id,
+                "title": record.get("title") or "",
+                "subtitle": record.get("subtitle") or "",
+                "artist": record.get("artist") or "",
+                "release_date": record.get("release_date") or "",
+                "price": record.get("price") or "",
+                "cover_url": cover_url,
+                "source_url": record.get("source_url") or "",
+                "tracks": json.loads(record.get("tracks_json") or "[]"),
+                "specs": json.loads(record.get("spec_json") or "{}"),
+                "extras": json.loads(record.get("extras_json") or "[]"),
+                "detail_html": record.get("detail_html") or "",
+            }
+            pending_event_id = queue_site_event(
+                self.config,
+                source="music",
+                item_id=release_id,
+                change=(
+                    "created"
+                    if previous is None and not first_catalog_baseline
+                    else "baseline"
+                    if first_catalog_baseline or is_bot_baseline
+                    else "updated"
+                ),
+                snapshot=snapshot,
+                previous_id=str((previous or {}).get("updated_at") or ""),
+                site_path=MUSIC_API_PATH,
+                site_payload=site_payload,
+            )
         response = await self.api_json(
             api,
             "POST",
             MUSIC_API_PATH,
-            json={
-                "release": music_row_to_api(outgoing),
-                "baseline": first_catalog_baseline,
+            headers={
+                **({"X-Nijidb-Poller-Event-ID": pending_event_id, "X-Nijidb-Poller": "1"} if pending_event_id else {}),
             },
+            json=site_payload,
         )
         if (
             response.get("id") != release_id
             or type(response.get("changed")) is not bool
         ):
             raise SiteApiError("音乐导入返回的 ID 或状态无效")
+        if pending_event_id:
+            mark_site_event_imported(self.config, pending_event_id, changed=response["changed"])
+            await flush_bot_event_outbox(self.config, api)
+        if pending_event_id and not response["changed"] and not first_catalog_baseline:
+            first_catalog_baseline = True
         self.state["stats"]["submitted"] += 1
         self.state["releases"][release_id] = {
             **image_state,
             "source_signature": signature,
+            "bot_baseline_pending": False,
+            "bot_baseline_seeded": True,
             "cover_source_url": source,
             "cover_url": cover_url,
             "checked_at": time.time(),
@@ -531,7 +611,11 @@ class MusicPoller:
                 status = await self.api_json(api, "GET", MUSIC_API_PATH)
                 if status.get("version") != 1:
                     raise SiteApiError("音乐接口版本不支持")
-                await self.api_json(api, "POST", MUSIC_API_PATH + "/notifications")
+                if self.config.bot_event_url:
+                    await flush_site_event_outbox(self.config, api)
+                    await flush_bot_event_outbox(self.config, api)
+                else:
+                    await self.api_json(api, "POST", MUSIC_API_PATH + "/notifications")
             existing = (
                 await self.load_site_releases(api) if self.config.base_url else {}
             )
@@ -644,6 +728,23 @@ class MusicPoller:
                     log(traceback.format_exc(limit=4).strip())
                 finally:
                     self.save()
+                    if self.config.bot_event_url:
+                        try:
+                            async with direct_api_client(self.config) as api:
+                                await send_poller_heartbeat(
+                                    self.config,
+                                    api,
+                                    {
+                                        "source": "music",
+                                        "running": not self.config.once and not stop_event.is_set(),
+                                        "checked_at": time.time(),
+                                        "last_pass_at": self.state.get("last_pass_at", 0),
+                                        "backoff_until": self.state.get("backoff_until", 0),
+                                        "stats": self.state.get("stats", {}),
+                                    },
+                                )
+                        except (httpx.HTTPError, RuntimeError, ValueError) as heartbeat_exc:
+                            log(f"音乐 Poller 心跳提交失败：{type(heartbeat_exc).__name__}")
                 if self.config.once:
                     return int(failed)
                 wait = (

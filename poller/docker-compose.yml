@@ -21,10 +21,16 @@ services:
       NIJIDB_LOG_TZ_OFFSET_HOURS: ${NIJIDB_LOG_TZ_OFFSET_HOURS:-8}
       NEWS_POLL_PROXY: ${POLL_PROXY_URL:-http://192.168.10.75:7890}
       NEWS_POLL_STATE_FILE: /state/news-poller.json
+      NIJIDB_BOT_EVENT_URL: ${NIJIDB_BOT_EVENT_URL:-}
+      NIJIDB_BOT_EVENT_SECRET: ${NIJIDB_BOT_EVENT_SECRET:-}
       # Do not pass legacy proxy subscription credentials through the shared env file.
       MIHOMO_SUB_URL: ""
     volumes:
       - poller-state:/state
+    networks:
+      - default
+      - proxy
+      - nijidb-poller-link
 
   # 可选：历史新闻图片批量归档（补档），默认不启动：
   #   docker compose --profile worker up -d
@@ -48,6 +54,18 @@ services:
       MIHOMO_SUB_URL: ""
     volumes:
       - poller-state:/state
+    networks:
+      - default
+      - proxy
+      - nijidb-poller-link
+
+networks:
+  proxy:
+    name: nijidb-poller_proxy
+    external: true
+  nijidb-poller-link:
+    name: nijidb-poller-link
+    internal: true
 
 volumes:
   poller-state:

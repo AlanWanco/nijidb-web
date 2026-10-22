@@ -49,6 +49,7 @@ const settings = reactive({
   music_auto_sync: "1",
   news_interval_minutes: "30",
   news_auto_sync: "1",
+  poller_update_notifications_enabled: "1",
   news_slow_refresh_enabled: "0",
   news_slow_refresh_delay_seconds: "10",
   onebot_url: "",
@@ -464,6 +465,7 @@ async function saveSettings() {
       section.value === "news"
         ? [
             "news_auto_sync",
+            "poller_update_notifications_enabled",
             "news_interval_minutes",
             "news_slow_refresh_enabled",
             "news_slow_refresh_delay_seconds",
@@ -1082,6 +1084,16 @@ onMounted(loadSettings);
                   "
                 /><span>{{ t("启用 Topics 自动检查") }}</span></label
               >
+              <label class="settings-checkbox"
+                ><input
+                  type="checkbox"
+                  :checked="settings.poller_update_notifications_enabled === '1'"
+                  @change="
+                    settings.poller_update_notifications_enabled = $event.target.checked ? '1' : '0'
+                  "
+                /><span>{{ t("启用站点 Poller 更新通知") }}</span></label
+              >
+              <p class="muted">{{ t("关闭后仍会导入新闻和音乐；只停止 Nijidb 站点自身的 Poller 更新消息。") }}</p>
               <label
                 >{{ t("Topics 检查间隔（分钟）")
                 }}<input

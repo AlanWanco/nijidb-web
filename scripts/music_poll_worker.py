@@ -462,11 +462,12 @@ class MusicPoller:
         )
         is_bot_baseline = bool(
             self.config.bot_event_url
+            and saved.get("source_signature") == signature
             and (
                 saved.get("bot_baseline_pending")
-                or (previous is not None and (saved.get("baseline_pending") or not saved))
+                or not saved.get("bot_baseline_seeded")
+                or saved.get("baseline_pending")
             )
-            and (saved.get("source_signature") in {None, signature})
         )
         if is_bot_baseline and saved.get("source_signature") != signature:
             first_catalog_baseline = True

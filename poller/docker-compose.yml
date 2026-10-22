@@ -63,9 +63,10 @@ networks:
   proxy:
     name: nijidb-poller_proxy
     external: true
+  # 由部署方创建一次（internal），Bot 与 Poller 共用；见 README。
   nijidb-poller-link:
     name: nijidb-poller-link
-    internal: true
+    external: true
 
 volumes:
   poller-state:

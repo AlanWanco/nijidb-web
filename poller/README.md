@@ -47,6 +47,14 @@ POLL_PROXY_URL=http://192.168.10.75:7890
 
 ## 启动与验证
 
+Bot 事件接收使用共享内网。首次部署时先创建一次（已存在则跳过）：
+
+```bash
+docker network create --internal nijidb-poller-link
+```
+
+Bot 与 Poller 两侧的 Compose 都把它声明为 `external`，不会自动创建或修改它。
+
 ```bash
 cd poller
 docker compose config --quiet

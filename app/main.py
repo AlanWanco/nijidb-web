@@ -3269,6 +3269,15 @@ def occurrence_has_passed(occurrence: dict[str, Any]) -> bool:
     )
 
 
+def occurrence_start_jst(occurrence: dict[str, Any]) -> datetime:
+    occurrence_time = time.fromisoformat(str(occurrence.get("time") or "00:00"))
+    local_start = datetime.combine(
+        occurrence["date"], occurrence_time,
+        tzinfo=occurrence_timezone(occurrence.get("timezone")),
+    )
+    return local_start.astimezone(JAPAN_TZ)
+
+
 def program_episode_count(program: dict[str, Any], records: list[dict[str, Any]] | None = None) -> int:
     if not program.get("start_date"):
         return 0
@@ -3295,8 +3304,13 @@ def materialize_generated_occurrences(conn: sqlite3.Connection, program: dict[st
     if range_end < program_start:
         return 0
 
-    # Materialize only occurrences that were actually enabled before the toggle.
-    # Repeatedly saving "off" must not recreate historical episodes.
+    # Japanese broadcast days extend through 28:00 (04:00 the following date).
+    # Persist all active generated episodes scheduled before that JST cutoff,
+    # including episodes whose broadcast time has not arrived yet.
+    cutoff_date = datetime.now(JAPAN_TZ).date() + timedelta(days=1)
+    materialize_through = datetime.combine(
+        cutoff_date, time(4, 0), tzinfo=JAPAN_TZ
+    )
     records = program_occurrence_records(program, program_start, range_end)
     now = datetime.now(timezone.utc).isoformat()
     rows = [
@@ -3313,7 +3327,7 @@ def materialize_generated_occurrences(conn: sqlite3.Connection, program: dict[st
             record.get("subtitle_url", ""),
             "rescheduled" if record["date"].isoformat() != record["original_date"] else record.get("status", "scheduled"),
             record["date"].isoformat() if record["date"].isoformat() != record["original_date"] else "",
-            "",
+            record["time"] if record["time"] != record.get("original_time", "") else "",
             "",
             json.dumps([], ensure_ascii=False),
             json.dumps([], ensure_ascii=False),
@@ -3323,7 +3337,12 @@ def materialize_generated_occurrences(conn: sqlite3.Connection, program: dict[st
             now,
         )
         for record in records
-        if record["generated"] and record["aired"]
+        if record["generated"]
+        and record["status"] not in {"cancelled", "deleted"}
+        and (
+            record["aired"]
+            or occurrence_start_jst(record) <= materialize_through
+        )
     ]
     if not rows:
         return 0
@@ -3340,10 +3359,7 @@ def materialize_generated_occurrences(conn: sqlite3.Connection, program: dict[st
 
 
 def materialize_all_aired_generated_occurrences() -> int:
-    """把已经播出且未删除的自动生成单集落库，使其拥有真实单集 ID。
-
-    只物化 `aired` 的生成记录；未来单集继续由 periods 投影，不写数据库。
-    """
+    """落库已播期及当前 JST 播出日 28:00 以前的自动生成单集，赋予真实 ID。"""
     total = 0
     with db() as conn:
         programs = program_rows(include_occurrences=True)
@@ -7066,7 +7082,7 @@ async def program_materialize_scheduler() -> None:
                 )
             if count:
                 print(
-                    f"[programs] materialized {count} aired occurrences",
+                    f"[programs] materialized {count} generated occurrences",
                     flush=True,
                 )
         except Exception as exc:  # noqa: BLE001 - scheduler must keep running
@@ -7099,7 +7115,7 @@ async def lifespan(_: FastAPI):
     try:
         materialized = materialize_all_aired_generated_occurrences()
         if materialized:
-            print(f"[programs] materialized {materialized} aired occurrences", flush=True)
+            print(f"[programs] materialized {materialized} generated occurrences", flush=True)
     except Exception as exc:  # noqa: BLE001 - startup must not be blocked by this
         print(
             f"[programs] initial materialize failed: "

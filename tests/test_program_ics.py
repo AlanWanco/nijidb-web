@@ -54,6 +54,8 @@ class ProgramIcsTests(unittest.IsolatedAsyncioTestCase):
         main.init_db()
         main.program_api_cache.clear()
         self.addCleanup(main.program_api_cache.clear)
+        main.program_ics_cache.clear()
+        self.addCleanup(main.program_ics_cache.clear)
         self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test")
         self.addAsyncCleanup(self.client.aclose)
         self.today = main.datetime.now(main.JAPAN_TZ).date()

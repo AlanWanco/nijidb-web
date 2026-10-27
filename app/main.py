@@ -7455,6 +7455,8 @@ async def api_admin_release_cover(release_id: str, request: Request) -> dict[str
 
 
 program_api_cache = PublicProgramCache()
+# Feed URLs vary per filter and are polled by calendar apps; keep them from evicting page responses.
+program_ics_cache = PublicProgramCache()
 
 
 def program_api_revision() -> str | None:
@@ -7467,9 +7469,10 @@ async def cached_program_api_response(
     build: Callable[[], dict[str, Any] | bytes],
     media_type: str = "application/json",
     extra_headers: dict[str, str] | None = None,
+    cache: PublicProgramCache | None = None,
 ) -> Response:
     result = await asyncio.to_thread(
-        program_api_cache.response, key, program_api_revision, build, request.headers.get("if-none-match", "")
+        (cache or program_api_cache).response, key, program_api_revision, build, request.headers.get("if-none-match", "")
     )
     headers = {**(extra_headers or {}), "Cache-Control": "private, no-cache" if result.etag else "no-store"}
     if result.etag:
@@ -7816,6 +7819,7 @@ async def api_program_calendar_ics(request: Request, start: str = "", end: str =
             lambda: build_program_ics(range_start, range_end, filters, []),
             "text/calendar",
             headers,
+            program_ics_cache,
         )
     payload = await fetch_eventernote_events(range_start, range_end)
     items = [eventernote_event_payload(item) for item in payload["items"] if isinstance(item, dict)]

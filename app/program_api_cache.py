@@ -77,7 +77,7 @@ class PublicProgramCache:
         self,
         key: str,
         revision: Callable[[], str | None],
-        build: Callable[[], dict[str, Any]],
+        build: Callable[[], dict[str, Any] | bytes],
         if_none_match: str = "",
     ) -> ProgramApiResult:
         stamp = revision()
@@ -94,8 +94,10 @@ class PublicProgramCache:
             body = self.get(key, etag) if etag else None
             if body is not None:
                 return ProgramApiResult(body, etag)
-            body = json.dumps(
-                jsonable_encoder(build()), ensure_ascii=False, allow_nan=False, separators=(",", ":")
+            value = build()
+            # Non-JSON feeds (ICS) are built as bytes and cached verbatim.
+            body = value if isinstance(value, bytes) else json.dumps(
+                jsonable_encoder(value), ensure_ascii=False, allow_nan=False, separators=(",", ":")
             ).encode()
             if etag and revision() == stamp:
                 if len(body) > self.max_body_bytes:

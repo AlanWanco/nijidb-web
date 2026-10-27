@@ -13,6 +13,7 @@ import { createCalendarReveal } from "../programCalendarReveal";
 import { locale, localeTag, t } from "../i18n";
 import { NIJIGASAKI_CAST, castColorSegments } from "../programCast";
 import { occurrenceLinkItems, programAdminPath, relatedLinkItem } from "../programLinks";
+import { copyText, programIcsUrl } from "../programIcs";
 import NewsLightbox from "../components/NewsLightbox.vue";
 
 const weekdayNames = computed(() => locale.value === "en"
@@ -256,15 +257,23 @@ watch(() => [route.query.cast, route.query.category, route.query.delivery], () =
   if (!sameValues(filters.delivery, nextFilters.delivery)) filters.delivery = nextFilters.delivery;
 });
 
+// Shared by the page URL and the ICS feed, which accepts the same parameters.
+function filterQueryValues() {
+  return {
+    cast: filters.cast.length && !allCastSelected.value ? filters.cast.join(",") : "",
+    category: filters.category.length && !allProgramCategoriesSelected.value ? filters.category.join(",") : "",
+    delivery: !filters.delivery.length
+      ? "none"
+      : sameValues(filters.delivery, defaultDeliveryValues) ? "" : filters.delivery.join(","),
+  };
+}
+
 watch(filters, () => {
   const nextQuery = { ...route.query };
-  if (filters.cast.length && !allCastSelected.value) nextQuery.cast = filters.cast.join(",");
-  else delete nextQuery.cast;
-  if (filters.category.length && !allProgramCategoriesSelected.value) nextQuery.category = filters.category.join(",");
-  else delete nextQuery.category;
-  if (!filters.delivery.length) nextQuery.delivery = "none";
-  else if (sameValues(filters.delivery, defaultDeliveryValues)) delete nextQuery.delivery;
-  else nextQuery.delivery = filters.delivery.join(",");
+  Object.entries(filterQueryValues()).forEach(([key, value]) => {
+    if (value) nextQuery[key] = value;
+    else delete nextQuery[key];
+  });
   if (JSON.stringify(nextQuery) !== JSON.stringify(route.query)) router.replace({ query: nextQuery });
 }, { deep: true });
 
@@ -670,6 +679,11 @@ function setScreenshotMessage(message, kind = "success") {
     screenshotMessage.value = "";
     screenshotMessageTimer = 0;
   }, 4500);
+}
+
+async function copyIcsFeedUrl() {
+  const copied = await copyText(programIcsUrl(filterQueryValues()));
+  setScreenshotMessage(copied ? t("已复制 ICS 订阅链接，可在日历应用中通过 URL 订阅") : t("复制失败"), copied ? "success" : "error");
 }
 
 function screenshotBackground(target) {
@@ -1230,6 +1244,7 @@ onUnmounted(() => {
           <div class="section-heading">
             <div><p class="eyebrow">SCHEDULE / CALENDAR</p><h2>{{ t("播出日历") }}</h2></div>
            <div class="program-calendar-heading-actions">
+             <button type="button" class="secondary program-action-button" :title="t('复制按当前筛选生成的 ICS 订阅链接')" @click="copyIcsFeedUrl">{{ t("订阅日历") }}</button>
              <RouterLink class="secondary program-action-button" to="/programs/archive">{{ t("已录入节目") }}</RouterLink>
              <div class="program-view-switch" role="tablist" :aria-label="t('节目视图')">
                <button type="button" :class="{ selected: viewMode === 'calendar' }" role="tab" :aria-selected="viewMode === 'calendar'" @click="viewMode = 'calendar'">{{ t("日历") }}</button>

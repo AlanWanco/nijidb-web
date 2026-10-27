@@ -5,6 +5,7 @@ import { api } from "../api";
 import { locale, localeTag, t } from "../i18n";
 import { NIJIGASAKI_CAST, castColorSegments } from "../programCast";
 import { occurrenceLinkItems, programAdminPath, relatedLinkItem } from "../programLinks";
+import { copyText, programIcsUrl } from "../programIcs";
 import NewsLightbox from "../components/NewsLightbox.vue";
 
 const weekdayNames = computed(() => locale.value === "en"
@@ -39,6 +40,7 @@ const occurrenceLoading = ref(false);
 const error = ref("");
 const adminAuthenticated = ref(false);
 const editAccessNotice = ref("");
+const icsCopyNotice = ref("");
 const editAccessMessage = computed(() => t("需要登录管理员后才能编辑；未来将开放编辑审核。"));
 
 const programId = computed(() => String(route.params.programId || ""));
@@ -297,7 +299,13 @@ async function openAdminEditor(path) {
   editAccessNotice.value = editAccessMessage.value;
 }
 
+async function copyProgramIcsUrl() {
+  const copied = await copyText(programIcsUrl({ program: programId.value }));
+  icsCopyNotice.value = copied ? t("已复制 ICS 订阅链接，可在日历应用中通过 URL 订阅") : t("复制失败");
+}
+
 watch(programId, () => {
+  icsCopyNotice.value = "";
   loadPrograms();
 });
 
@@ -344,6 +352,7 @@ onUnmounted(() => window.clearTimeout(programSearchTimer));
     <p v-if="editAccessNotice" class="program-edit-access-notice" role="status">
       {{ editAccessNotice }}
     </p>
+    <p v-if="icsCopyNotice && detailMode" class="program-edit-access-notice" role="status">{{ icsCopyNotice }}</p>
 
     <template v-if="!detailMode">
        <section class="program-calendar-card program-readonly-list-card" :class="{ 'program-cast-filter-open': castFilterOpen }">
@@ -406,6 +415,7 @@ onUnmounted(() => window.clearTimeout(programSearchTimer));
            <div><p class="eyebrow">PROGRAM PROFILE</p><h2>{{ selectedProgram.title }}</h2></div>
           <div class="program-readonly-actions">
              <button type="button" class="secondary program-action-button" @click="returnToList">← {{ t("已录入节目") }}</button>
+             <button type="button" class="secondary program-action-button" :title="t('复制此节目的 ICS 订阅链接')" @click="copyProgramIcsUrl">{{ t("订阅日历") }}</button>
              <button type="button" class="secondary program-action-button" @click="openAdminEditor(selectedAdminProgramPath)">{{ t("编辑节目") }}</button>
           </div>
         </div>

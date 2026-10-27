@@ -7706,19 +7706,21 @@ def program_event_ics(event: dict[str, Any], program: dict[str, Any], stamp: str
     )
 
 
-def eventernote_clock(value: str) -> time | None:
+def eventernote_clock(value: str) -> timedelta | None:
+    """Offset from midnight; Japanese listings write after-midnight times as 24:00-29:59."""
     match = re.match(r"(\d{1,2}):(\d{2})", value)
-    if not match or int(match[1]) > 23 or int(match[2]) > 59:
+    if not match or int(match[1]) > 29 or int(match[2]) > 59:
         return None
-    return time(int(match[1]), int(match[2]))
+    return timedelta(hours=int(match[1]), minutes=int(match[2]))
 
 
 def eventernote_event_ics(item: dict[str, Any], day: date, stamp: str) -> list[str]:
     zone = occurrence_timezone(item["timezone"])
     start_time = eventernote_clock(item["start_time"])
     end_time = eventernote_clock(item["end_time"])
-    start = datetime.combine(day, start_time, tzinfo=zone) if start_time else day
-    end = datetime.combine(day, end_time, tzinfo=zone) if start_time and end_time and end_time > start_time else None
+    midnight = datetime.combine(day, time(), tzinfo=zone)
+    start = midnight + start_time if start_time is not None else day
+    end = midnight + end_time if start_time is not None and end_time is not None and end_time > start_time else None
     source_url = item["source_url"] if valid_external_url(item["source_url"]) else ""
     details = []
     if item["performers"]:

@@ -224,6 +224,7 @@ class ProgramIcsTests(unittest.IsolatedAsyncioTestCase):
                 },
                 {"id": 43, "title": "Other", "event_date": day, "performers": [{"actor": {"name": "鬼頭明里"}}]},
                 {"id": 44, "title": "", "event_date": day},
+                {"id": 45, "title": "Late", "event_date": day, "start_time": "25:00", "end_time": "26:30", "performers": [{"actor": {"name": "相良茉優"}}]},
             ]
         }
         fetch = AsyncMock(return_value=payload)
@@ -234,7 +235,12 @@ class ProgramIcsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fetch.await_count, 2)
         self.assertNotIn("ETag", response.headers)
         self.assertEqual(response.headers["cache-control"], "no-store")
-        [event] = vevents(response.text)
+        events = {event["UID"]: event for event in vevents(response.text)}
+        self.assertEqual(set(events), {"eventernote-42@nijidb", "eventernote-45@nijidb"})
+        late = events["eventernote-45@nijidb"]
+        self.assertEqual(late["DTSTART"], main.datetime.combine(self.day, main.time(16, 0)).strftime("%Y%m%dT%H%M%SZ"))
+        self.assertEqual(late["DTEND"], main.datetime.combine(self.day, main.time(17, 30)).strftime("%Y%m%dT%H%M%SZ"))
+        event = events["eventernote-42@nijidb"]
         self.assertEqual(event["UID"], "eventernote-42@nijidb")
         self.assertEqual(event["SUMMARY"], "Live\\; Day 1")
         self.assertEqual(event["DTSTART"], main.datetime.combine(self.day, main.time(9, 0)).strftime("%Y%m%dT%H%M%SZ"))
@@ -243,7 +249,7 @@ class ProgramIcsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event["URL"], "https://www.eventernote.com/events/42")
         self.assertEqual(
             sorted(event["SUMMARY"] for event in vevents(with_programs.text)),
-            ["Live\\; Day 1", "Other", "official · 第1期 · 特集\\; A\\, B"],
+            ["Late", "Live\\; Day 1", "Other", "official · 第1期 · 特集\\; A\\, B"],
         )
 
 

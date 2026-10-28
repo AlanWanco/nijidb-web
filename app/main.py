@@ -211,25 +211,34 @@ NIJIGASAKI_NAME_ALIASES = {
     "鬼头明里": "鬼頭明里",
     "楠木灯": "楠木ともり",
     "指出毬亚": "指出毬亜",
-    "田中智惠美": "田中ちえ美",
+    "田中千惠美": "田中ちえ美",
 }
-# Same members and order as frontend/src/programCast.js.
-NIJIGASAKI_CAST_NAMES = (
-    "大西亜玖璃",
-    "相良茉優",
-    "前田佳織里",
-    "久保田未夢",
-    "村上奈津実",
-    "鬼頭明里",
-    "楠木ともり",
-    "林鼓子",
-    "指出毬亜",
-    "田中ちえ美",
-    "小泉萌香",
-    "内田秀",
-    "法元明菜",
-    "矢野妃菜喜",
-)
+# Character ids used by the ICS feed, so a subscription survives a name change.
+# 1-13 follow the Nijigasaki cast order; 14 is the former Setsuna voice actor.
+# Keep in sync with frontend/src/programCast.js.
+NIJIGASAKI_CAST_BY_ID = {
+    1: "大西亜玖璃",
+    2: "相良茉優",
+    3: "前田佳織里",
+    4: "久保田未夢",
+    5: "村上奈津実",
+    6: "鬼頭明里",
+    7: "林鼓子",
+    8: "指出毬亜",
+    9: "田中ちえ美",
+    10: "小泉萌香",
+    11: "内田秀",
+    12: "法元明菜",
+    13: "矢野妃菜喜",
+    14: "楠木ともり",
+}
+NIJIGASAKI_CAST_ID_BY_NAME = {
+    **{name: cast_id for cast_id, name in NIJIGASAKI_CAST_BY_ID.items()},
+    **{
+        alias: next(cast_id for cast_id, name in NIJIGASAKI_CAST_BY_ID.items() if name == canonical)
+        for alias, canonical in NIJIGASAKI_NAME_ALIASES.items()
+    },
+}
 R2_ENDPOINT = os.getenv("R2_ENDPOINT", "").strip()
 R2_BUCKET = os.getenv("R2_BUCKET", "nijidb").strip()
 R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "").strip()
@@ -7738,13 +7747,12 @@ def query_list(request: Request, name: str) -> list[str]:
 
 
 def program_ics_filters(request: Request) -> dict[str, list[str]]:
-    """Parse the cast/category/delivery values used by /programs, plus program IDs."""
+    """Parse cast ids, the category/delivery values used by /programs, and program IDs."""
     cast = set()
     for value in query_list(request, "cast"):
-        name = NIJIGASAKI_NAME_ALIASES.get(value, value)
-        if name not in NIJIGASAKI_CAST_NAMES:
-            raise HTTPException(400, f"未知的 Cast：{value}")
-        cast.add(name)
+        if not value.isdigit() or int(value) not in NIJIGASAKI_CAST_BY_ID:
+            raise HTTPException(400, f"未知的 Cast ID：{value}")
+        cast.add(int(value))
     categories = {value.lower() for value in query_list(request, "category")}
     if unknown := categories - PROGRAM_CATEGORIES:
         raise HTTPException(400, f"未知的节目类型：{'、'.join(sorted(unknown))}")
@@ -7760,7 +7768,7 @@ def program_ics_filters(request: Request) -> dict[str, list[str]]:
         raise HTTPException(400, f"一次最多筛选 {PROGRAM_ICS_MAX_PROGRAMS} 个节目")
     return {
         # Selecting every member or category is the same as not filtering, as on the calendar page.
-        "cast": [] if len(cast) == len(NIJIGASAKI_CAST_NAMES) else [name for name in NIJIGASAKI_CAST_NAMES if name in cast],
+        "cast": [] if len(cast) == len(NIJIGASAKI_CAST_BY_ID) else sorted(cast),
         "category": [] if categories == PROGRAM_CATEGORIES else sorted(categories),
         "delivery": [value for value in PROGRAM_ICS_DELIVERIES if value in deliveries],
         "program": sorted(programs),
@@ -7778,10 +7786,16 @@ def program_ics_program_ids(identifiers: list[str]) -> set[str]:
     return {row["id"] for row in rows}
 
 
-def nijigasaki_cast(people: list[str], absent: list[str] | None = None) -> list[str]:
-    present = {NIJIGASAKI_NAME_ALIASES.get(name, name) for name in people}
-    present -= {NIJIGASAKI_NAME_ALIASES.get(name, name) for name in absent or []}
-    return [name for name in NIJIGASAKI_CAST_NAMES if name in present]
+def nijigasaki_cast(people: list[str], absent: list[str] | None = None) -> list[int]:
+    def cast_ids(names: list[str]) -> set[int]:
+        return {
+            NIJIGASAKI_CAST_ID_BY_NAME[name]
+            for name in (NIJIGASAKI_NAME_ALIASES.get(item, item) for item in names)
+            if name in NIJIGASAKI_CAST_ID_BY_NAME
+        }
+
+    present = cast_ids(people) - cast_ids(absent or [])
+    return sorted(present)
 
 
 def ics_text(value: Any) -> str:

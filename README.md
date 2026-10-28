@@ -147,17 +147,17 @@ npm run dev
 
 ## 节目日历订阅（ICS）
 
-`GET /api/programs/calendar.ics` 提供可在日历应用中按 URL 订阅的 iCalendar 源。`/programs` 的“订阅日历”按钮会按当前筛选复制订阅链接；节目详情页的同名按钮复制该节目的链接。参数与播出日历页面的 URL 一致，多个值用逗号分隔或重复参数：
+`GET /api/programs/calendar.ics` 提供可在日历应用中按 URL 订阅的 iCalendar 源。`/programs` 的“订阅日历”按钮会按当前筛选复制订阅链接；节目详情页的同名按钮复制该节目的链接。参数与播出日历页面的 URL 对应（`cast` 在订阅链接中改用成员编号），多个值用逗号分隔或重复参数：
 
 | 参数 | 说明 |
 | --- | --- |
-| `cast` | 虹咲成员日文原名（也接受简体写法），匹配节目固定成员和单集嘉宾，并排除该期缺席成员 |
+| `cast` | 虹咲成员编号，逗号分隔：1 大西亜玖璃、2 相良茉優、3 前田佳織里、4 久保田未夢、5 村上奈津実、6 鬼頭明里、7 林鼓子、8 指出毬亜、9 田中ちえ美、10 小泉萌香、11 内田秀、12 法元明菜、13 矢野妃菜喜、14 楠木ともり（前代せつ菜）。匹配节目固定成员和单集嘉宾，并排除该期缺席成员 |
 | `category` | `official` / `personal` |
 | `delivery` | `live` / `recorded` / `event`，默认 `live,recorded`；`event` 为 Eventernote 线下活动，`none` 返回空日历 |
 | `program` | 节目 ID；主节目 ID 同时包含其子节目。指定后不加入 Eventernote 活动，没有虹咲成员的节目也会显示 |
 | `start` / `end` | 日期范围，`end` 不含当天；默认今天前后各 183 天，最长 366 天 |
 
-例如 `/api/programs/calendar.ics?cast=相良茉優,前田佳織里&delivery=live`。未知的成员、类型或播出方式返回 400。时间以 UTC 输出；节目没有时长数据，带时间的单集只有开始时间，未定时间的单集为全天事件。取消的单集带 `STATUS:CANCELLED`，改期单集在描述中注明原定时间。只含节目的订阅源复用上面的 ETag 缓存；包含 `event` 时每次请求 Eventernote，读取失败返回 502。
+例如 `/api/programs/calendar.ics?cast=2,3&delivery=live`。成员用编号而不是名字，改名不会让已订阅的链接失效。未知的成员编号、类型或播出方式返回 400。时间以 UTC 输出；节目没有时长数据，带时间的单集只有开始时间，未定时间的单集为全天事件。取消的单集带 `STATUS:CANCELLED`，改期单集在描述中注明原定时间。只含节目的订阅源复用上面的 ETag 缓存；包含 `event` 时每次请求 Eventernote，读取失败返回 502。
 
 ## 联动立绘档案
 

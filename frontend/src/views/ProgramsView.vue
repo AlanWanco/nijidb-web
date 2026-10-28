@@ -681,8 +681,25 @@ function setScreenshotMessage(message, kind = "success") {
   }, 4500);
 }
 
+// The feed keys cast by numeric id, so a renamed member does not break a saved subscription.
+function castId(value) {
+  const member = NIJIGASAKI_CAST.find(item => [item.name, ...item.aliases].includes(value));
+  return member?.id;
+}
+
+function icsQueryValues() {
+  const values = filterQueryValues();
+  return {
+    cast: filters.cast.length && !allCastSelected.value
+      ? [...new Set(filters.cast.map(castId).filter(Boolean))].sort((left, right) => left - right).join(",")
+      : "",
+    category: values.category,
+    delivery: values.delivery,
+  };
+}
+
 async function copyIcsFeedUrl() {
-  const copied = await copyText(programIcsUrl(filterQueryValues()));
+  const copied = await copyText(programIcsUrl(icsQueryValues()));
   setScreenshotMessage(copied ? t("已复制 ICS 订阅链接，可在日历应用中通过 URL 订阅") : t("复制失败"), copied ? "success" : "error");
 }
 

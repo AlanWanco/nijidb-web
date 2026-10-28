@@ -159,13 +159,13 @@ class ProgramIcsTests(unittest.IsolatedAsyncioTestCase):
         self.seed_fixture()
         everything = await self.summaries()
         self.assertEqual(len(everything), 5)
-        self.assertEqual(await self.summaries("?cast=相良茉优"), ["official · 第1期 · 特集\\; A\\, B"])
+        self.assertEqual(await self.summaries("?cast=2"), ["official · 第1期 · 特集\\; A\\, B"])
         # The member is absent from that episode, so only the subprogram with another member remains.
-        self.assertEqual(await self.summaries("?cast=鬼頭明里"), [])
-        self.assertEqual(await self.summaries("?cast=鬼頭明里,前田佳織里"), ["personal · 番外 · 第1期"])
+        self.assertEqual(await self.summaries("?cast=6"), [])
+        self.assertEqual(await self.summaries("?cast=6,3"), ["personal · 番外 · 第1期"])
         self.assertEqual(await self.summaries("?category=personal"), ["personal · 番外 · 第1期", "personal · 第1期"])
         self.assertEqual(await self.summaries("?category=official,personal"), everything)
-        self.assertEqual(await self.summaries("?cast=" + ",".join(main.NIJIGASAKI_CAST_NAMES)), everything)
+        self.assertEqual(await self.summaries("?cast=" + ",".join(str(cast_id) for cast_id in main.NIJIGASAKI_CAST_BY_ID)), everything)
         self.assertEqual(await self.summaries("?delivery=live"), ["official · 第1期 · 特集\\; A\\, B"])
         self.assertEqual(await self.summaries("?delivery=none"), [])
         self.assertEqual(
@@ -185,7 +185,7 @@ class ProgramIcsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_parameters_are_rejected(self):
         for query in (
-            "?cast=不存在",
+            "?cast=99",
             "?category=unknown",
             "?delivery=tv",
             "?start=2026-01-01&end=2027-02-01",
@@ -231,7 +231,7 @@ class ProgramIcsTests(unittest.IsolatedAsyncioTestCase):
         }
         fetch = AsyncMock(return_value=payload)
         with patch.object(main, "fetch_eventernote_events", fetch):
-            response = await self.feed("?delivery=event&cast=相良茉優")
+            response = await self.feed("?delivery=event&cast=2")
             with_programs = await self.feed("?delivery=live,event")
             await self.feed("?delivery=event&program=official")
         self.assertEqual(fetch.await_count, 2)

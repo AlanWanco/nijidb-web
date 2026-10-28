@@ -211,6 +211,23 @@ NIJIGASAKI_NAME_ALIASES = {
     "指出毬亚": "指出毬亜",
     "田中智惠美": "田中ちえ美",
 }
+# Same members and order as frontend/src/programCast.js.
+NIJIGASAKI_CAST_NAMES = (
+    "大西亜玖璃",
+    "相良茉優",
+    "前田佳織里",
+    "久保田未夢",
+    "村上奈津実",
+    "鬼頭明里",
+    "楠木ともり",
+    "林鼓子",
+    "指出毬亜",
+    "田中ちえ美",
+    "小泉萌香",
+    "内田秀",
+    "法元明菜",
+    "矢野妃菜喜",
+)
 R2_ENDPOINT = os.getenv("R2_ENDPOINT", "").strip()
 R2_BUCKET = os.getenv("R2_BUCKET", "nijidb").strip()
 R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "").strip()
@@ -7610,20 +7627,29 @@ async def api_admin_release_cover(release_id: str, request: Request) -> dict[str
 
 
 program_api_cache = PublicProgramCache()
+# Feed URLs vary per filter and are polled by calendar apps; keep them from evicting page responses.
+program_ics_cache = PublicProgramCache()
 
 
 def program_api_revision() -> str | None:
     return database_revision(DB_PATH, ("program-api-v1", PROGRAM_JSON_VERSION, R2_PUBLIC_BASE_URL, R2_IMAGE_PREFIX))
 
 
-async def cached_program_api_response(request: Request, key: str, build: Callable[[], dict[str, Any]]) -> Response:
+async def cached_program_api_response(
+    request: Request,
+    key: str,
+    build: Callable[[], dict[str, Any] | bytes],
+    media_type: str = "application/json",
+    extra_headers: dict[str, str] | None = None,
+    cache: PublicProgramCache | None = None,
+) -> Response:
     result = await asyncio.to_thread(
-        program_api_cache.response, key, program_api_revision, build, request.headers.get("if-none-match", "")
+        (cache or program_api_cache).response, key, program_api_revision, build, request.headers.get("if-none-match", "")
     )
-    headers = {"Cache-Control": "private, no-cache" if result.etag else "no-store"}
+    headers = {**(extra_headers or {}), "Cache-Control": "private, no-cache" if result.etag else "no-store"}
     if result.etag:
         headers["ETag"] = result.etag
-    return Response(result.body, status_code=result.status, media_type="application/json", headers=headers)
+    return Response(result.body, status_code=result.status, media_type=media_type, headers=headers)
 
 
 @app.get("/api/programs")
@@ -7666,9 +7692,11 @@ def hydrate_calendar_records(record_sets: dict[str, list[dict[str, Any]]], range
         record["images"] = images.get(record["id"], [])
 
 
-def build_program_calendar(range_start: date, range_end: date) -> dict[str, Any]:
+def build_program_calendar(range_start: date, range_end: date, program_ids: set[str] | None = None) -> dict[str, Any]:
     records: dict[str, list[dict[str, Any]]] = {}
-    programs = program_rows(include_occurrences=False, record_range_end=range_end, record_sets=records)
+    programs = program_rows(
+        include_occurrences=False, program_ids=program_ids, record_range_end=range_end, record_sets=records
+    )
     hydrate_calendar_records(records, range_start, range_end)
     events = [
         event
@@ -7695,6 +7723,282 @@ async def api_program_calendar(request: Request, start: str = "", end: str = "")
     )
 
 
+PROGRAM_ICS_DELIVERIES = ("live", "recorded", "event")
+PROGRAM_ICS_MAX_DAYS = 2 * PROGRAM_FORECAST_DAYS
+PROGRAM_ICS_MAX_PROGRAMS = 100
+PROGRAM_CATEGORY_LABELS = {"official": "官方节目", "personal": "个人节目"}
+PROGRAM_DELIVERY_LABELS = {"live": "直播", "recorded": "录播"}
+ICS_CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def query_list(request: Request, name: str) -> list[str]:
+    return [item.strip() for value in request.query_params.getlist(name) for item in value.split(",") if item.strip()]
+
+
+def program_ics_filters(request: Request) -> dict[str, list[str]]:
+    """Parse the cast/category/delivery values used by /programs, plus program IDs."""
+    cast = set()
+    for value in query_list(request, "cast"):
+        name = NIJIGASAKI_NAME_ALIASES.get(value, value)
+        if name not in NIJIGASAKI_CAST_NAMES:
+            raise HTTPException(400, f"未知的 Cast：{value}")
+        cast.add(name)
+    categories = {value.lower() for value in query_list(request, "category")}
+    if unknown := categories - PROGRAM_CATEGORIES:
+        raise HTTPException(400, f"未知的节目类型：{'、'.join(sorted(unknown))}")
+    deliveries = {value.lower() for value in query_list(request, "delivery")} or PROGRAM_DELIVERIES
+    if "none" in deliveries:
+        deliveries = set()
+    elif unknown := deliveries - set(PROGRAM_ICS_DELIVERIES):
+        raise HTTPException(400, f"未知的播出方式：{'、'.join(sorted(unknown))}")
+    # Program IDs from external imports may contain commas; keep each raw value as a candidate too.
+    programs = {value.strip() for value in [*request.query_params.getlist("program"), *query_list(request, "program")]}
+    programs.discard("")
+    if len(programs) > PROGRAM_ICS_MAX_PROGRAMS:
+        raise HTTPException(400, f"一次最多筛选 {PROGRAM_ICS_MAX_PROGRAMS} 个节目")
+    return {
+        # Selecting every member or category is the same as not filtering, as on the calendar page.
+        "cast": [] if len(cast) == len(NIJIGASAKI_CAST_NAMES) else [name for name in NIJIGASAKI_CAST_NAMES if name in cast],
+        "category": [] if categories == PROGRAM_CATEGORIES else sorted(categories),
+        "delivery": [value for value in PROGRAM_ICS_DELIVERIES if value in deliveries],
+        "program": sorted(programs),
+    }
+
+
+def program_ics_program_ids(identifiers: list[str]) -> set[str]:
+    """Selecting a main program also selects its subprograms."""
+    placeholders = ", ".join("?" for _ in identifiers)
+    with db() as conn:
+        rows = conn.execute(
+            f"SELECT id FROM programs WHERE id IN ({placeholders}) OR parent_id IN ({placeholders})",
+            [*identifiers, *identifiers],
+        ).fetchall()
+    return {row["id"] for row in rows}
+
+
+def nijigasaki_cast(people: list[str], absent: list[str] | None = None) -> list[str]:
+    present = {NIJIGASAKI_NAME_ALIASES.get(name, name) for name in people}
+    present -= {NIJIGASAKI_NAME_ALIASES.get(name, name) for name in absent or []}
+    return [name for name in NIJIGASAKI_CAST_NAMES if name in present]
+
+
+def ics_text(value: Any) -> str:
+    text = ICS_CONTROL_CHARACTERS.sub("", str(value).replace("\r\n", "\n").replace("\r", "\n"))
+    return text.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+
+
+def ics_line(name: str, value: str) -> str:
+    """Fold at 75 octets without splitting UTF-8 characters (RFC 5545 section 3.1)."""
+    lines = [""]
+    size = 0
+    for char in f"{name}:{value}":
+        width = len(char.encode())
+        if size + width > 75:
+            lines.append(" ")
+            size = 1
+        lines[-1] += char
+        size += width
+    return "\r\n".join(lines)
+
+
+def ics_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def ics_event(
+    uid: str,
+    stamp: str,
+    start: date | datetime,
+    summary: str,
+    *,
+    end: datetime | None = None,
+    description: str = "",
+    location: str = "",
+    url: str = "",
+    categories: list[str] | None = None,
+    cancelled: bool = False,
+) -> list[str]:
+    lines = ["BEGIN:VEVENT", ics_line("UID", ics_text(uid)), f"DTSTAMP:{stamp}"]
+    if isinstance(start, datetime):
+        # Programs have no stored duration, so timed events without an end are instantaneous.
+        lines.append(f"DTSTART:{ics_utc(start)}")
+        if end:
+            lines.append(f"DTEND:{ics_utc(end)}")
+    else:
+        lines += [f"DTSTART;VALUE=DATE:{start:%Y%m%d}", f"DTEND;VALUE=DATE:{start + timedelta(days=1):%Y%m%d}"]
+    lines.append(ics_line("SUMMARY", ics_text(summary)))
+    if description:
+        lines.append(ics_line("DESCRIPTION", ics_text(description)))
+    if location:
+        lines.append(ics_line("LOCATION", ics_text(location)))
+    if url:
+        lines.append(ics_line("URL", url))
+    if categories:
+        lines.append(ics_line("CATEGORIES", ",".join(ics_text(item) for item in categories)))
+    if cancelled:
+        lines.append("STATUS:CANCELLED")
+    # Broadcasts are informational and should not mark subscribers as busy.
+    lines += ["TRANSP:TRANSPARENT", "END:VEVENT"]
+    return lines
+
+
+def program_ics_link(value: str) -> str:
+    return f"https://www.bilibili.com/video/{value}" if BILIBILI_BV_PATTERN.fullmatch(value) else value
+
+
+def program_event_ics(event: dict[str, Any], program: dict[str, Any], stamp: str) -> list[str]:
+    props = event["extendedProps"]
+    start = datetime.fromisoformat(event["start"]) if "T" in event["start"] else date.fromisoformat(event["start"])
+    category = PROGRAM_CATEGORY_LABELS.get(props["category"], props["category"])
+    delivery = PROGRAM_DELIVERY_LABELS.get(props["delivery"], props["delivery"])
+    details = [f"{category} · {delivery}"]
+    for label, people in (("出演", props["people"]), ("嘉宾", props["guests"]), ("缺席", props["absentMembers"])):
+        if people:
+            details.append(f"{label}：{'、'.join(people)}")
+    if props["occurrenceStatus"] == "rescheduled":
+        original = " ".join(value for value in (props["originalDate"], props["originalTime"]) if value)
+        details.append(f"原定：{original}（{PROGRAM_TIMEZONES.get(props['timezone'], props['timezone'])}）")
+    if props["note"]:
+        details.append(f"备注：{props['note']}")
+    official_url = program.get("official_url", "")
+    for label, link in (
+        ("源地址", props["source_url"]),
+        ("搬运地址", props["mirror_url"]),
+        ("字幕地址", props["subtitle_url"]),
+        ("相关链接", official_url),
+    ):
+        if link:
+            details.append(f"{label}：{program_ics_link(link)}")
+    return ics_event(
+        f"{props['programId']}/{props['originalDate']}/{props['originalTime'] or 'all-day'}@nijidb",
+        stamp,
+        start,
+        event["title"],
+        description="\n".join(details),
+        url=props["source_url"] or official_url,
+        categories=[category, delivery],
+        cancelled=props["occurrenceStatus"] == "cancelled",
+    )
+
+
+def eventernote_clock(value: str) -> timedelta | None:
+    """Offset from midnight; Japanese listings write after-midnight times as 24:00-29:59."""
+    match = re.match(r"(\d{1,2}):(\d{2})", value)
+    if not match or int(match[1]) > 29 or int(match[2]) > 59:
+        return None
+    return timedelta(hours=int(match[1]), minutes=int(match[2]))
+
+
+def eventernote_event_ics(item: dict[str, Any], day: date, stamp: str) -> list[str]:
+    zone = occurrence_timezone(item["timezone"])
+    start_time = eventernote_clock(item["start_time"])
+    end_time = eventernote_clock(item["end_time"])
+    midnight = datetime.combine(day, time(), tzinfo=zone)
+    start = midnight + start_time if start_time is not None else day
+    end = midnight + end_time if start_time is not None and end_time is not None and end_time > start_time else None
+    source_url = item["source_url"] if valid_external_url(item["source_url"]) else ""
+    details = []
+    if item["performers"]:
+        details.append(f"出演：{'、'.join(item['performers'])}")
+    if item["raw_time_text"]:
+        details.append(f"时间：{item['raw_time_text']}")
+    if source_url:
+        details.append(f"来源：{source_url}")
+    identifier = item["id"] or f"{day.isoformat()}-{item['title']}"
+    return ics_event(
+        f"eventernote-{identifier}@nijidb",
+        stamp,
+        start,
+        item["title"],
+        end=end,
+        description="\n".join(details),
+        location=item["place_name"],
+        url=source_url,
+        categories=["线下活动"],
+    )
+
+
+def build_program_ics(
+    range_start: date, range_end: date, filters: dict[str, list[str]], eventernote_items: list[dict[str, Any]]
+) -> bytes:
+    stamp = ics_utc(datetime.now(timezone.utc))
+    selected_cast = set(filters["cast"])
+    calendar_name = "Nijigasaki DB 节目档案"
+    events: list[str] = []
+    if PROGRAM_DELIVERIES.intersection(filters["delivery"]):
+        program_ids = program_ics_program_ids(filters["program"]) if filters["program"] else None
+        payload = build_program_calendar(range_start, range_end, program_ids)
+        programs = {program["id"]: program for program in payload["programs"]}
+        titles = {program["title"] for program in programs.values()}
+        if filters["program"] and len(titles) == 1:
+            calendar_name = f"{titles.pop()} · Nijigasaki DB"
+        for event in payload["events"]:
+            props = event["extendedProps"]
+            cast = nijigasaki_cast([*props["people"], *props["guests"]], props["absentMembers"])
+            # Like the calendar page, hide events without any Nijigasaki member unless programs are chosen explicitly.
+            if not filters["program"] and not cast and not nijigasaki_cast(props["people"]):
+                continue
+            if props["delivery"] not in filters["delivery"]:
+                continue
+            if filters["category"] and props["category"] not in filters["category"]:
+                continue
+            if selected_cast and selected_cast.isdisjoint(cast):
+                continue
+            events += program_event_ics(event, programs[props["programId"]], stamp)
+    for item in eventernote_items:
+        try:
+            day = date.fromisoformat(item["event_date"])
+        except ValueError:
+            continue
+        if not item["title"] or not range_start <= day <= range_end:
+            continue
+        if selected_cast and selected_cast.isdisjoint(nijigasaki_cast(item["performers"])):
+            continue
+        events += eventernote_event_ics(item, day, stamp)
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//nijidb-web//Program Calendar//ZH",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        ics_line("X-WR-CALNAME", ics_text(calendar_name)),
+        "REFRESH-INTERVAL;VALUE=DURATION:PT1H",
+        "X-PUBLISHED-TTL:PT1H",
+        *events,
+        "END:VCALENDAR",
+    ]
+    return ("\r\n".join(lines) + "\r\n").encode()
+
+
+@app.get("/api/programs/calendar.ics")
+async def api_program_calendar_ics(request: Request, start: str = "", end: str = "") -> Response:
+    filters = program_ics_filters(request)
+    today = datetime.now(JAPAN_TZ).date()
+    range_start = calendar_date(start, today - timedelta(days=PROGRAM_FORECAST_DAYS))
+    range_end = calendar_date(end, range_start + timedelta(days=PROGRAM_ICS_MAX_DAYS))
+    if end:
+        range_end -= timedelta(days=1)
+    if range_end < range_start:
+        raise HTTPException(400, "日历结束日期不能早于开始日期")
+    if range_end - range_start > timedelta(days=PROGRAM_ICS_MAX_DAYS):
+        raise HTTPException(400, f"ICS 日期范围不能超过 {PROGRAM_ICS_MAX_DAYS} 天")
+    headers = {"Content-Disposition": 'inline; filename="nijidb-programs.ics"'}
+    # Eventernote is external and not covered by the database revision, so only program-only feeds are cached.
+    if "event" not in filters["delivery"] or filters["program"]:
+        return await cached_program_api_response(
+            request,
+            "ics:" + json.dumps([range_start.isoformat(), range_end.isoformat(), filters], ensure_ascii=False),
+            lambda: build_program_ics(range_start, range_end, filters, []),
+            "text/calendar",
+            headers,
+            program_ics_cache,
+        )
+    payload = await fetch_eventernote_events(range_start, range_end)
+    items = [eventernote_event_payload(item) for item in payload["items"] if isinstance(item, dict)]
+    body = await asyncio.to_thread(build_program_ics, range_start, range_end, filters, items)
+    return Response(body, media_type="text/calendar", headers={**headers, "Cache-Control": "no-store"})
+
+
 @app.get("/api/eventernote/events")
 async def api_eventernote_events(from_date: str = "", to_date: str = "") -> dict[str, Any]:
     today = datetime.now(JAPAN_TZ).date()
@@ -7704,6 +8008,16 @@ async def api_eventernote_events(from_date: str = "", to_date: str = "") -> dict
         raise HTTPException(400, "Eventernote 日期范围无效")
     if range_end - range_start > timedelta(days=366):
         raise HTTPException(400, "Eventernote 日期范围过大")
+    payload = await fetch_eventernote_events(range_start, range_end)
+    return {
+        "items": [eventernote_event_payload(item) for item in payload["items"] if isinstance(item, dict)],
+        "cached_at": payload.get("cached_at"),
+        "from_date": range_start.isoformat(),
+        "to_date": range_end.isoformat(),
+    }
+
+
+async def fetch_eventernote_events(range_start: date, range_end: date) -> dict[str, Any]:
     try:
         async with httpx.AsyncClient(
             timeout=20,
@@ -7720,12 +8034,7 @@ async def api_eventernote_events(from_date: str = "", to_date: str = "") -> dict
         raise HTTPException(502, "Eventernote 数据暂时无法读取") from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
         raise HTTPException(502, "Eventernote 数据格式无效")
-    return {
-        "items": [eventernote_event_payload(item) for item in payload["items"] if isinstance(item, dict)],
-        "cached_at": payload.get("cached_at"),
-        "from_date": range_start.isoformat(),
-        "to_date": range_end.isoformat(),
-    }
+    return payload
 
 
 @app.get("/api/programs/{program_id}/occurrences")

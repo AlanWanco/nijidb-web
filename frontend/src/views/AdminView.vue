@@ -6,6 +6,7 @@ import { api } from "../api";
 import { formatLocalDateTime } from "../datetime";
 import { prepareImageUpload } from "../imageUpload";
 import { t } from "../i18n";
+import { copyText } from "../programIcs";
 
 const router = useRouter();
 const route = useRoute();
@@ -345,23 +346,9 @@ function updateExternalApiResource(resourceId, changes) {
 
 async function copyExternalApiText(value, target) {
   if (!value) return;
-  try {
-    if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
-    await navigator.clipboard.writeText(value);
-  } catch {
-    const fallback = document.createElement("textarea");
-    fallback.value = value;
-    fallback.style.position = "fixed";
-    fallback.style.opacity = "0";
-    document.body.appendChild(fallback);
-    fallback.focus();
-    fallback.select();
-    const copied = document.execCommand("copy");
-    fallback.remove();
-    if (!copied) {
-      error.value = t("复制失败");
-      return;
-    }
+  if (!await copyText(value)) {
+    error.value = t("复制失败");
+    return;
   }
   externalApiCopyStatus.value = target;
   if (externalApiCopyTimer) window.clearTimeout(externalApiCopyTimer);

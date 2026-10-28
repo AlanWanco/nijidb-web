@@ -145,6 +145,20 @@ npm run dev
 
 月历在浏览器 IndexedDB 中最多保留 6 个公开窗口、最长 24 小时，每次打开先显示已有缓存再后台校验；储存被禁用时退回内存/普通请求。更新失败会明确提示正在显示缓存，切月会取消旧请求。月份网格立即可见，初次等待显示骨架提示；数据到达后一次性布局，条目仅在首次进入可视区域时短暂淡入上滑，不人为拖延数据、不逐条重排整个月历。减弱动态效果、打印和日历截图不会隐藏条目。本版本仍使用完整 JSON 快照及条件请求，不是网络流式或逐条增量协议。
 
+## 节目日历订阅（ICS）
+
+`GET /api/programs/calendar.ics` 提供可在日历应用中按 URL 订阅的 iCalendar 源。`/programs` 的“订阅日历”按钮会按当前筛选复制订阅链接；节目详情页的同名按钮复制该节目的链接。参数与播出日历页面的 URL 一致，多个值用逗号分隔或重复参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `cast` | 虹咲成员日文原名（也接受简体写法），匹配节目固定成员和单集嘉宾，并排除该期缺席成员 |
+| `category` | `official` / `personal` |
+| `delivery` | `live` / `recorded` / `event`，默认 `live,recorded`；`event` 为 Eventernote 线下活动，`none` 返回空日历 |
+| `program` | 节目 ID；主节目 ID 同时包含其子节目。指定后不加入 Eventernote 活动，没有虹咲成员的节目也会显示 |
+| `start` / `end` | 日期范围，`end` 不含当天；默认今天前后各 183 天，最长 366 天 |
+
+例如 `/api/programs/calendar.ics?cast=相良茉優,前田佳織里&delivery=live`。未知的成员、类型或播出方式返回 400。时间以 UTC 输出；节目没有时长数据，带时间的单集只有开始时间，未定时间的单集为全天事件。取消的单集带 `STATUS:CANCELLED`，改期单集在描述中注明原定时间。只含节目的订阅源复用上面的 ETag 缓存；包含 `event` 时每次请求 Eventernote，读取失败返回 502。
+
 ## 联动立绘档案
 
 `/collabo` 使用 SQLite 中的联动记录和图片元数据，管理员可在 `/admin/collabo` 编辑资料、角色标签、多个带标题/描述的开始—结束日期时间段、排序图片、设置封面、标记整条记录状态和上传本地图片。公开页支持按角色标签筛选，“全员”表示选中全部角色。应用启动时会从本地 `frontend/src/content/collaborationIllustrations.json` 与 `data/images/illustrations/manifest.json` 导入尚未入库的记录；容器部署可使用 `scripts/seed_collabo_database.py` 对数据卷执行同样的导入。原有 `/illustrations` 和 `/api/collaboration-illustrations` 保留兼容。图片文件仍保存在 Git 忽略的 `data/` / `/data` 下，不写入 SQLite；若需要在容器中启用本地图片，将该目录复制到数据卷的 `/data/images/illustrations/`，然后重启应用即可。采集脚本包括：

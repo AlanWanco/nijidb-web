@@ -160,6 +160,9 @@ class ProgramIcsTests(unittest.IsolatedAsyncioTestCase):
         everything = await self.summaries()
         self.assertEqual(len(everything), 5)
         self.assertEqual(await self.summaries("?cast=2"), ["official · 第1期 · 特集\\; A\\, B"])
+        # A name, its simplified alias, and its id are the same filter.
+        self.assertEqual(await self.summaries("?cast=相良茉優"), ["official · 第1期 · 特集\\; A\\, B"])
+        self.assertEqual(await self.summaries("?cast=相良茉优"), ["official · 第1期 · 特集\\; A\\, B"])
         # The member is absent from that episode, so only the subprogram with another member remains.
         self.assertEqual(await self.summaries("?cast=6"), [])
         self.assertEqual(await self.summaries("?cast=6,3"), ["personal · 番外 · 第1期"])

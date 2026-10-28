@@ -7747,12 +7747,18 @@ def query_list(request: Request, name: str) -> list[str]:
 
 
 def program_ics_filters(request: Request) -> dict[str, list[str]]:
-    """Parse cast ids, the category/delivery values used by /programs, and program IDs."""
+    """Parse cast ids or names, the category/delivery values used by /programs, and program IDs."""
     cast = set()
     for value in query_list(request, "cast"):
-        if not value.isdigit() or int(value) not in NIJIGASAKI_CAST_BY_ID:
-            raise HTTPException(400, f"未知的 Cast ID：{value}")
-        cast.add(int(value))
+        # Accept the stable id first, then fall back to a member name or its alias
+        # so subscriptions created before ids existed keep working.
+        if value.isdigit() and int(value) in NIJIGASAKI_CAST_BY_ID:
+            cast.add(int(value))
+            continue
+        cast_id = NIJIGASAKI_CAST_ID_BY_NAME.get(value)
+        if cast_id is None:
+            raise HTTPException(400, f"未知的 Cast：{value}")
+        cast.add(cast_id)
     categories = {value.lower() for value in query_list(request, "category")}
     if unknown := categories - PROGRAM_CATEGORIES:
         raise HTTPException(400, f"未知的节目类型：{'、'.join(sorted(unknown))}")

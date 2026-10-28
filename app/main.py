@@ -99,6 +99,8 @@ from app.program_api_cache import PublicProgramCache, database_revision
 
 SOURCE_URL = MUSIC_SOURCE_URL
 EVENTERNOTE_EVENTS_URL = "https://events.nijigaku.fans/api/events"
+# The upstream rejects ranges longer than 50 days, so callers must chunk.
+EVENTERNOTE_MAX_RANGE_DAYS = 50
 MAX_POLL_INTERVAL_MINUTES = 5 * 60
 MANUAL_SOURCE_MAX_BYTES = 8 * 1024 * 1024
 REMOTE_NEWS_INGEST_MAX_BYTES = 8 * 1024 * 1024
@@ -8018,6 +8020,11 @@ async def api_eventernote_events(from_date: str = "", to_date: str = "") -> dict
 
 
 async def fetch_eventernote_events(range_start: date, range_end: date) -> dict[str, Any]:
+    """Read the upstream in windows: it rejects a range longer than 50 days."""
+    items: list[Any] = []
+    seen: set[str] = set()
+    cached_at = None
+    window_days = EVENTERNOTE_MAX_RANGE_DAYS - 1
     try:
         async with httpx.AsyncClient(
             timeout=20,
@@ -8025,16 +8032,31 @@ async def fetch_eventernote_events(range_start: date, range_end: date) -> dict[s
             headers={"Accept": "application/json", "User-Agent": "nijidb-web/1.0"},
             trust_env=False,
         ) as client:
-            response = await client.get(EVENTERNOTE_EVENTS_URL, params={"from_date": range_start.isoformat(), "to_date": range_end.isoformat()})
-            if http_response_is_redirect(response):
-                raise ValueError("Eventernote 不应重定向到未验证的地址")
-            response.raise_for_status()
-            payload = response.json()
+            cursor = range_start
+            while cursor <= range_end:
+                window_end = min(cursor + timedelta(days=window_days), range_end)
+                response = await client.get(
+                    EVENTERNOTE_EVENTS_URL,
+                    params={"from_date": cursor.isoformat(), "to_date": window_end.isoformat()},
+                )
+                if http_response_is_redirect(response):
+                    raise ValueError("Eventernote 不应重定向到未验证的地址")
+                response.raise_for_status()
+                payload = response.json()
+                if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+                    raise ValueError("Eventernote 数据格式无效")
+                for item in payload["items"]:
+                    key = str(item.get("id") or item.get("eventernote_event_id") or "") if isinstance(item, dict) else ""
+                    if key and key in seen:
+                        continue
+                    if key:
+                        seen.add(key)
+                    items.append(item)
+                cached_at = cached_at or payload.get("cached_at")
+                cursor = window_end + timedelta(days=1)
     except (httpx.HTTPError, ValueError) as exc:
         raise HTTPException(502, "Eventernote 数据暂时无法读取") from exc
-    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
-        raise HTTPException(502, "Eventernote 数据格式无效")
-    return payload
+    return {"items": items, "cached_at": cached_at}
 
 
 @app.get("/api/programs/{program_id}/occurrences")

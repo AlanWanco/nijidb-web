@@ -3354,7 +3354,7 @@ footer {
   gap: 8px 12px;
 }
 
-.program-calendar-sticky-heading strong {
+.program-calendar-sticky-month strong {
   color: var(--ink);
   font-family: var(--display-font);
   font-size: clamp(20px, 1.4vw, 26px);

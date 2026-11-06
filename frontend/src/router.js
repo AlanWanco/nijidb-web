@@ -6,6 +6,7 @@ import { locale, t } from "./i18n";
 const appTitle = "Nijigasaki DB";
 const collaboPageTitle = "联动立绘";
 const collaboScrollPositions = new Map();
+const programFilterKeys = ["cast", "category", "delivery"];
 
 const router = createRouter({
   history: createWebHistory(),
@@ -79,6 +80,11 @@ const router = createRouter({
   scrollBehavior(to, from, savedPosition) {
     // Tag filters update the news query in place; keep the reader at the same vertical position.
     if (to.path === "/news" && from.path === "/news" && to.query.tags !== from.query.tags) return false;
+    // Program filters rewrite the query in place; keep the reader on the month they are viewing.
+    if (to.path === "/programs" && from.path === "/programs") {
+      const changed = Object.keys({ ...to.query, ...from.query }).filter((key) => to.query[key] !== from.query[key]);
+      if (changed.length && changed.every((key) => programFilterKeys.includes(key))) return false;
+    }
     if (to.path === "/collabo" && (from.path === "/collabo" || from.path.startsWith("/collabo/"))) {
       const key = from.path === "/collabo" ? from.fullPath : to.fullPath;
       const position = collaboScrollPositions.get(key);

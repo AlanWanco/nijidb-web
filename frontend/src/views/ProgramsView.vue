@@ -103,8 +103,50 @@ function sameValues(left, right) {
 
 const filters = reactive(filtersFromQuery(route.query));
 const today = new Date();
-const castFilterDetails = ref(null);
-const programCategoryFilterDetails = ref(null);
+const toolsRow = ref(null);
+const compactFilterSlot = ref(null);
+function moveFilterGroups(from, to) {
+  if (!from || !to) return;
+  [".program-filter-group", ".program-calendar-jump"].forEach((selector) => {
+    const group = from.querySelector(`:scope > ${selector}`);
+    if (group) to.appendChild(group);
+  });
+}
+const compactFiltersActive = ref(false);
+let toolsRowObserver = null;
+let toolsRowEntry = null;
+
+function applyCompactFilters() {
+  const wide = window.matchMedia("(min-width: 901px)").matches;
+  compactFiltersActive.value = Boolean(
+    wide && toolsRowEntry && !toolsRowEntry.isIntersecting && toolsRowEntry.boundingClientRect.bottom <= 82,
+  );
+}
+
+// The filters live inside the sticky header, so moving them changes its height and would
+// push the calendar under the pointer. Absorb that shift with an equal scroll adjustment.
+watch(compactFiltersActive, async (active) => {
+  const tools = toolsRow.value;
+  const slot = compactFilterSlot.value;
+  if (!tools || !slot) return;
+  const header = slot.closest(".program-calendar-sticky-header");
+  const before = header ? header.offsetHeight : 0;
+  if (active) {
+    tools.style.minHeight = `${tools.offsetHeight}px`;
+    moveFilterGroups(tools, slot);
+  } else {
+    moveFilterGroups(slot, tools);
+    tools.style.minHeight = "";
+  }
+  await nextTick();
+  const delta = (header ? header.offsetHeight : 0) - before;
+  if (delta) window.scrollBy(0, delta);
+});
+
+function updateCompactFilters(entries) {
+  toolsRowEntry = entries[entries.length - 1];
+  applyCompactFilters();
+}
 const adminAuthenticated = ref(false);
 const editAccessNotice = ref("");
 let calendarTouchStart = null;
@@ -556,14 +598,10 @@ function clearProgramCategoryFilter() {
   filters.category = [];
 }
 
-function closeCastFilter(event) {
-  if (!castFilterDetails.value?.open || castFilterDetails.value.contains(event.target)) return;
-  castFilterDetails.value.open = false;
-}
-
-function closeProgramCategoryFilter(event) {
-  if (!programCategoryFilterDetails.value?.open || programCategoryFilterDetails.value.contains(event.target)) return;
-  programCategoryFilterDetails.value.open = false;
+function closeFilterPanels(event) {
+  document.querySelectorAll(".program-cast-filter-details[open]").forEach((details) => {
+    if (!details.contains(event.target)) details.open = false;
+  });
 }
 
 function updateVisibleMonth(value) {
@@ -1227,12 +1265,17 @@ onMounted(() => {
   void loadScreenshotRenderer().catch(() => {
     screenshotRendererLoader = null;
   });
-  document.addEventListener("click", closeCastFilter);
-  document.addEventListener("click", closeProgramCategoryFilter);
+  document.addEventListener("click", closeFilterPanels);
+  toolsRowObserver = new IntersectionObserver(updateCompactFilters, {
+    rootMargin: "-82px 0px 0px 0px",
+  });
+  if (toolsRow.value) toolsRowObserver.observe(toolsRow.value);
+  window.addEventListener("resize", applyCompactFilters);
 });
 onUnmounted(() => {
-  document.removeEventListener("click", closeCastFilter);
-  document.removeEventListener("click", closeProgramCategoryFilter);
+  document.removeEventListener("click", closeFilterPanels);
+  toolsRowObserver?.disconnect();
+  window.removeEventListener("resize", applyCompactFilters);
   cancelPendingCalendarScroll();
   calendarLoadRequestId += 1;
   calendarAbortController?.abort();
@@ -1269,11 +1312,11 @@ onUnmounted(() => {
              </div>
            </div>
           </div>
-          <div class="program-calendar-tools">
+          <div ref="toolsRow" class="program-calendar-tools">
             <div class="program-filter-group">
               <div class="program-calendar-filter program-cast-filter">
                <span class="program-calendar-filter-label">{{ t("筛选") }}</span>
-                <details ref="castFilterDetails" class="program-cast-filter-details">
+                <details class="program-cast-filter-details">
                   <summary class="program-cast-filter-summary"><strong>{{ castFilterLabel }}</strong><b>⌄</b></summary>
                   <div class="program-cast-filter-panel">
                     <div class="program-cast-filter-actions">
@@ -1288,7 +1331,7 @@ onUnmounted(() => {
               </div>
               <div class="program-calendar-filter program-cast-filter program-category-filter">
                 <span class="program-calendar-filter-label">{{ t("节目类型") }}</span>
-                <details ref="programCategoryFilterDetails" class="program-cast-filter-details">
+                <details class="program-cast-filter-details">
                   <summary class="program-cast-filter-summary"><strong>{{ programCategoryFilterLabel }}</strong><b>⌄</b></summary>
                   <div class="program-cast-filter-panel">
                     <div class="program-cast-filter-actions">
@@ -1345,6 +1388,7 @@ onUnmounted(() => {
                 <button type="button" :aria-label="t('今天')" :title="t('今天')" @click="goToToday">{{ t("今天") }}</button>
                 <button type="button" :aria-label="t('下个月')" :title="t('下个月')" @click="nextMonth">→</button>
              </div>
+             <div v-show="compactFiltersActive" ref="compactFilterSlot" class="program-compact-filters" data-screenshot-control="true"></div>
              <div class="program-calendar-sticky-month">
                <button v-if="viewMode === 'calendar'" type="button" class="program-calendar-screenshot" :aria-label="t('截图')" :title="t('下载整张日历截图；右键复制到剪贴板')" :disabled="screenshotBusy || loading" data-screenshot-control @click="downloadCalendarScreenshot" @contextmenu.prevent="copyCalendarScreenshot"><span aria-hidden="true">▣</span><span>{{ t("截图") }}</span></button>
                <strong>{{ visibleMonthLabel }}</strong>

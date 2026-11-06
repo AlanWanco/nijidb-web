@@ -3349,8 +3349,9 @@ footer {
 .program-calendar-sticky-heading {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px 12px;
 }
 
 .program-calendar-sticky-heading strong {
@@ -3358,6 +3359,56 @@ footer {
   font-family: var(--display-font);
   font-size: clamp(20px, 1.4vw, 26px);
   letter-spacing: -.025em;
+}
+
+.program-compact-filters {
+  display: flex;
+  flex: 1 1 100%;
+  order: 3;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.program-compact-filters .program-filter-group,
+.program-compact-filters .program-calendar-jump {
+  flex: 0 1 auto;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 8px;
+}
+
+.program-compact-filters .program-calendar-jump {
+  justify-content: flex-start;
+}
+
+.program-compact-filters .program-calendar-filter {
+  min-width: 0;
+}
+
+.program-compact-filters .program-calendar-filter-label {
+  display: none;
+}
+
+.program-compact-filters .program-cast-filter {
+  min-width: 128px;
+  max-width: 176px;
+}
+
+.program-compact-filters .program-cast-filter-details {
+  position: relative;
+}
+
+.program-compact-filters .program-cast-filter-panel {
+  top: calc(100% + 6px);
+}
+
+@media (min-width: 1380px) {
+  .program-compact-filters {
+    flex: 1 1 auto;
+    order: 0;
+  }
 }
 
 .program-calendar-sticky-nav {

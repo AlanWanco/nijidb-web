@@ -7752,7 +7752,7 @@ def program_ics_filters(request: Request) -> dict[str, list[str]]:
     for value in query_list(request, "cast"):
         # Accept the stable id first, then fall back to a member name or its alias
         # so subscriptions created before ids existed keep working.
-        if value.isdigit() and int(value) in NIJIGASAKI_CAST_BY_ID:
+        if value.isascii() and value.isdecimal() and int(value) in NIJIGASAKI_CAST_BY_ID:
             cast.add(int(value))
             continue
         cast_id = NIJIGASAKI_CAST_ID_BY_NAME.get(value)

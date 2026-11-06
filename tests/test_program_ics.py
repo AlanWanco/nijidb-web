@@ -189,6 +189,8 @@ class ProgramIcsTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_parameters_are_rejected(self):
         for query in (
             "?cast=99",
+            # Superscript digits pass str.isdigit() but int() raises, so they must be rejected, not 500.
+            "?cast=%C2%B2",
             "?category=unknown",
             "?delivery=tv",
             "?start=2026-01-01&end=2027-02-01",

@@ -129,6 +129,22 @@ class MusicWorkerApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(row["price"], "4400円")
             self.assertTrue(notify.await_args.args[0][0]["_cover_changed"])
 
+    async def test_new_releases_sort_to_top_and_keep_delivery_order_within_a_date(self):
+        async def ingest(release_id, release_date):
+            payload = self.music_payload(release_id)
+            payload["release"].update(id=release_id, release_date=release_date)
+            with patch.object(main, "notify", new_callable=AsyncMock):
+                response = await self.post(payload)
+            self.assertEqual(response.status_code, 200, response.text)
+
+        await ingest("cd_old", "2026-01-10")
+        await ingest("cd_new_a", "2027-02-17")
+        await ingest("cd_new_b", "2027-02-17")
+        await ingest("cd_newer", "2027-05-01")
+        with main.db() as conn:
+            order = [row[0] for row in conn.execute("SELECT id FROM releases ORDER BY position")]
+        self.assertEqual(order, ["cd_newer", "cd_new_a", "cd_new_b", "cd_old"])
+
     async def test_duplicate_concurrent_imports_send_once(self):
         with patch.object(main, "notify", new_callable=AsyncMock) as notify:
             results = await asyncio.gather(self.post(), self.post())

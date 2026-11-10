@@ -6582,7 +6582,7 @@ def external_ingest_api_docs() -> dict[str, Any]:
                     {"name": "release.detail_html", "required": False, "description": "详情 HTML；前端显示时会再次清理。"},
                     {"name": "release.source_url", "required": False, "description": "来源页面 HTTP/HTTPS 地址。"},
                     {"name": "release.tracks / specs / extras", "required": False, "description": "曲目数组、规格对象和特典数组。"},
-                    {"name": "release.position", "required": False, "description": "可选排序值；省略时保留原值或追加到末尾。"},
+                    {"name": "release.position", "required": False, "description": "可选排序值；省略时保留原值，新发行排到最前。"},
                 ],
                 "example": {
                     "release": {
@@ -6618,7 +6618,7 @@ def external_ingest_api_docs() -> dict[str, Any]:
                     {"name": "release.detail_html", "required": False, "description": "详情 HTML，引用图片使用当前可访问的公开地址。"},
                     {"name": "release.source_url", "required": False, "description": "官网目录详情链接。"},
                     {"name": "release.tracks / specs / extras", "required": False, "description": "曲目数组、规格对象和特典数组。"},
-                    {"name": "release.position", "required": False, "description": "Worker 预留为 999999；服务端保留现有顺序或追加新发行。"},
+                    {"name": "release.position", "required": False, "description": "Worker 预留为 999999；服务端保留现有顺序，新发行排到最前。"},
                 ],
                 "example": {
                     "release": {
@@ -8280,6 +8280,25 @@ async def api_generate_external_api_key(resource: str, request: Request) -> JSON
     response.headers["Pragma"] = "no-cache"
     return response
 
+def new_release_position(conn: sqlite3.Connection, release_date: str) -> int:
+    """Return the sort position for a newly discovered release.
+
+    Releases are listed by ``position`` from newest to oldest. New rows go above
+    the existing list, but stay below rows that share the same release date so a
+    batch delivered in source order keeps that order.
+    """
+    rows = conn.execute("SELECT position, release_date FROM releases ORDER BY position").fetchall()
+    index = 0
+    while index < len(rows) and rows[index]["release_date"] == release_date:
+        index += 1
+    if index < len(rows):
+        position = rows[index]["position"]
+    else:
+        position = rows[-1]["position"] + 1 if rows else 0
+    conn.execute("UPDATE releases SET position = position + 1 WHERE position >= ?", (position,))
+    return position
+
+
 
 @app.post("/api/ingest/music", include_in_schema=False)
 async def api_remote_music_ingest(request: Request) -> dict[str, Any]:
@@ -8296,7 +8315,7 @@ async def api_remote_music_ingest(request: Request) -> dict[str, Any]:
                 if old:
                     record["position"] = old["position"]
                 else:
-                    record["position"] = conn.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM releases").fetchone()[0]
+                    record["position"] = new_release_position(conn, record["release_date"])
         changed_records = await store_records([record])
     created = old is None
     changed = created or bool(changed_records)
@@ -8404,8 +8423,9 @@ async def api_remote_music_worker_ingest(request: Request) -> dict[str, Any]:
             changed = previous is None or any(previous.get(key) != record[key] for key in (
                 "title", "subtitle", "artist", "release_date", "price", "cover_url",
                 "detail_html", "source_url", "tracks_json", "spec_json", "extras_json"))
-            record["position"] = previous["position"] if previous else conn.execute(
-                "SELECT COALESCE(MAX(position), -1) + 1 FROM releases").fetchone()[0]
+            record["position"] = (
+                previous["position"] if previous else new_release_position(conn, record["release_date"])
+            )
             if changed:
                 conn.execute("""INSERT INTO releases
                     (id,title,subtitle,artist,release_date,price,cover_url,detail_html,source_url,fingerprint,
